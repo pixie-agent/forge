@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "forge",
+  // 改名 v2:防止本仓库误部署覆盖线上 forge 生产 Worker;架构改稳定后可再定名
+  "name": "forge-v2",
   "main": "src/index.ts",
   "compatibility_date": "2025-05-05",
   // 静态资源:构建产物在 web/dist,未命中文件的请求(/api/*、/s/*、SPA 路由)进入 Worker
@@ -12,7 +13,8 @@
     {
       "binding": "DB",
       "database_name": "forge",
-      // 本地开发不需要真实 id;部署前执行 `wrangler d1 create forge` 并替换
+      // 注意:当前仍指向线上 forge 的 D1(v2 改架构期间共享数据便于对照);
+      // 若需要数据隔离:npx wrangler d1 create forge-v2 后替换此 id
       "database_id": "ee014248-414c-4789-a51c-0f8a133621ce"
     }
   ],
@@ -20,7 +22,7 @@
   // 取代原 waitUntil(免费版 waitUntil 约 2-4 分钟即被回收,撑不住 3~6 分钟的整页生成)
   "workflows": [
     {
-      "name": "forge-generation",
+      "name": "forge-v2-generation",
       "binding": "GENERATION",
       "class_name": "GenerationWorkflow"
     }
