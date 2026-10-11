@@ -1,0 +1,20 @@
+{
+  "name": "forge-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Forge 2.0 agent runtime: runs the pi coding agent inside Google Cloud Run, one job per request",
+  "scripts": {
+    "dev": "node --experimental-strip-types src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.66.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}

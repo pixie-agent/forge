@@ -3,3 +3,8 @@ web/dist/
 .wrangler/
 .dev.vars
 *.log
+
+# Cloud Run agent service
+agent/dist/
+agent/.env
+agent/.npm-cache/

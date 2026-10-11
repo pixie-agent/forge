@@ -1,9 +1,12 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Projects from './pages/Projects'
 import Workspace from './pages/Workspace'
+import AdminLogin from './pages/AdminLogin'
+import AdminProjects from './pages/AdminProjects'
+import AdminProject from './pages/AdminProject'
 import { api } from './lib/api'
 import type { User } from './lib/types'
 
@@ -64,6 +67,22 @@ export default function App() {
               </Guard>
             }
           />
+          <Route
+            path="/admin"
+            element={
+              <AdminGate>
+                <AdminProjects />
+              </AdminGate>
+            }
+          />
+          <Route
+            path="/admin/projects/:id"
+            element={
+              <AdminGate>
+                <AdminProject />
+              </AdminGate>
+            }
+          />
         </Routes>
       </BrowserRouter>
     </AuthCtx.Provider>
@@ -74,5 +93,22 @@ function Guard({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth()
   if (loading) return <div className="flex h-screen items-center justify-center text-sm text-gray-400">加载中…</div>
   if (!user) return <Navigate to="/login" replace />
+  return <>{children}</>
+}
+
+/** 管理后台门禁:用独立口令校验(/api/admin/me),未通过则显示口令登录 */
+function AdminGate({ children }: { children: ReactNode }) {
+  const [admin, setAdmin] = useState<boolean | null>(null)
+  const check = useCallback(() => {
+    api<{ admin: boolean }>('/api/admin/me')
+      .then((d) => setAdmin(d.admin))
+      .catch(() => setAdmin(false))
+  }, [])
+  useEffect(() => {
+    check()
+  }, [check])
+  if (admin === null)
+    return <div className="flex h-screen items-center justify-center bg-gray-950 text-sm text-gray-400">加载中…</div>
+  if (!admin) return <AdminLogin onSuccess={check} />
   return <>{children}</>
 }

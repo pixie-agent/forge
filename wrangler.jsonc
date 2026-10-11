@@ -9,25 +9,48 @@
     "directory": "./web/dist",
     "binding": "ASSETS"
   },
+  // 全新独立资源:本 Worker 用全新的 D1,不与线上 forge 共用任何数据
+  // 首次搭建:npx wrangler d1 create forge-v2  → 把输出的 database_id 填到下面
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "forge",
-      // 注意:当前仍指向线上 forge 的 D1(v2 改架构期间共享数据便于对照);
-      // 若需要数据隔离:npx wrangler d1 create forge-v2 后替换此 id
-      "database_id": "ee014248-414c-4789-a51c-0f8a133621ce"
+      "database_name": "forge-v2",
+      "database_id": "6fd724ad-b430-4d2b-9eae-6353c6dbde56"
     }
   ],
-  // 生成工作流:持久执行引擎,分段生成整页;实例中断后从最后一个完成的 step 自动恢复,
-  // 取代原 waitUntil(免费版 waitUntil 约 2-4 分钟即被回收,撑不住 3~6 分钟的整页生成)
-  "workflows": [
+  // 构建产物(dist):npx wrangler r2 bucket create forge-v2-artifacts
+  "r2_buckets": [
     {
-      "name": "forge-v2-generation",
-      "binding": "GENERATION",
-      "class_name": "GenerationWorkflow"
+      "binding": "ARTIFACTS",
+      "bucket_name": "forge-v2-artifacts"
     }
   ],
-  // cron 兜底巡检:实例已 errored/实例丢失但任务行仍活动的,判死并解锁项目
+  // 生成应用的后端键值存储:npx wrangler kv namespace create forge-v2-appdata → 把 id 填到下面
+  "kv_namespaces": [
+    {
+      "binding": "APPDATA",
+      "id": "f6b66c90bfa247c6a331bf7ef20e938b"
+    }
+  ],
+  // 每项目 × 每环境一个独立 SQLite 库(Durable Object,SQLite 后端):
+  //   - 生成应用的「文档」接口(db/:collection)改为落在该库的每个集合一张表上
+  //   - 迁移后的 D1 site_data 作为只读历史源,不再写入
+  //   - owner 在工作区「数据 → SQL」里可直接建表/建索引/查询
+  // 类名不可随意更名:new_sqlite_classes 迁移一经部署即固化
+  "durable_objects": {
+    "bindings": [{ "name": "PROJECT_DB", "class_name": "ProjectDb" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ProjectDb"] }
+  ],
+  // 非密钥变量;AGENT_SECRET 走 `wrangler secret put AGENT_SECRET`
+  // AGENT_URL:部署 agent/ 到 Cloud Run 后拿到的服务地址(本地开发在 .dev.vars 覆盖)
+  "vars": {
+    "AGENT_URL": "https://forge-agent-323709989821.us-central1.run.app",
+    "PUBLIC_BASE_URL": "https://forge-v2.needle.workers.dev"
+  },
+  // 交付不依赖长连接:agent 在 Cloud Run 跑,通过 /internal 回调写进度与最终结果;
+  // cron 每分钟按心跳巡检,执行体失联/超龄的任务判死解锁(见 docs/FORGE2.md)
   "triggers": {
     "crons": ["* * * * *"]
   }

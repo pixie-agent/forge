@@ -52,7 +52,7 @@ export default function Login() {
             <button
               key={m}
               onClick={() => setMode(m)}
-              className={`flex-1 rounded-md py-1.5 ${mode === m ? 'bg-gray-700 text-white' : 'text-gray-400'}`}
+              className={`flex-1 rounded-md py-1.5 ${mode === m ? 'bg-gray-700 text-gray-100' : 'text-gray-400'}`}
             >
               {m === 'login' ? '登录' : '注册'}
             </button>
@@ -83,7 +83,7 @@ export default function Login() {
           <button
             type="submit"
             disabled={busy}
-            className="w-full rounded-xl bg-indigo-600 py-2 text-sm font-medium hover:bg-indigo-500 disabled:opacity-40"
+            className="w-full rounded-xl bg-indigo-600 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
           >
             {busy ? '提交中…' : mode === 'login' ? '登录' : '注册(送 20 积分)'}
           </button>

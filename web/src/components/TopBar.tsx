@@ -1,6 +1,7 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../App'
 import { api } from '../lib/api'
+import ThemeToggle from './ThemeToggle'
 
 export default function TopBar() {
   const { user, setUser } = useAuth()
@@ -21,6 +22,7 @@ export default function TopBar() {
       <div className="flex items-center gap-4 text-sm text-gray-300">
         <span className="rounded-full bg-indigo-500/15 px-3 py-1 text-xs text-indigo-300">积分 {user?.credits ?? '-'}</span>
         <span className="hidden text-xs text-gray-500 sm:inline">{user?.email}</span>
+        <ThemeToggle />
         <button onClick={logout} className="text-xs text-gray-400 hover:text-gray-200">
           退出
         </button>
