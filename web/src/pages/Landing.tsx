@@ -35,7 +35,7 @@ export default function Landing() {
           Forge
         </div>
         {user ? (
-          <Link to="/projects" className="text-sm text-gray-300 hover:text-white">
+          <Link to="/projects" className="text-sm text-gray-300 hover:text-gray-100">
             进入工作台
           </Link>
         ) : (
@@ -67,7 +67,7 @@ export default function Landing() {
             <button
               onClick={() => start()}
               disabled={busy || !idea.trim()}
-              className="rounded-xl bg-indigo-600 px-5 py-2 text-sm font-medium hover:bg-indigo-500 disabled:opacity-40"
+              className="rounded-xl bg-indigo-600 px-5 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
             >
               {busy ? '创建中…' : '开始生成'}
             </button>

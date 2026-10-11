@@ -21,7 +21,7 @@ export async function insertMessage(
 }
 
 const SNAPSHOT_COLUMNS =
-  "id, user_id, type, status, stage, progress, html_preview, plan_json, error, result_version, started_at, json_extract(payload, '$.idea') AS idea"
+  "id, user_id, type, status, stage, progress, files_preview, agent_log, plan_json, error, result_version, started_at, json_extract(payload, '$.idea') AS idea, json_extract(payload, '$.message') AS chat_message"
 
 interface SnapshotRow {
   id: string
@@ -30,23 +30,36 @@ interface SnapshotRow {
   status: string
   stage: string
   progress: string | null
-  html_preview: string | null
+  files_preview: string | null
+  agent_log: string | null
   plan_json: string | null
   error: string | null
   result_version: number | null
   started_at: string | null
   idea: string | null
+  chat_message: string | null
 }
 
 function snapshotFromRow(row: SnapshotRow) {
+  let filesPreview: { path: string; content: string } | null = null
+  if (row.files_preview) {
+    try {
+      filesPreview = JSON.parse(row.files_preview) as { path: string; content: string }
+    } catch {
+      filesPreview = null
+    }
+  }
   return {
     id: row.id,
     type: row.type,
     status: row.status,
     stage: row.stage,
     progress: row.progress,
-    html_preview: row.html_preview,
+    files_preview: filesPreview,
+    agent_log: row.agent_log,
     idea: row.idea,
+    // 本次任务的输入文本(generate 取 idea、chat 取 message),重试时原样重发
+    prompt: row.idea ?? row.chat_message ?? null,
     plan: row.plan_json ? (JSON.parse(row.plan_json) as unknown) : null,
     error: row.error,
     version: row.result_version,
@@ -81,18 +94,20 @@ export async function activeJobSnapshot(db: D1Database, projectId: string, userI
   return row ? snapshotFromRow(row) : null
 }
 
-/** 项目最近一次失败但留有产物的任务快照(失败后续聊:继续对话即续跑该任务);无则返回 null */
-export async function resumableJobSnapshot(db: D1Database, projectId: string, userId: string) {
+/**
+ * 可续任务快照:项目最近一次任务若为失败,返回它(带着 error / 半成品 files_preview / 原始 idea),
+ * 供前端还原"未完成卡片 + 重试"与半成品预览;若最近任务已完成或仍在跑则返回 null。
+ */
+export async function lastFailedJobSnapshot(db: D1Database, projectId: string, userId: string) {
   const row = await db
     .prepare(
-      `SELECT ${SNAPSHOT_COLUMNS} FROM jobs
-       WHERE project_id = ? AND status = 'failed' AND sections_json IS NOT NULL
-         AND EXISTS (SELECT 1 FROM projects WHERE projects.id = jobs.project_id AND projects.user_id = ?)
-       ORDER BY created_at DESC LIMIT 1`
+      `SELECT ${SNAPSHOT_COLUMNS} FROM jobs WHERE project_id = ?
+       AND EXISTS (SELECT 1 FROM projects WHERE projects.id = jobs.project_id AND projects.user_id = ?)
+       ORDER BY updated_at DESC LIMIT 1`
     )
     .bind(projectId, userId)
     .first<SnapshotRow>()
-  return row ? snapshotFromRow(row) : null
+  return row && row.status === 'failed' ? snapshotFromRow(row) : null
 }
 
 export type JobSnapshot = NonNullable<Awaited<ReturnType<typeof jobSnapshot>>>

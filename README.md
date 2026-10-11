@@ -2,6 +2,8 @@
 
 基于 Cloudflare 的 AI 应用生成平台(atoms.dev 简化版):用户描述想法 → AI 两阶段「规划 → 编码」→ 生成真实可上线的单文件网站 → 一键发布 → 分享 `/s/<slug>` 公开链接。
 
+> **Forge 2.0(进行中)**:Agent 的实际 AI 交互(pi coding agent)已迁到 **Google Cloud Run Service**,执行完即销毁;Cloudflare 只保留编排、状态、发布与持久化。架构、决策与部署见 [docs/FORGE2.md](docs/FORGE2.md),Cloud Run 服务见 [agent/](agent/)。下文的「架构」描述的是迁移前(v1)的实现,仍作为 Cloudflare 侧各能力的说明。
+
 ## 功能
 
 - 落地页:价值主张 + 大输入框 + 示例想法

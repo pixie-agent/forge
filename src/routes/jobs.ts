@@ -16,7 +16,7 @@ app.get('/:id', async (c) => {
 
 /**
  * 任务进度订阅(SSE)。任务执行体在别的隔离实例里跑,这里只是把 D1 里的状态变化推给浏览器:
- * - 状态有变化才推送(status/stage/plan/version/error),空闲期每 15s 发一次心跳(携带最新 elapsed)
+ * - 状态有变化才推送(status/stage/plan/version/error),空闲期每 5s 发一次心跳(携带最新 elapsed,保证计时器在跑)
  * - 到达终态后发送最终快照并主动关闭;连接断开不影响后台任务
  * 客户端 EventSource onerror 时自动降级为轮询(见 api.ts subscribeJob)
  */
@@ -32,9 +32,18 @@ app.get('/:id/events', async (c) => {
       for (;;) {
         const snap = await jobSnapshot(c.env.DB, id, userId)
         if (!snap) break
-        const fp = JSON.stringify([snap.status, snap.stage, snap.plan, snap.error, snap.version])
+        // 用长度而非整串参与指纹:files_preview/agent_log 变化频繁,长度变化即触发一次推送
+        const fp = JSON.stringify([
+          snap.status,
+          snap.stage,
+          snap.plan,
+          snap.error,
+          snap.version,
+          snap.files_preview?.content.length ?? 0,
+          snap.agent_log?.length ?? 0,
+        ])
         const now = Date.now()
-        if (fp !== last || now - lastSentAt > 15_000) {
+        if (fp !== last || now - lastSentAt > 5_000) {
           last = fp
           lastSentAt = now
           await stream.writeSSE({ data: JSON.stringify(snap) })

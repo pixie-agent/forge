@@ -6,6 +6,8 @@ import type { Project } from '../lib/types'
 
 export default function Projects() {
   const [items, setItems] = useState<Project[] | null>(null)
+  const [busyId, setBusyId] = useState('')
+  const [copiedId, setCopiedId] = useState('')
   const nav = useNavigate()
 
   useEffect(() => {
@@ -14,10 +16,45 @@ export default function Projects() {
       .catch(() => setItems([]))
   }, [])
 
+  function patch(id: string, patch: Partial<Project>) {
+    setItems((list) => (list ?? []).map((p) => (p.id === id ? { ...p, ...patch } : p)))
+  }
+
   async function remove(id: string) {
     if (!confirm('删除后不可恢复,确定删除该项目?')) return
     await api(`/api/projects/${id}`, { method: 'DELETE' })
     setItems((list) => (list ?? []).filter((p) => p.id !== id))
+  }
+
+  async function unpublish(id: string) {
+    if (!confirm('下线后公开链接会立即失效(404),版本与数据保留,可随时重新发布。确定下线?')) return
+    setBusyId(id)
+    try {
+      await api(`/api/projects/${id}/unpublish`, { method: 'POST' })
+      patch(id, { status: 'draft' })
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  async function publish(id: string) {
+    setBusyId(id)
+    try {
+      await api(`/api/projects/${id}/publish`, { method: 'POST' })
+      patch(id, { status: 'published' })
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  async function copyLink(p: Project) {
+    try {
+      await navigator.clipboard.writeText(`${location.origin}/s/${p.slug}`)
+    } catch {
+      // 剪贴板不可用时忽略
+    }
+    setCopiedId(p.id)
+    setTimeout(() => setCopiedId(''), 1600)
   }
 
   return (
@@ -28,7 +65,7 @@ export default function Projects() {
           <h1 className="text-xl font-semibold">我的项目</h1>
           <button
             onClick={() => nav('/')}
-            className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium hover:bg-indigo-500"
+            className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
           >
             新建项目
           </button>
@@ -56,19 +93,63 @@ export default function Projects() {
                 </div>
                 <p className="mb-4 line-clamp-2 min-h-8 flex-1 text-sm text-gray-500">{p.description || '暂无描述'}</p>
                 <div className="mb-3 flex items-center justify-between text-xs text-gray-600">
-                  <span>v{p.current_version}</span>
+                  <span>
+                    {p.current_version > 0 ? `v${p.current_version}` : p.has_draft ? '草稿(未生成版本)' : '尚未生成'}
+                  </span>
                   <span>{p.updated_at.slice(0, 16).replace('T', ' ')}</span>
                 </div>
+
+                {p.status === 'published' ? (
+                  <div className="mb-3 flex items-center gap-1.5">
+                    <a
+                      href={`/s/${p.slug}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="min-w-0 flex-1 truncate rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-1.5 text-xs text-emerald-400 hover:bg-emerald-500/10"
+                      title={`/s/${p.slug}`}
+                    >
+                      🔗 /s/{p.slug}
+                    </a>
+                    <button
+                      onClick={() => copyLink(p)}
+                      className="shrink-0 rounded-lg border border-gray-700 px-2.5 py-1.5 text-xs text-gray-300 hover:bg-gray-800"
+                    >
+                      {copiedId === p.id ? '已复制 ✓' : '复制'}
+                    </button>
+                    <button
+                      onClick={() => unpublish(p.id)}
+                      disabled={busyId === p.id}
+                      className="shrink-0 rounded-lg border border-amber-500/40 px-2.5 py-1.5 text-xs text-amber-400 hover:bg-amber-500/10 disabled:opacity-40"
+                    >
+                      {busyId === p.id ? '…' : '下线'}
+                    </button>
+                  </div>
+                ) : p.current_version > 0 ? (
+                  <div className="mb-3">
+                    <button
+                      onClick={() => publish(p.id)}
+                      disabled={busyId === p.id}
+                      className="rounded-lg border border-emerald-500/40 px-2.5 py-1.5 text-xs text-emerald-400 hover:bg-emerald-500/10 disabled:opacity-40"
+                    >
+                      {busyId === p.id ? '发布中…' : '发布上线'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mb-3 text-xs text-gray-600">
+                    {p.has_draft ? '有草稿未生成版本,打开后可生成版本并发布' : '尚未生成,打开后描述想法即可创建'}
+                  </div>
+                )}
+
                 <div className="flex gap-2">
                   <button
                     onClick={() => nav(`/workspace/${p.id}`)}
-                    className="flex-1 rounded-xl bg-indigo-600 py-1.5 text-sm hover:bg-indigo-500"
+                    className="flex-1 rounded-xl bg-indigo-600 py-1.5 text-sm font-medium text-white hover:bg-indigo-500"
                   >
                     打开
                   </button>
                   <button
                     onClick={() => remove(p.id)}
-                    className="rounded-xl border border-gray-700 px-3 py-1.5 text-sm text-gray-400 hover:border-red-500/50 hover:text-red-400"
+                    className="rounded-xl border border-gray-700 px-3 py-1.5 text-sm text-gray-300 hover:border-red-500/50 hover:text-red-400"
                   >
                     删除
                   </button>

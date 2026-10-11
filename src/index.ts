@@ -4,8 +4,13 @@ import { authRoutes } from './routes/auth'
 import { projectRoutes } from './routes/projects'
 import { generateRoutes } from './routes/generate'
 import { jobRoutes } from './routes/jobs'
-import { siteRoutes } from './routes/site'
+import { internalRoutes } from './routes/internal'
+import { adminRoutes } from './routes/admin'
+import { serveRoutes } from './routes/serve'
 import { sweepJobs } from './lib/jobs'
+
+// Durable Object(每项目 × 每环境的 SQLite 库)必须从入口模块导出
+export { ProjectDb } from './lib/projectDb'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -13,33 +18,16 @@ app.route('/api/auth', authRoutes)
 app.route('/api/projects', projectRoutes)
 app.route('/api/projects', generateRoutes)
 app.route('/api/jobs', jobRoutes)
-app.route('/api/site', siteRoutes)
+// 管理后台(只读,独立口令鉴权):跨用户查看产物
+app.route('/api/admin', adminRoutes)
+// 内部回调:Cloud Run agent 上报进度(X-Agent-Secret 保护,不对外)
+app.route('/internal', internalRoutes)
+// 生成应用的对外服务:发布页 /s/:slug/*、草稿预览 /p/:token/*(含各自的 /api 后端)
+app.route('/', serveRoutes)
 
-/** 公开发布页:/s/:slug,从 D1 读当前版本 HTML;CSP sandbox 使其运行在 opaque origin,无法读取主站凭证 */
-app.get('/s/:slug', async (c) => {
-  const row = await c.env.DB
-    .prepare(
-      `SELECT v.html FROM projects p
-       JOIN versions v ON v.project_id = p.id AND v.version_no = p.current_version
-       WHERE p.slug = ? AND p.status = 'published'`
-    )
-    .bind(c.req.param('slug'))
-    .first<{ html: string }>()
-  if (!row) return c.text('404 Not Found', 404)
-  // 页面里的 __FORGE_API__ 是站点数据接口占位符;/live 环境段:发布后页面读写线上数据,与编辑器预览的草稿数据隔离
-  const html = row.html.split('__FORGE_API__').join(`/api/site/${c.req.param('slug')}/live`)
-  return new Response(html, {
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Content-Security-Policy': 'sandbox allow-scripts allow-forms allow-popups',
-      'X-Content-Type-Options': 'nosniff',
-    },
-  })
-})
-
-/** 其余路径交给前端 SPA(assets 已直接命中静态文件,这里兜底 index.html);未命中的 /api/* 返回 JSON 404 */
+/** 其余路径交给前端 SPA(assets 已直接命中静态文件,这里兜底);未命中的 /api/* 返回 JSON 404 */
 app.get('*', async (c) => {
-  if (c.req.path.startsWith('/api/')) return c.json({ error: '接口不存在' }, 404)
+  if (c.req.path.startsWith('/api/') || c.req.path.startsWith('/internal/')) return c.json({ error: '接口不存在' }, 404)
   return c.env.ASSETS.fetch(new Request(new URL('/', c.req.url)))
 })
 
@@ -50,11 +38,8 @@ app.onError((err, c) => {
 
 export default {
   fetch: app.fetch,
-  // cron 每分钟巡检:实例已 errored/丢失但任务行仍活动的判死解锁,防止项目被 409 锁死
+  // cron 每分钟巡检:执行体(Cloud Run)心跳停摆或任务超龄则判死解锁,防止项目被 409 锁死
   scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => {
     ctx.waitUntil(sweepJobs(env))
   },
 }
-
-// Workflows 入口类必须从主模块导出
-export { GenerationWorkflow } from './workflow'

@@ -1,1 +1,50 @@
 @import "tailwindcss";
+
+/*
+ * 主题:默认暗色,可在亮色间切换(html[data-theme="light"])。
+ * 组件里统一使用 Tailwind 的 gray 色阶表达语义(页面底/面板/边框/文字),这里通过覆盖
+ * Tailwind v4 的颜色变量实现整站换肤 —— 反向映射 gray 色阶(深底↔浅底、浅字↔深字),
+ * 无需改动任何组件类名。强调色则把亮色下偏浅的 200~400 色阶映射到更深的 600~700,保证在浅底上的可读性。
+ */
+html {
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+
+  /* gray 色阶反向映射:950↔50 … 500 不变 … 100↔900 */
+  --color-gray-950: oklch(98.5% 0.002 247.839);
+  --color-gray-900: oklch(96.7% 0.003 264.542);
+  --color-gray-800: oklch(92.8% 0.006 264.531);
+  --color-gray-700: oklch(87.2% 0.01 258.338);
+  /* 500/600 是"次要/弱化"文字的关键档位:亮色下若照搬镜像会偏浅看不清,这里压深以保证可读性(仍保持 500 比 600 更重) */
+  --color-gray-600: oklch(54% 0.022 261.325);
+  --color-gray-500: oklch(46% 0.027 264.364);
+  --color-gray-400: oklch(42% 0.03 256.802);
+  --color-gray-300: oklch(37.3% 0.034 259.733);
+  --color-gray-200: oklch(27.8% 0.033 256.848);
+  --color-gray-100: oklch(21% 0.034 264.665);
+  --color-gray-50: oklch(13% 0.028 261.692);
+
+  /* 强调色:浅底上偏浅的前景色阶 → 更深的对应色阶 */
+  --color-indigo-200: oklch(45.7% 0.24 277.023);
+  --color-indigo-300: oklch(45.7% 0.24 277.023);
+  --color-indigo-400: oklch(51.1% 0.262 276.966);
+  --color-emerald-300: oklch(50.8% 0.118 165.612);
+  --color-emerald-400: oklch(59.6% 0.145 163.225);
+  --color-red-200: oklch(50.5% 0.213 27.518);
+  --color-red-300: oklch(50.5% 0.213 27.518);
+  --color-red-400: oklch(57.7% 0.245 27.325);
+  --color-amber-300: oklch(55.5% 0.163 48.998);
+  --color-amber-400: oklch(66.6% 0.179 58.318);
+  --color-sky-300: oklch(50% 0.134 242.749);
+  --color-orange-300: oklch(55.3% 0.173 39.5);
+  --color-fuchsia-400: oklch(59.1% 0.293 322.896);
+}
+
+/* 页面底色/文字跟随主题(用于滚动越界区域,组件内部另有各自的底色) */
+body {
+  background-color: var(--color-gray-950);
+  color: var(--color-gray-100);
+}
