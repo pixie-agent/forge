@@ -163,9 +163,59 @@ export interface AdminProject {
   current_version: number
   created_at: string
   updated_at: string
+  user_id: string
   owner_email: string
   versions_count: number
   messages_count: number
+  data_count: number
+}
+
+/** 全站统计(后台列表页头部) */
+export interface AdminStats {
+  projects: number
+  users: number
+  versions: number
+  jobs: number
+  jobs_succeeded: number
+  jobs_failed: number
+  jobs_7d: number
+  active_users_7d: number
+}
+
+/** 用户使用情况(服务端聚合,后台用户列表/详情) */
+export interface AdminUser {
+  id: string
+  email: string
+  credits: number
+  created_at: string
+  projects_count: number
+  versions_count: number
+  messages_count: number
+  jobs_total: number
+  jobs_generate: number
+  jobs_chat: number
+  jobs_succeeded: number
+  jobs_failed: number
+  jobs_7d: number
+  jobs_30d: number
+  bytes_total: number
+  /** 最近活跃:最后一次任务时间;无任务时回退注册时间 */
+  last_active_at: string
+}
+
+/** 用户详情页里的项目行:项目指标 + 构建产物字节 + 数据行数 */
+export interface AdminUserProject {
+  id: string
+  slug: string
+  name: string
+  status: 'draft' | 'published'
+  current_version: number
+  published_version: number
+  created_at: string
+  updated_at: string
+  versions_count: number
+  messages_count: number
+  bytes: number
   data_count: number
 }
 
@@ -199,6 +249,9 @@ export interface AdminJob {
   agent_log: string | null
   created_at: string
   updated_at: string
+  /** 用户详情页的任务时间线附带所属项目(项目详情页的任务不含) */
+  project_slug?: string
+  project_name?: string
 }
 
 export interface AdminProjectDetail {
@@ -207,4 +260,11 @@ export interface AdminProjectDetail {
   messages: Message[]
   jobs: AdminJob[]
   collections: SiteCollection[]
+}
+
+/** 用户详情:用量聚合 + 该用户的项目 + 最近任务时间线 */
+export interface AdminUserDetail {
+  user: AdminUser
+  projects: AdminUserProject[]
+  jobs: AdminJob[]
 }

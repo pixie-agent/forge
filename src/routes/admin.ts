@@ -1,6 +1,7 @@
 /**
  * 管理后台(只读):跨用户查看全部产物 —— 项目列表、每个项目的全部版本 HTML、对话记录、
- * 任务(含 agent 流式日志)、站点数据,以及公开链接。
+ * 任务(含 agent 流式日志)、站点数据,以及公开链接。并可按用户聚合查看使用情况
+ * (项目/版本/对话/任务数、积分、活跃度、产物体量)。
  * 鉴权与普通用户体系隔离,见 lib/admin.ts(`ADMIN_PASSWORD` 口令 + 派生 cookie)。
  */
 
@@ -12,6 +13,43 @@ import { signPreviewToken } from '../lib/artifacts'
 import { callProjectDb, projectSchema, runProjectSql, seedProjectDocs, type SeedRow } from '../lib/projectDb'
 
 const app = new Hono<{ Bindings: Env }>()
+
+/**
+ * 单个用户使用情况的聚合列(SELECT 片段,供列表/详情复用)。
+ * 关联子查询而非 JOIN + GROUP BY:jobs/messages/versions 各行数独立,避免多表 JOIN 造成笛卡尔放大。
+ * 任务量以 jobs 表为准(generate/chat、成功/失败),近 7/30 天按 jobs.created_at 过滤;
+ * 已消耗积分 ≈ 成功任务数(每次成功 commit 扣 1,见 lib/commit.ts)。
+ */
+const USER_USAGE_COLUMNS = `
+  (SELECT COUNT(*) FROM projects p WHERE p.user_id = u.id) AS projects_count,
+  (SELECT COUNT(*) FROM versions v JOIN projects p ON p.id = v.project_id
+     WHERE p.user_id = u.id AND v.version_no > 0) AS versions_count,
+  (SELECT COUNT(*) FROM messages m JOIN projects p ON p.id = m.project_id
+     WHERE p.user_id = u.id) AS messages_count,
+  (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id) AS jobs_total,
+  (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id AND j.type = 'generate') AS jobs_generate,
+  (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id AND j.type = 'chat') AS jobs_chat,
+  (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id AND j.status = 'succeeded') AS jobs_succeeded,
+  (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id AND j.status = 'failed') AS jobs_failed,
+  (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id AND j.created_at >= datetime('now','-7 days')) AS jobs_7d,
+  (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id AND j.created_at >= datetime('now','-30 days')) AS jobs_30d,
+  (SELECT COALESCE(SUM(v.bytes),0) FROM versions v JOIN projects p ON p.id = v.project_id
+     WHERE p.user_id = u.id AND v.version_no > 0) AS bytes_total,
+  COALESCE((SELECT MAX(j.created_at) FROM jobs j WHERE j.user_id = u.id), u.created_at) AS last_active_at`
+
+/** 项目在两个环境(draft/live)下的数据行数之和:逐环境读该项目的独立 SQLite,库未创建按 0 */
+async function countProjectData(env: Env, projectId: string): Promise<number> {
+  let count = 0
+  for (const envName of ['draft', 'live'] as const) {
+    try {
+      const { body } = await callProjectDb<{ collections: { count: number }[] }>(env, projectId, envName, 'db.collections')
+      count += (body.collections ?? []).reduce((s, col) => s + (col.count ?? 0), 0)
+    } catch {
+      // 该环境的库可能从未创建;计 0
+    }
+  }
+  return count
+}
 
 // ---------- 会话:登录 / 登出 / 身份(不挂 requireAdmin) ----------
 
@@ -35,17 +73,35 @@ app.get('/me', async (c) => c.json({ admin: await isAdmin(c.env, c.req.raw) }))
 
 app.use('/projects', requireAdmin)
 app.use('/projects/*', requireAdmin)
+app.use('/users', requireAdmin)
+app.use('/users/*', requireAdmin)
 
-/** 顶层统计:给列表页头部用 */
+/** 顶层统计:给列表页头部用(产物 + 用户 + 任务全局计数) */
 app.get('/stats', requireAdmin, async (c) => {
   const row = await c.env.DB
     .prepare(
       `SELECT (SELECT COUNT(*) FROM projects) AS projects,
               (SELECT COUNT(*) FROM users) AS users,
-              (SELECT COUNT(*) FROM versions WHERE version_no > 0) AS versions`
+              (SELECT COUNT(*) FROM versions WHERE version_no > 0) AS versions,
+              (SELECT COUNT(*) FROM jobs) AS jobs,
+              (SELECT COUNT(*) FROM jobs WHERE status = 'succeeded') AS jobs_succeeded,
+              (SELECT COUNT(*) FROM jobs WHERE status = 'failed') AS jobs_failed,
+              (SELECT COUNT(*) FROM jobs WHERE created_at >= datetime('now','-7 days')) AS jobs_7d,
+              (SELECT COUNT(DISTINCT user_id) FROM jobs WHERE created_at >= datetime('now','-7 days')) AS active_users_7d`
     )
-    .first<{ projects: number; users: number; versions: number }>()
-  return c.json({ stats: row ?? { projects: 0, users: 0, versions: 0 } })
+    .first<{
+      projects: number
+      users: number
+      versions: number
+      jobs: number
+      jobs_succeeded: number
+      jobs_failed: number
+      jobs_7d: number
+      active_users_7d: number
+    }>()
+  return c.json({
+    stats: row ?? { projects: 0, users: 0, versions: 0, jobs: 0, jobs_succeeded: 0, jobs_failed: 0, jobs_7d: 0, active_users_7d: 0 },
+  })
 })
 
 /** 产物列表:跨用户,带属主/版本数/消息数/数据条数,支持关键字与分页 */
@@ -62,7 +118,7 @@ app.get('/projects', async (c) => {
   const { results } = await c.env.DB
     .prepare(
       `SELECT p.id, p.slug, p.name, p.description, p.status, p.current_version, p.created_at, p.updated_at,
-              u.email AS owner_email,
+              u.id AS user_id, u.email AS owner_email,
               (SELECT COUNT(*) FROM versions v WHERE v.project_id = p.id AND v.version_no > 0) AS versions_count,
               (SELECT COUNT(*) FROM messages m WHERE m.project_id = p.id) AS messages_count
        FROM projects p JOIN users u ON u.id = p.user_id
@@ -77,16 +133,7 @@ app.get('/projects', async (c) => {
   const rows = results as unknown as Record<string, unknown>[]
   await Promise.all(
     rows.map(async (p) => {
-      let count = 0
-      for (const env of ['draft', 'live'] as const) {
-        try {
-          const { body } = await callProjectDb<{ collections: { count: number }[] }>(c.env, String(p.id), env, 'db.collections')
-          count += (body.collections ?? []).reduce((s, col) => s + (col.count ?? 0), 0)
-        } catch {
-          // 该环境的库可能从未创建;计 0
-        }
-      }
-      p.data_count = count
+      p.data_count = await countProjectData(c.env, String(p.id))
     })
   )
 
@@ -96,6 +143,74 @@ app.get('/projects', async (c) => {
     .first<{ n: number }>()
 
   return c.json({ projects: results, total: total?.n ?? 0, page, limit })
+})
+
+/** 用户使用情况(跨用户列表):每行一个注册用户 + 其用量聚合,支持邮箱搜索与分页 */
+app.get('/users', async (c) => {
+  const q = (c.req.query('q') ?? '').trim()
+  const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1)
+  const limit = Math.min(50, Math.max(1, Number(c.req.query('limit') ?? 20) || 20))
+  const offset = (page - 1) * limit
+  const like = `%${q}%`
+  const where = q ? 'WHERE u.email LIKE ?' : ''
+  const binds = q ? [like] : []
+
+  const { results } = await c.env.DB
+    .prepare(
+      `SELECT u.id, u.email, u.credits, u.created_at, ${USER_USAGE_COLUMNS}
+       FROM users u
+       ${where}
+       ORDER BY last_active_at DESC
+       LIMIT ? OFFSET ?`
+    )
+    .bind(...binds, limit, offset)
+    .all()
+
+  const total = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users u ${where}`).bind(...binds).first<{ n: number }>()
+  return c.json({ users: results, total: total?.n ?? 0, page, limit })
+})
+
+/** 单个用户详情:用量聚合 + 该用户的项目(含产物字节/数据行数)+ 最近任务时间线 */
+app.get('/users/:id', async (c) => {
+  const id = c.req.param('id')
+  const user = await c.env.DB
+    .prepare(`SELECT u.id, u.email, u.credits, u.created_at, ${USER_USAGE_COLUMNS} FROM users u WHERE u.id = ?`)
+    .bind(id)
+    .first()
+  if (!user) return c.json({ error: '用户不存在' }, 404)
+
+  const [projectsRes, jobsRes] = await Promise.all([
+    c.env.DB
+      .prepare(
+        `SELECT p.id, p.slug, p.name, p.status, p.current_version, p.published_version, p.created_at, p.updated_at,
+                (SELECT COUNT(*) FROM versions v WHERE v.project_id = p.id AND v.version_no > 0) AS versions_count,
+                (SELECT COUNT(*) FROM messages m WHERE m.project_id = p.id) AS messages_count,
+                (SELECT COALESCE(SUM(v.bytes),0) FROM versions v WHERE v.project_id = p.id AND v.version_no > 0) AS bytes
+         FROM projects p WHERE p.user_id = ? ORDER BY p.updated_at DESC`
+      )
+      .bind(id)
+      .all(),
+    c.env.DB
+      .prepare(
+        `SELECT j.id, j.type, j.status, j.stage, j.progress, j.error, j.result_version,
+                substr(COALESCE(j.agent_log, ''), -8000) AS agent_log, j.created_at, j.updated_at,
+                p.slug AS project_slug, p.name AS project_name
+         FROM jobs j JOIN projects p ON p.id = j.project_id
+         WHERE j.user_id = ? ORDER BY j.created_at DESC LIMIT 100`
+      )
+      .bind(id)
+      .all(),
+  ])
+
+  // 数据行数需逐项目读 Durable Object,仅在该用户的项目集上计算(按用户维度,量可控)
+  const projects = projectsRes.results as unknown as Record<string, unknown>[]
+  await Promise.all(
+    projects.map(async (p) => {
+      p.data_count = await countProjectData(c.env, String(p.id))
+    })
+  )
+
+  return c.json({ user, projects, jobs: jobsRes.results })
 })
 
 /** 单个产物详情:项目 + 属主 + 版本元信息 + 对话 + 任务(含 agent 日志尾部)+ 站点数据计数 */

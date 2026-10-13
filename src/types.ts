@@ -15,6 +15,10 @@ export type Env = {
   PUBLIC_BASE_URL: string
   /** 管理后台独立口令(`wrangler secret put ADMIN_PASSWORD`);未设置则后台不可用 */
   ADMIN_PASSWORD: string
+  /** Google OAuth 2.0 客户端 ID(Worker secret `GOOGLE_CLIENT_ID`);未设置则不提供 Google 登录 */
+  GOOGLE_CLIENT_ID?: string
+  /** Google OAuth 2.0 客户端密钥(Worker secret `GOOGLE_CLIENT_SECRET`);与上面成对配置 */
+  GOOGLE_CLIENT_SECRET?: string
   /** 可选:派发到 Cloud Run 的 fetch 超时(毫秒) */
   AGENT_DISPATCH_TIMEOUT_MS?: string
 }
@@ -34,6 +38,8 @@ export interface UserRow {
   id: string
   email: string
   password_hash: string
+  /** Google OIDC sub;邮箱/密码账号未绑定时为 null */
+  google_sub: string | null
   credits: number
   created_at: string
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import CodeEditor from './CodeEditor'
 import DataPanel from './DataPanel'
+import { formatShortTime as formatTime } from '../lib/format'
 import type { ArtifactManifest, Project, VersionMeta } from '../lib/types'
 
 interface Props {
@@ -36,11 +37,6 @@ interface Props {
   onPublish: (version: number) => void
   /** 下线:撤回公开发布页(公开链接随即 404) */
   onUnpublish: () => void
-}
-
-/** 版本时间戳 "2026-10-10 09:37:26" → "10-10 09:37"(下拉里节省空间) */
-function formatTime(s: string): string {
-  return s ? s.slice(5, 16).replace('T', ' ') : ''
 }
 
 export default function PreviewPane({

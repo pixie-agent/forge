@@ -7,6 +7,8 @@ import Workspace from './pages/Workspace'
 import AdminLogin from './pages/AdminLogin'
 import AdminProjects from './pages/AdminProjects'
 import AdminProject from './pages/AdminProject'
+import AdminUsers from './pages/AdminUsers'
+import AdminUser from './pages/AdminUser'
 import { api } from './lib/api'
 import type { User } from './lib/types'
 
@@ -80,6 +82,22 @@ export default function App() {
             element={
               <AdminGate>
                 <AdminProject />
+              </AdminGate>
+            }
+          />
+          <Route
+            path="/admin/users"
+            element={
+              <AdminGate>
+                <AdminUsers />
+              </AdminGate>
+            }
+          />
+          <Route
+            path="/admin/users/:id"
+            element={
+              <AdminGate>
+                <AdminUser />
               </AdminGate>
             }
           />

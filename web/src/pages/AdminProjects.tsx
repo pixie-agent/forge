@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import AdminBar from '../components/AdminBar'
 import { api } from '../lib/api'
-import type { AdminProject } from '../lib/types'
+import { formatTime } from '../lib/format'
+import type { AdminProject, AdminStats } from '../lib/types'
 
 const LIMIT = 20
 
@@ -15,7 +16,7 @@ export default function AdminProjects() {
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [stats, setStats] = useState<{ projects: number; users: number; versions: number } | null>(null)
+  const [stats, setStats] = useState<AdminStats | null>(null)
   const nav = useNavigate()
 
   const load = useCallback(async () => {
@@ -39,7 +40,7 @@ export default function AdminProjects() {
   }, [load])
 
   useEffect(() => {
-    api<{ stats: { projects: number; users: number; versions: number } }>('/api/admin/stats')
+    api<{ stats: AdminStats }>('/api/admin/stats')
       .then((d) => setStats(d.stats))
       .catch(() => {})
   }, [])
@@ -55,7 +56,10 @@ export default function AdminProjects() {
             <h1 className="text-xl font-semibold">产物列表</h1>
             {stats && (
               <p className="mt-1 text-xs text-gray-500">
-                共 {stats.projects} 个项目 · {stats.users} 个用户 · {stats.versions} 个版本
+                共 {stats.projects} 个项目 · {stats.users} 个用户 · {stats.versions} 个版本 · 近 7 天活跃 {stats.active_users_7d} ·{' '}
+                <Link to="/admin/users" className="text-indigo-400 hover:text-indigo-300">
+                  查看用户使用情况 →
+                </Link>
               </p>
             )}
           </div>
@@ -107,7 +111,15 @@ export default function AdminProjects() {
                       <div className="font-medium text-gray-100">{p.name || '未命名项目'}</div>
                       <div className="font-mono text-xs text-gray-600">{p.slug}</div>
                     </td>
-                    <td className="px-4 py-2.5 text-gray-400">{p.owner_email}</td>
+                    <td className="px-4 py-2.5">
+                      <Link
+                        to={`/admin/users/${p.user_id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-gray-400 hover:text-indigo-300"
+                      >
+                        {p.owner_email}
+                      </Link>
+                    </td>
                     <td className="px-4 py-2.5">
                       <span
                         className={`rounded-full px-2 py-0.5 text-xs ${
@@ -131,7 +143,7 @@ export default function AdminProjects() {
                         /s/{p.slug}
                       </a>
                     </td>
-                    <td className="px-4 py-2.5 text-xs text-gray-600">{p.updated_at.slice(0, 16).replace('T', ' ')}</td>
+                    <td className="px-4 py-2.5 text-xs text-gray-600">{formatTime(p.updated_at)}</td>
                   </tr>
                 ))}
               </tbody>

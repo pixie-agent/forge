@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import AdminBar from '../components/AdminBar'
 import { api } from '../lib/api'
+import { formatTime } from '../lib/format'
 import type { AdminProjectDetail, AdminVersionDetail, SiteDataItem } from '../lib/types'
 
 type Tab = 'versions' | 'chat' | 'jobs' | 'data'
@@ -122,7 +123,7 @@ export default function AdminProject() {
                 <span>属主:{project.owner_email}</span>
                 <span>项目 ID:{project.id.slice(0, 8)}</span>
                 <span>当前版本:v{project.current_version}</span>
-                <span>更新:{project.updated_at.slice(0, 16).replace('T', ' ')}</span>
+                <span>更新:{formatTime(project.updated_at)}</span>
               </div>
               <div className="mt-1 text-xs text-gray-600">
                 公开链接:<span className="font-mono">{location.origin}/s/{project.slug}</span>
@@ -165,7 +166,7 @@ export default function AdminProject() {
                         <span className="font-medium">v{v.version_no}</span>
                         <span className="text-xs text-gray-600">{(v.bytes / 1024).toFixed(1)} KB</span>
                       </div>
-                      <div className="truncate text-xs text-gray-600">{v.created_at.slice(0, 16).replace('T', ' ')}</div>
+                      <div className="truncate text-xs text-gray-600">{formatTime(v.created_at)}</div>
                     </button>
                   ))}
                 </div>
@@ -250,7 +251,7 @@ export default function AdminProject() {
                         m.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-200'
                       }`}
                     >
-                      <div className="mb-1 text-xs opacity-60">{m.role === 'user' ? '用户' : '助手'} · {m.created_at.slice(0, 16).replace('T', ' ')}</div>
+                      <div className="mb-1 text-xs opacity-60">{m.role === 'user' ? '用户' : '助手'} · {formatTime(m.created_at)}</div>
                       <div className="whitespace-pre-wrap break-words">{m.content}</div>
                     </div>
                   </div>
@@ -272,7 +273,7 @@ export default function AdminProject() {
                       }`}>{j.status}</span>
                       <span className="ml-2 text-xs text-gray-500">{j.stage} · {j.progress ?? ''}</span>
                       {j.result_version && <span className="ml-2 text-xs text-gray-500">→ v{j.result_version}</span>}
-                      <span className="ml-2 text-xs text-gray-600">{j.created_at.slice(0, 16).replace('T', ' ')}</span>
+                      <span className="ml-2 text-xs text-gray-600">{formatTime(j.created_at)}</span>
                     </summary>
                     {j.error && <div className="mt-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{j.error}</div>}
                     {j.agent_log && (
@@ -329,7 +330,7 @@ export default function AdminProject() {
                       ) : (
                         rows.map((r) => (
                           <div key={r.id} className="rounded-xl border border-gray-800 bg-gray-950 p-3 text-xs">
-                            <div className="mb-1 text-gray-600">{r.created_at}</div>
+                            <div className="mb-1 text-gray-600">{formatTime(r.created_at)}</div>
                             <pre className="overflow-auto whitespace-pre-wrap break-all font-mono leading-5 text-gray-300">
                               {JSON.stringify(r.data, null, 2)}
                             </pre>
