@@ -1,7 +1,11 @@
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE,
+  -- 邮箱/密码登录的 PBKDF2 摘要;Google 登录创建的账号无密码,此处存空串 ''
+  -- (verifyPassword 对空串直接判否),以兼容历史上 password_hash 的 NOT NULL 约束
   password_hash TEXT NOT NULL,
+  -- Google OIDC 的 sub(唯一账号标识);邮箱/密码注册的用户为 NULL,首次用 Google 登录时回填
+  google_sub    TEXT,
   credits       INTEGER NOT NULL DEFAULT 20,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -89,6 +93,8 @@ CREATE INDEX IF NOT EXISTS idx_versions_project ON versions(project_id);
 CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user    ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_site_data_lookup ON site_data(project_id, collection, created_at);
+-- google_sub 唯一(允许多个 NULL:邮箱/密码账号未绑定 Google),防止同一 Google 账号绑定到两个用户
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub);
 
 CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_jobs_user    ON jobs(user_id, status);

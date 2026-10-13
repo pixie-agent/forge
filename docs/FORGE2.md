@@ -119,11 +119,16 @@ npm run db:init:remote
 # 3) 逐个配置 secrets(vars 已在 wrangler.jsonc,不在 secrets 里)
 npx wrangler secret put AGENT_SECRET     # 与 Cloud Run 侧同名同值
 #    AGENT_URL / PUBLIC_BASE_URL 是明文地址,写在 wrangler.jsonc 的 vars 里
+# 4) 可选:启用 Google 登录(见下方说明)
+# npx wrangler secret put GOOGLE_CLIENT_ID
+# npx wrangler secret put GOOGLE_CLIENT_SECRET
 npm run deploy                            # 构建前端 + 部署 Worker(名:forge-v2)
 ```
 
 > `wrangler.jsonc` 里 `database_id` 现在是占位符 `REPLACE_WITH_FORGE_V2_D1_ID`,**必须先 `d1 create` 再替换**,否则部署报错——这是刻意的,防止误用旧库。
 > Worker 名 `forge-v2` 为全新命名,不会覆盖线上 `forge`(v2 已不再注册 Workflow)。
+
+**Google 登录(可选,与邮箱/密码登录共存)**:在 Google Cloud Console →「API 和服务 → 凭据」创建「OAuth 客户端 ID(Web 应用)」,「已获授权的重定向 URI」填 `${PUBLIC_BASE_URL}/api/auth/google/callback`(本地为 `http://localhost:8787/api/auth/google/callback`),再把客户端 ID/密钥存为 Worker secrets:`npx wrangler secret put GOOGLE_CLIENT_ID`、`npx wrangler secret put GOOGLE_CLIENT_SECRET`——两者缺一即不启用,登录页只保留邮箱/密码。老库需执行一次 `schema.migrate-google.sql`(`npm run db:migrate:google:remote`)新增 `users.google_sub`;全新安装的 `schema.sql` 已含。流程:前端「使用 Google 登录」→ `GET /api/auth/google`(state 随机数存 HttpOnly cookie 防 CSRF,`idea` 随 state 透传)→ Google 授权页 → `GET /api/auth/google/callback` 用 code 换 `id_token`,按 `sub` 找账号;找不到再按邮箱命中**同一账号**并回填 `google_sub`(邮箱/密码账号与 Google 合并,历史数据与积分保留),都没有才新建(无密码,`password_hash` 存空串)。
 
 ### 9.2 Google Cloud(新 Cloud Run 服务)
 
@@ -220,11 +225,14 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 | 镜像 | `us-central1-docker.pkg.dev/sixth-impulse-286413/cloud-run-source-deploy/forge-agent` |
 | 规格 | 1 vCPU / 1GiB,`--timeout=1800 --concurrency=1 --min-instances=0` |
 | Secrets | `llm-api-key` → `LLM_API_KEY`;`agent-secret` → `AGENT_SECRET`(Secret Manager,经 `--set-secrets` 注入) |
+| Worker Secrets | `AGENT_SECRET`;可选 `ADMIN_PASSWORD`(后台口令)、`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`(Google 登录,缺一即不启用) |
 | R2 | `forge-v2-artifacts`(绑定 `ARTIFACTS`):构建产物 `p/{projectId}/v/{versionNo}/*` 与生成应用上传对象 |
 | KV | `forge-v2-appdata`(绑定 `APPDATA`):生成应用键值存储,键 `p:{projectId}:{env}:{key}` |
 | Durable Object | `PROJECT_DB`(类 `ProjectDb`):生成应用的文档数据 + owner SQL 控制台,每项目 × 每环境一个独立 SQLite 实例,名 `${projectId}:${env}` |
 
 > 多文件产物引入后需额外两步:**(1)** `npx wrangler kv namespace create forge-v2-appdata` 并把返回的 id 填进 `wrangler.jsonc` 的 `APPDATA.id`(当前是占位符,不填无法部署);**(2)** 对已存在的 v2 库执行一次 `schema.migrate-multifile.sql`(重建 `versions`/`jobs`,不保留旧单文件产物与任务历史)。全新安装直接 `schema.sql` 即可。之后 `npm run deploy` 部署 Worker;Cloud Run 侧因 Dockerfile 现在会预装 `template/` 依赖,需重新 `gcloud run deploy` 一次。
+
+> 启用 Google 登录另需一步:对已存在的 v2 库执行一次 `schema.migrate-google.sql`(`npm run db:migrate:google:remote`),新增 `users.google_sub` 及其唯一索引;不启用可跳过(登录页自动隐藏 Google 按钮)。
 
 **已启用的 API**:`run` / `cloudbuild` / `artifactregistry` / `compute` / `secretmanager`。
 
@@ -236,8 +244,9 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 跨用户查看全部产物的后台,与普通用户体系**完全隔离**:口令来自 `ADMIN_PASSWORD` secret,`POST /api/admin/login` 校验后下发由口令派生的 HttpOnly cookie(`lib/admin.ts`,改口令即全体失效,无需会话表)。
 
-- 页面:`/admin`(产物列表:属主、状态、版本/对话/数据计数、公开链接,支持关键字搜索与分页,含全站统计);`/admin/projects/:id`(详情:全部版本源码 + iframe 预览 + 公开链接、对话记录、任务与 **agent 流式日志**尾部、站点数据)。「数据计数」= 该项目两个环境 SQLite 各表行数之和,实时统计(页大小上限 20 以控制子请求)。
-- 接口(除 login/logout/me 外全部 `requireAdmin` 只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection}`;`POST /api/admin/{login,logout,migrate-doc-data}`。数据行取自项目该环境的独立 SQLite 库(§15)。
+- 页面:`/admin`(产物列表:属主、状态、版本/对话/数据计数、公开链接,支持关键字搜索与分页,含全站统计);`/admin/projects/:id`(详情:全部版本源码 + iframe 预览 + 公开链接、对话记录、任务与 **agent 流式日志**尾部、站点数据);`/admin/users`(用户使用情况列表,按邮箱搜索、分页);`/admin/users/:id`(单个用户详情)。「数据计数」= 该项目两个环境 SQLite 各表行数之和,实时统计(页大小上限 20 以控制子请求)。顶栏在「产物 / 用户」间切换,产物列表的属主邮箱、用户详情的项目行互链。
+- **用户使用情况**(`/admin/users`、`/admin/users/:id`):每个注册用户一行,聚合「核心用量」(项目数、正式版本数、对话消息数、任务数(生成/对话、成功/失败))、「积分」(余额 credits;已消耗 ≈ 成功任务数,每次成功 commit 扣 1)、「活跃度」(注册时间、最近活跃 = 最后一次任务时间、近 7/30 天任务数)、「产物体量」(构建产物总字节 = 各正式版本 `bytes` 之和;数据行数按项目读两个环境的独立 SQLite 求和,仅在用户详情页按该用户的项目集计算以控制子请求)。聚合走 `users` 上的关联子查询,任务量以 `jobs` 表为准。
+- 接口(除 login/logout/me 外全部 `requireAdmin` 只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`;`POST /api/admin/{login,logout,migrate-doc-data}`。数据行取自项目该环境的独立 SQLite 库(§15)。`stats` 除项目/用户/版本外,含任务总数、成功/失败数、近 7 天任务数与近 7 天活跃用户数。
 - 配置:`npx wrangler secret put ADMIN_PASSWORD`(未设置则后台整体不可用)。
 
 ## 13. 产物形态与选型(多文件 / 全栈)

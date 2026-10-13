@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import { formatFullTime } from '../lib/format'
 import type { BlobObjectMeta, KvKeyMeta, SiteDataEnv, SqlObject, SqlResult } from '../lib/types'
 
 /**
@@ -413,7 +414,7 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
               </div>
             </div>
             <div className="mb-2 text-xs text-gray-600">
-              {formatBytes(selectedMeta.size)} · {selectedMeta.uploaded.slice(0, 19).replace('T', ' ')}
+              {formatBytes(selectedMeta.size)} · {formatFullTime(selectedMeta.uploaded)}
             </div>
             {IMAGE_EXT.has(extOf(selected)) ? (
               <div className="rounded-xl border border-gray-800 bg-gray-950 p-3">

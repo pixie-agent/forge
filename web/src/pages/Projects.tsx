@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import TopBar from '../components/TopBar'
 import { api } from '../lib/api'
+import { formatTime } from '../lib/format'
 import type { Project } from '../lib/types'
 
 export default function Projects() {
@@ -96,7 +97,7 @@ export default function Projects() {
                   <span>
                     {p.current_version > 0 ? `v${p.current_version}` : p.has_draft ? '草稿(未生成版本)' : '尚未生成'}
                   </span>
-                  <span>{p.updated_at.slice(0, 16).replace('T', ' ')}</span>
+                  <span>{formatTime(p.updated_at)}</span>
                 </div>
 
                 {p.status === 'published' ? (
