@@ -48,3 +48,16 @@ body {
   background-color: var(--color-gray-950);
   color: var(--color-gray-100);
 }
+
+/*
+ * 移动端:表单控件字号兜底到 16px。
+ * iOS Safari 在聚焦 font-size < 16px 的输入框时会自动放大整页,聊天输入/登录/搜索框都会被“顶”一下;
+ * 这里仅在窄屏强制控件字号,桌面端不受影响(代码正文用 <pre>,不在此列)。
+ */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}

@@ -37,6 +37,8 @@ interface Props {
   onPublish: (version: number) => void
   /** 下线:撤回公开发布页(公开链接随即 404) */
   onUnpublish: () => void
+  /** 移动端是否隐藏(工作台用顶部标签在对话/预览间切换;桌面端始终显示) */
+  mobileHidden?: boolean
 }
 
 export default function PreviewPane({
@@ -58,6 +60,7 @@ export default function PreviewPane({
   switchingVersion,
   onPublish,
   onUnpublish,
+  mobileHidden,
 }: Props) {
   const [tab, setTab] = useState<'preview' | 'code' | 'data'>('preview')
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
@@ -109,9 +112,9 @@ export default function PreviewPane({
   }
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col bg-gray-900">
-      <div className="flex h-12 shrink-0 items-center justify-between border-b border-gray-800 px-3">
-        <div className="flex gap-1">
+    <section className={`${mobileHidden ? 'hidden md:flex' : 'flex'} min-w-0 flex-1 flex-col bg-gray-900`}>
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1.5 border-b border-gray-800 px-3 py-2 md:h-12 md:flex-nowrap md:py-0">
+        <div className="flex shrink-0 gap-1">
           {(['preview', 'code', 'data'] as const).map((t) => (
             <button
               key={t}
@@ -124,10 +127,10 @@ export default function PreviewPane({
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {(versions.length > 1 || hasDraft) && (
             <div className="flex items-center gap-1.5">
-              <span className="text-xs text-gray-500">查看版本</span>
+              <span className="hidden text-xs text-gray-500 sm:inline">查看版本</span>
               <select
                 value={viewVersion}
                 onChange={(e) => onSelectVersion(Number(e.target.value))}
@@ -198,7 +201,7 @@ export default function PreviewPane({
               ?
             </button>
             {showHelp && (
-              <div className="absolute right-0 top-9 z-40 w-80 rounded-xl border border-gray-700 bg-gray-900 p-3 text-xs leading-relaxed text-gray-400 shadow-xl">
+              <div className="absolute right-0 top-9 z-40 w-80 max-w-[calc(100vw-1.5rem)] rounded-xl border border-gray-700 bg-gray-900 p-3 text-xs leading-relaxed text-gray-400 shadow-xl">
                 <p className="mb-2 font-medium text-gray-100">版本与交付说明</p>
                 <ul className="list-disc space-y-1.5 pl-4">
                   <li>「预览」标签里看到的是<b>测试环境</b>:即草稿内容,与线上公开页是两套环境、数据互不影响;页面左下角带「测试环境」角标,方便区分。</li>
@@ -242,7 +245,7 @@ export default function PreviewPane({
           )}
         </span>
 
-        <span className="h-3.5 w-px bg-gray-700" />
+        <span className="hidden h-3.5 w-px bg-gray-700 sm:block" />
 
         {published ? (
           <span className="flex items-center gap-1.5 text-emerald-300">
@@ -297,7 +300,7 @@ export default function PreviewPane({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto p-4">
+      <div className="min-h-0 flex-1 overflow-auto p-2 md:p-4">
         {tab === 'data' ? (
           project ? (
             <DataPanel projectId={project.id} />
@@ -311,7 +314,7 @@ export default function PreviewPane({
             exportHref={project && viewVersion > 0 ? `/api/projects/${project.id}/versions/${viewVersion}/export` : undefined}
           />
         ) : (
-          <div className={`mx-auto h-full ${device === 'mobile' ? 'w-[390px]' : 'w-full'}`}>
+          <div className={`mx-auto h-full ${device === 'mobile' ? 'w-full max-w-[390px]' : 'w-full'}`}>
             {previewUrl ? (
               <iframe
                 title="preview"

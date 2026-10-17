@@ -12,7 +12,7 @@ export default function AdminBar({ subtitle }: { subtitle?: string }) {
     `rounded-lg px-3 py-1.5 text-sm ${isActive ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:text-gray-200'}`
 
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between border-b border-gray-800 bg-gray-950 px-4">
+    <header className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b border-gray-800 bg-gray-950 px-3 py-2 sm:px-4 sm:py-0">
       <div className="flex min-w-0 items-center gap-3">
         <Link to="/admin" className="shrink-0 font-semibold">
           Forge 管理后台
@@ -25,9 +25,9 @@ export default function AdminBar({ subtitle }: { subtitle?: string }) {
             用户
           </NavLink>
         </nav>
-        {subtitle && <span className="truncate text-sm text-gray-500">{subtitle}</span>}
+        {subtitle && <span className="hidden truncate text-sm text-gray-500 sm:inline">{subtitle}</span>}
       </div>
-      <div className="flex shrink-0 items-center gap-3 text-sm">
+      <div className="flex shrink-0 items-center gap-2 text-sm sm:gap-3">
         <ThemeToggle />
         <Link to="/" className="text-gray-400 hover:text-gray-200">
           返回应用

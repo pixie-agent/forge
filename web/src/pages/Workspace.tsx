@@ -40,6 +40,8 @@ export default function Workspace() {
   // 最近一次失败的任务(本次会话内失败,或刷新后从服务端还原):用于渲染"未完成卡片 + 重试"
   const [failedJob, setFailedJob] = useState<JobSnapshot | null>(null)
   const started = useRef(false)
+  // 移动端:用顶部标签在「对话 / 预览」间切换(桌面端始终左右分栏,该状态不生效)
+  const [mobileTab, setMobileTab] = useState<'chat' | 'preview'>('chat')
 
   const streaming = !!job && (job.status === 'pending' || job.status === 'running')
   const runningAction = job?.type ?? null
@@ -324,7 +326,7 @@ export default function Workspace() {
       : undefined
 
   return (
-    <div className="flex h-screen flex-col bg-gray-950 text-gray-100">
+    <div className="flex h-dvh flex-col bg-gray-950 text-gray-100">
       <TopBar />
       {notice && (
         <div
@@ -335,8 +337,24 @@ export default function Workspace() {
           {notice}
         </div>
       )}
+      {/* 移动端:对话 / 预览 切换标签(桌面端隐藏,两块并排显示) */}
+      <div className="flex shrink-0 border-b border-gray-800 bg-gray-950 md:hidden">
+        {(['chat', 'preview'] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setMobileTab(t)}
+            className={`flex flex-1 items-center justify-center gap-1.5 py-2.5 text-sm font-medium ${
+              mobileTab === t ? 'border-b-2 border-indigo-500 text-gray-100' : 'text-gray-400'
+            }`}
+          >
+            {t === 'chat' ? '对话' : '预览'}
+            {t === 'chat' && streaming && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-400" />}
+          </button>
+        ))}
+      </div>
       <div className="flex min-h-0 flex-1">
         <ChatPanel
+          mobileHidden={mobileTab !== 'chat'}
           messages={messages}
           plan={plan}
           streaming={streaming}
@@ -350,6 +368,7 @@ export default function Workspace() {
           onRetry={failedJob && !streaming ? retry : undefined}
         />
         <PreviewPane
+          mobileHidden={mobileTab !== 'preview'}
           previewToken={previewToken}
           manifest={manifest}
           src={src}

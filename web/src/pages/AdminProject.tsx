@@ -88,7 +88,7 @@ export default function AdminProject() {
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
       <AdminBar subtitle={project ? `${project.name || '未命名'} · ${project.slug}` : undefined} />
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
+      <main className="mx-auto w-full max-w-6xl flex-1 px-3 py-5 sm:px-4 sm:py-6">
         {error && <div className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</div>}
         {!detail || !project ? (
           <p className="text-sm text-gray-500">加载中…</p>
@@ -132,7 +132,7 @@ export default function AdminProject() {
             </div>
 
             {/* 标签 */}
-            <div className="mb-4 flex gap-1">
+            <div className="mb-4 flex flex-wrap gap-1">
               {(
                 [
                   ['versions', `版本 (${detail.versions.length})`],
@@ -152,8 +152,8 @@ export default function AdminProject() {
             </div>
 
             {tab === 'versions' && (
-              <div className="flex gap-4">
-                <div className="w-56 shrink-0 space-y-1">
+              <div className="flex flex-col gap-4 md:flex-row">
+                <div className="w-full shrink-0 space-y-1 md:w-56">
                   {detail.versions.map((v) => (
                     <button
                       key={v.version_no}
@@ -201,8 +201,8 @@ export default function AdminProject() {
                         </div>
                       </div>
                       {showSource ? (
-                        <div className="flex gap-3">
-                          <div className="w-56 shrink-0 max-h-[70vh] overflow-auto rounded-xl border border-gray-800 bg-gray-900 p-1">
+                        <div className="flex flex-col gap-3 md:flex-row">
+                          <div className="max-h-40 w-full shrink-0 overflow-auto rounded-xl border border-gray-800 bg-gray-900 p-1 md:max-h-[70vh] md:w-56">
                             {Object.keys(versionSrc).length === 0 && <p className="px-3 py-2 text-xs text-gray-600">无源码</p>}
                             {Object.keys(versionSrc)
                               .sort()
@@ -307,8 +307,8 @@ export default function AdminProject() {
                 {envCollections.length === 0 ? (
                   <div className="rounded-xl border border-dashed border-gray-700 p-8 text-center text-sm text-gray-500">该环境下暂无数据</div>
                 ) : (
-                  <div className="flex gap-4">
-                    <div className="w-48 shrink-0 space-y-1">
+                  <div className="flex flex-col gap-4 md:flex-row">
+                    <div className="w-full shrink-0 space-y-1 md:w-48">
                       {envCollections.map((col) => (
                         <button
                           key={`${col.env}/${col.collection}`}

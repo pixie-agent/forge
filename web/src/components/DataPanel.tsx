@@ -34,7 +34,7 @@ export default function DataPanel({ projectId }: { projectId: string }) {
       : hint
 
   return (
-    <div className="mx-auto max-w-3xl p-4">
+    <div className="mx-auto max-w-3xl p-0 md:p-4">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div className="flex rounded-lg border border-gray-700 p-0.5 text-xs">
           {ENVS.map((e) => (
@@ -163,8 +163,8 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
   if (loading) return <div className="text-sm text-gray-500">加载中…</div>
 
   return (
-    <div className="flex gap-4">
-      <div className="w-48 shrink-0 space-y-1">
+    <div className="flex flex-col gap-4 md:flex-row">
+      <div className="max-h-56 w-full shrink-0 space-y-1 overflow-auto md:max-h-none md:w-48">
         <button
           onClick={startCreate}
           className="mb-1 w-full rounded-lg border border-dashed border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:border-gray-600 hover:text-gray-200"
@@ -357,8 +357,8 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
   const selectedMeta = objects.find((o) => o.key === selected)
 
   return (
-    <div className="flex gap-4">
-      <div className="w-48 shrink-0 space-y-1">
+    <div className="flex flex-col gap-4 md:flex-row">
+      <div className="max-h-56 w-full shrink-0 space-y-1 overflow-auto md:max-h-none md:w-48">
         <label
           className={`mb-1 block w-full cursor-pointer rounded-lg border border-dashed border-gray-700 px-3 py-1.5 text-center text-xs hover:border-gray-600 ${
             uploading ? 'text-gray-600' : 'text-gray-400 hover:text-gray-200'
@@ -839,8 +839,8 @@ function SqlView({ projectId, env }: { projectId: string; env: SiteDataEnv }) {
   const others = objects.filter((o) => o.type !== 'table')
 
   return (
-    <div className="flex gap-4">
-      <div className="w-48 shrink-0 space-y-1">
+    <div className="flex flex-col gap-4 md:flex-row">
+      <div className="max-h-56 w-full shrink-0 space-y-1 overflow-auto md:max-h-none md:w-48">
         <div className="mb-1 flex items-center justify-between px-1">
           <span className="text-xs text-gray-500">库结构</span>
           <button onClick={loadSchema} className="text-xs text-gray-500 hover:text-gray-300">
