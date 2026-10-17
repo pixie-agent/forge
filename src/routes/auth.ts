@@ -135,7 +135,11 @@ function googleFail(c: Context<AppEnv>, message: string) {
 
 /** 登录页据此决定是否显示「使用 Google 登录」(未配置客户端时不显示,避免点了拿到 400) */
 app.get('/config', (c) => {
-  return c.json({ google: Boolean(c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET) })
+  return c.json({
+    google: Boolean(c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET),
+    // 平台部署环境:仅 staging 设了 ENVIRONMENT,生产回落 production(前端据此决定是否显示角标)
+    environment: c.env.ENVIRONMENT ?? 'production',
+  })
 })
 
 app.get('/google', async (c) => {

@@ -21,6 +21,10 @@ export type Env = {
   GOOGLE_CLIENT_SECRET?: string
   /** 可选:派发到 Cloud Run 的 fetch 超时(毫秒) */
   AGENT_DISPATCH_TIMEOUT_MS?: string
+  /** 可选:平台部署环境标记。只有 staging 的 vars 里设成 'staging',生产不设(按 production 处理);
+   *  前端据此显示环境角标,避免在错误的域名上做测试。生产与 staging 共用同一份 web/dist,
+   *  所以环境名只能这样运行时下发,不能用构建期变量 */
+  ENVIRONMENT?: string
 }
 
 export interface SessionUser {

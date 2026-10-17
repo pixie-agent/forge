@@ -53,5 +53,49 @@
   // cron 每分钟按心跳巡检,执行体失联/超龄的任务判死解锁(见 docs/FORGE2.md)
   "triggers": {
     "crons": ["* * * * *"]
+  },
+
+  // ─────────────────────────── STAGING(与生产完全隔离)───────────────────────────
+  // 部署:`npm run deploy:staging` → Worker 名 forge-v2-staging(官方规则:环境 Worker = <顶层名>-<环境名>)
+  // 顶层配置是生产,一字未动;不带 --env 的 deploy 仍然只部署 forge-v2。
+  //
+  // 为什么这里要把绑定全部再写一遍:wrangler 规定绑定类配置(vars / d1_databases /
+  // kv_namespaces / r2_buckets / durable_objects / secrets)不可继承,必须在每个环境里显式声明。
+  // 漏声明不会在部署时报错,而是运行时 c.env.XXX 为 undefined(例如漏 PROJECT_DB 会让
+  // 生成应用的 /db 接口和数据面板 500)。main / compatibility_date / assets / migrations /
+  // triggers 是可继承的,故意不重复,以免两边漂移。
+  "env": {
+    "staging": {
+      "name": "forge-v2-staging",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "forge-v2-staging",
+          "database_id": "da94e0ba-7f9c-48ce-96ca-3160975bf8da"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "ARTIFACTS",
+          "bucket_name": "forge-v2-artifacts-staging"
+        }
+      ],
+      "kv_namespaces": [
+        {
+          "binding": "APPDATA",
+          "id": "67e46b44ce224ff9a4ea2af583dead21"
+        }
+      ],
+      // 类名与顶层一致(ProjectDb);环境 = 独立 Worker,DO namespace 天然独立,不会读到生产数据
+      "durable_objects": {
+        "bindings": [{ "name": "PROJECT_DB", "class_name": "ProjectDb" }]
+      },
+      "vars": {
+        "AGENT_URL": "https://forge-agent-staging-323709989821.us-central1.run.app",
+        "PUBLIC_BASE_URL": "https://forge-v2-staging.needle.workers.dev",
+        // 仅 staging 设置;生产不设 → 前端按 production 处理(不显示环境角标)
+        "ENVIRONMENT": "staging"
+      }
+    }
   }
 }
