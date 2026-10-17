@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../App'
 import { api } from '../lib/api'
+import EnvBadge from '../components/EnvBadge'
 
 const EXAMPLES = ['精品咖啡店官网', '个人作品集', 'SaaS 产品落地页', '家常菜谱分享站', '宠物寄养服务', '婚礼策划工作室']
 
@@ -30,9 +31,12 @@ export default function Landing() {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
       <header className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
-        <div className="flex items-center gap-2 font-semibold">
-          <span className="h-2.5 w-2.5 rounded-sm bg-gradient-to-br from-indigo-400 to-fuchsia-500" />
-          Forge
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 font-semibold">
+            <span className="h-2.5 w-2.5 rounded-sm bg-gradient-to-br from-indigo-400 to-fuchsia-500" />
+            Forge
+          </div>
+          <EnvBadge />
         </div>
         {user ? (
           <Link to="/projects" className="text-sm text-gray-300 hover:text-gray-100">

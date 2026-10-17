@@ -1,4 +1,5 @@
 import { Link, NavLink } from 'react-router-dom'
+import EnvBadge from './EnvBadge'
 import ThemeToggle from './ThemeToggle'
 
 /** 管理后台顶栏:标题 + 产物/用户导航 + 退出 */
@@ -17,6 +18,7 @@ export default function AdminBar({ subtitle }: { subtitle?: string }) {
         <Link to="/admin" className="shrink-0 font-semibold">
           Forge 管理后台
         </Link>
+        <EnvBadge />
         <nav className="flex shrink-0 items-center gap-1">
           <NavLink to="/admin" end className={navClass}>
             产物

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../App'
+import EnvBadge from '../components/EnvBadge'
 import { api } from '../lib/api'
 import type { User } from '../lib/types'
 
@@ -61,6 +62,7 @@ export default function Login() {
         <div className="mb-6 flex items-center gap-2 font-semibold">
           <span className="h-2.5 w-2.5 rounded-sm bg-gradient-to-br from-indigo-400 to-fuchsia-500" />
           Forge
+          <EnvBadge />
         </div>
 
         <div className="mb-4 flex rounded-lg border border-gray-700 p-0.5 text-sm">

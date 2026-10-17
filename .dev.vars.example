@@ -37,3 +37,10 @@ ADMIN_PASSWORD=dev-admin-password
 # R2(ARTIFACTS)与 KV(APPDATA)绑定在 wrangler.jsonc;本地由 wrangler 自动模拟,无需在此配置。
 # 线上首次搭建:npx wrangler r2 bucket create forge-v2-artifacts
 #              npx wrangler kv namespace create forge-v2-appdata → 把 id 填进 wrangler.jsonc
+
+# ── STAGING 环境(见 docs/FORGE2.md 的 STAGING 章节)──
+# 远端资源不复用本地文件:staging 的 Worker secrets 用
+#   npx wrangler secret put AGENT_SECRET --env staging     (其余同名同理)
+# 只有当你要用 `wrangler dev --env staging` 在本地连 staging 的绑定调试时,才需要 .dev.vars.staging。
+# 注意:该文件一旦存在就会**完全替代** .dev.vars(不会合并回落),所以必须写全量键值。
+# ENVIRONMENT=staging

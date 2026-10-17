@@ -68,7 +68,9 @@ Cloud Run 请求级计费(便宜、用完即缩)要求**请求在跑时 CPU 才�
 ## 5. Agent 形态(pi coding agent)
 
 - 容器内安装 `@mariozechner/pi-coding-agent`,用其 **SDK**(`createAgentSession`)嵌入,不 fork pi。
-- 自定义 provider 用 `models.json` 声明,指向现有 OpenAI 兼容网关(`LLM_BASE_URL/LLM_API_KEY/LLM_MODEL`),`api: openai-completions`;对不认 `developer` 角色的网关可开 `compat.supportsDeveloperRole=false`。
+- 自定义 provider 用 `models.json` 声明,指向现有网关(`LLM_BASE_URL/LLM_API_KEY/LLM_MODEL`)。**网关方言由 `PI_LLM_API` 决定**:`openai-completions`(默认,OpenAI 兼容)/ `anthropic-messages`(Anthropic 兼容)/ `openai-responses`。
+- **当前生产实际值(2026-10-17 实测,以 Cloud Run 服务的 env 为准)**:`LLM_BASE_URL=https://api.deepseek.com/anthropic`、`LLM_MODEL=deepseek-flash`、`PI_LLM_API=anthropic-messages`、`PI_PROVIDER_ID=forge`、`PI_MODEL_REASONING=true`——即走 DeepSeek 的 **Anthropic 协议**端点,不是 OpenAI 兼容端点。文档里早先写的 GLM/`zai` 组合(`PI_THINKING_LEVEL/PI_THINKING_FORMAT=zai/PI_SUPPORTS_DEVELOPER_ROLE=…`)是**过期值**,仅在使用相应 OpenAI 兼容网关时才需要。
+- 其余调优开关(见 `agent/src/config.ts`):`PI_THINKING_LEVEL`(off…xhigh)、`PI_MODEL_REASONING`(模型是否声明支持推理)、`PI_THINKING_FORMAT`(openai|zai|qwen|qwen-chat-template)、`PI_SUPPORTS_DEVELOPER_ROLE` / `PI_SUPPORTS_REASONING_EFFORT`(默认 true;网关不认 `developer` 角色时置 false 走 system)。
 - 工具集:`createCodingTools(workspace)`(read/bash/write/edit),`sessionManager: inMemory`,每次 job 全新会话、全新工作目录 → 用完即弃。
 - System prompt 用 `DefaultResourceLoader({ systemPrompt })` 注入:约定产出**多文件 React 应用**(Vite+Tailwind、简体中文、响应式、无外图、真实文案、`src/lib/forge.js` 数据接口)。
 - `generate`:先写 `plan.json`(→ 前端规划卡片),再按计划实现 `src/` 下的 React 组件。
@@ -147,13 +149,20 @@ printf '%s' "$LLM_API_KEY" | gcloud secrets create llm-api-key --data-file=-
 printf '%s' "$AGENT_SECRET" | gcloud secrets create agent-secret --data-file=-
 
 # 从源码部署(Cloud Build 构建镜像,推 Artifact Registry)
+# 生产与 staging 各有一个 npm 脚本(参数唯一来源,不要手敲 gcloud 以免漂移):
+#   npm run agent:deploy:prod    → 服务 forge-agent
+#   npm run agent:deploy:staging → 服务 forge-agent-staging(--max-instances 1)
+# 生产实际使用的 env(2026-10-17 实测):
 gcloud run deploy forge-agent \
   --source agent --region $REGION \
   --timeout 1800 --concurrency 1 --min-instances 0 --max-instances 5 \
   --cpu 1 --memory 1Gi \
-  --set-env-vars LLM_BASE_URL=$LLM_BASE_URL,LLM_MODEL=$LLM_MODEL,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,PI_THINKING_LEVEL=low,PI_THINKING_FORMAT=zai,PI_SUPPORTS_DEVELOPER_ROLE=false,PI_SUPPORTS_REASONING_EFFORT=true,AGENT_MAX_RUN_MS=1500000,WORKSPACE_ROOT=/tmp/forge-agent \
+  --set-env-vars LLM_BASE_URL=https://api.deepseek.com/anthropic,LLM_MODEL=deepseek-flash,PI_LLM_API=anthropic-messages,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,AGENT_MAX_RUN_MS=1500000,WORKSPACE_ROOT=/tmp/forge-agent \
   --set-secrets LLM_API_KEY=llm-api-key:latest,AGENT_SECRET=agent-secret:latest
 ```
+
+> 换用 OpenAI 兼容网关时,把 `PI_LLM_API` 改回 `openai-completions`,并按需加 `PI_SUPPORTS_DEVELOPER_ROLE=false` / `PI_THINKING_FORMAT=zai|qwen` 等(见 §5)。
+> `AGENT_MAX_RUN_MS` 必须 **小于** Cloud Run `--timeout`(两者都按毫秒/秒口径核对):默认 1500s,`--timeout 1800`。设太小会让正常的多文件生成被自身超时掐死(staging 初版设 300s 即踩过:一个真实 generate 需要 ~6.5 分钟)。
 
 部署完把服务 URL 填回 `wrangler.jsonc` 的 `AGENT_URL`,把 Worker 的对外域填进 `PUBLIC_BASE_URL`,再 `npm run deploy` 一次。
 
@@ -229,6 +238,24 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 | R2 | `forge-v2-artifacts`(绑定 `ARTIFACTS`):构建产物 `p/{projectId}/v/{versionNo}/*` 与生成应用上传对象 |
 | KV | `forge-v2-appdata`(绑定 `APPDATA`):生成应用键值存储,键 `p:{projectId}:{env}:{key}` |
 | Durable Object | `PROJECT_DB`(类 `ProjectDb`):生成应用的文档数据 + owner SQL 控制台,每项目 × 每环境一个独立 SQLite 实例,名 `${projectId}:${env}` |
+
+### 11.1 STAGING(与生产完全隔离,2026-10-17 搭建)
+
+测试环境用于「先在 staging 开发验证,再上线」:两套环境**资源全隔离、代码同源**(同一仓库、同一份 `web/dist`、同一份 `agent/` 源码),差异只在部署目标与少量配置。完整说明见 §16。
+
+| 组件 | 生产 | staging |
+| --- | --- | --- |
+| Cloudflare Worker | `forge-v2` → `forge-v2.needle.workers.dev` | `forge-v2-staging` → `forge-v2-staging.needle.workers.dev` |
+| wrangler 环境 | 顶层(不带 `--env`,`npm run deploy`) | `env.staging`(`npm run deploy:staging`) |
+| D1 | `forge-v2`(`6fd724ad-…`) | `forge-v2-staging`(`da94e0ba-…`) |
+| R2 | `forge-v2-artifacts` | `forge-v2-artifacts-staging` |
+| KV | `f6b66c90…` | `67e46b44…` |
+| Durable Object | 独立 namespace(Worker `forge-v2`) | 独立 namespace(Worker `forge-v2-staging`) |
+| Cloud Run Service | `forge-agent`(`--max-instances 5`) | `forge-agent-staging`(`--max-instances 1`) |
+| LLM key | Secret `llm-api-key` | **复用** `llm-api-key`(同一把) |
+| 内部密钥 | Secret `agent-secret` | Secret `agent-secret-staging`(**另一把**) |
+| Cron | `* * * * *`(仅巡检本环境任务) | `* * * * *`(仅巡检本环境任务) |
+| 环境标识 | 不设 `ENVIRONMENT`(前端按 production,无角标) | `ENVIRONMENT=staging`(前端显示琥珀色 STAGING 角标) |
 
 > 多文件产物引入后需额外两步:**(1)** `npx wrangler kv namespace create forge-v2-appdata` 并把返回的 id 填进 `wrangler.jsonc` 的 `APPDATA.id`(当前是占位符,不填无法部署);**(2)** 对已存在的 v2 库执行一次 `schema.migrate-multifile.sql`(重建 `versions`/`jobs`,不保留旧单文件产物与任务历史)。全新安装直接 `schema.sql` 即可。之后 `npm run deploy` 部署 Worker;Cloud Run 侧因 Dockerfile 现在会预装 `template/` 依赖,需重新 `gcloud run deploy` 一次。
 
@@ -391,3 +418,59 @@ curl -s -b /tmp/a.jar -X POST https://forge-v2.needle.workers.dev/api/admin/migr
 - D1 `site_data` 停写:仅作为迁移的历史源保留。
 - 管理后台产物列表的「数据」列改为实时统计两个环境 SQLite 的行数之和。
 - 生成应用侧 HTTP 契约完全不变(`db/:collection` 的请求 / 响应形态一致),无需重新生成即可继续使用。
+
+## 16. STAGING 环境(与生产完全隔离)
+
+### 16.1 目标与原则
+
+「先在 staging 开发验证,确认没问题再上线」。两套环境**代码同源**(同一仓库、同一份构建产物、同一份 `agent/` 源码),资源**全隔离**,互不读写、互不覆盖。生产配置在 `wrangler.jsonc` 顶层,一字未动;staging 全部落在 `env.staging` 块与独立的 GCP 服务里。
+
+### 16.2 Cloudflare 侧(`wrangler.jsonc` 的 `env.staging`)
+
+wrangler 的规则:**绑定类配置(`vars` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `durable_objects` / secrets)不可继承,必须在每个环境里显式声明**,漏声明不会在部署时报错,而是运行时 `c.env.XXX` 为 `undefined`(例如漏 `PROJECT_DB` 会让生成应用的 `/db` 接口和数据面板直接 500)。`main` / `compatibility_date` / `assets` / `migrations` / `triggers` 可继承,故意不重复,以免两边漂移。
+
+```bash
+# 一次性:建独立资源并把 id 填进 wrangler.jsonc 的 env.staging
+npx wrangler d1 create forge-v2-staging          # → da94e0ba-7f9c-48ce-96ca-3160975bf8da
+npx wrangler r2 bucket create forge-v2-artifacts-staging
+npx wrangler kv namespace create forge-v2-appdata-staging   # → 67e46b44ce224ff9a4ea2af583dead21
+npm run db:init:staging                          # 幂等初始化 schema
+npm run db:migrate:google:staging                # 如需 Google 登录(新增 users.google_sub)
+npx wrangler secret put AGENT_SECRET --env staging
+npx wrangler secret put ADMIN_PASSWORD --env staging
+npm run deploy:staging                            # 构建前端 + 部署 Worker forge-v2-staging
+```
+
+- 环境名即 Worker 名:`env.staging.name = "forge-v2-staging"`,遵循官方 `<顶层名>-<环境名>` 规则。
+- **生产部署守卫**:`npm run deploy` 带 `predeploy` 钩子(`scripts/require-clean-tree.mjs`),工作区有未提交改动即拒绝部署生产——生产只允许从「已提交」的代码部署。staging **故意不挂**该守卫(测试环境存在的意义就是先验证还没提交的改动),用 `npm run deploy:staging`。
+- `npm run deploy` 显式写成 `wrangler deploy --env=""`,在多环境配置下明确指向顶层(生产),避免 wrangler 的裸 `deploy` 交互警告。
+
+### 16.3 Google Cloud 侧(同项目内独立 Cloud Run 服务)
+
+不新建 GCP 项目,在同项目 `sixth-impulse-286413` 内新建服务 `forge-agent-staging`,与 `forge-agent` 并列、镜像互不覆盖。
+
+- **LLM 密钥复用**同一把 Secret `llm-api-key`(省钱;隔离靠服务边界,不靠密钥)。
+- **内部密钥另建**:Secret `agent-secret-staging`,与生产的 `agent-secret` 不同值 → 生产 Worker 的预览令牌(HMAC over `AGENT_SECRET`)在 staging 校验必然失败,反之亦然,天然挡住跨环境令牌。
+- **成本上限钉死**:`--max-instances 1`,同一时刻最多一个 job;`AGENT_MAX_RUN_MS` 与生产一致(1500s,必须 < `--timeout 1800`)——**不要把 staging 的运行上限调得比生产小**,否则正常的多文件生成会被自身超时掐死(初版设 300s 即踩过,失败信息「Agent 执行超时(上限 300s)」),失去验证价值。真正的滥用闸门是 `--max-instances 1`,不是把超时切短。
+- 部署脚本:`npm run agent:deploy:staging` / `npm run agent:deploy:prod`(参数唯一来源)。
+
+### 16.4 环境角标(前端如何区分)
+
+生产与 staging **共用同一份 `web/dist`**,所以环境名只能**运行时下发**,不能用 Vite 构建期变量(否则会把 staging 角标打进生产包)。实现:staging 的 `vars` 里设 `ENVIRONMENT=staging`,生产不设 → `GET /api/auth/config` 回落 `environment: "production"`;前端 `<EnvBadge>`(挂在 `TopBar` / `AdminBar` / `Landing` / `Login`)取到非 production 才渲染琥珀色 `STAGING` 角标。
+
+### 16.5 隔离验证(2026-10-17 实测结论)
+
+| 检查项 | 结果 |
+| --- | --- |
+| D1 数据隔离 | 生产 `users/projects/versions/site_data = 13/26/36/3`;staging 初始全 0。staging 跑完一次 E2E 后为 `1/1/1`,生产计数**分毫未变** |
+| R2 产物隔离 | `forge-v2-artifacts` 20 个对象(生产项目)、`forge-v2-artifacts-staging` 仅 3 个(E2E 项目),互不出现 |
+| Durable Object 隔离 | 独立 Worker ⇒ 独立 DO namespace;staging 生成应用的 `/p/:token/api/db/:collection` 返回 200(绑定已接好,漏配会 500),同一 token 在生产的同路径 404 |
+| 跨环境预览令牌 | staging 令牌在 staging `GET /p/:token/` = 200;同一令牌在**生产** 404(`AGENT_SECRET` 不同) |
+| 生产未被动过 | 生产线上仍服务旧构建 `assets/index-BRvPdKmy.js`(未重新部署),`/api/auth/config` 仍返回 `{"google":true}` 无 `environment` 字段 |
+| Cron 独立 | CF API 显示 `forge-v2` 与 `forge-v2-staging` 各有独立 `* * * * *` schedule,各自只巡检本环境任务 |
+| 端到端 | staging 注册 → 建项目 → `generate` → Cloud Run `forge-agent-staging` 写多文件 React → 构建 → commit 落版本(draft `version_no=0`,307834 B,20 个源文件)→ `GET /p/:token/` 200。全程只写 staging 的 D1/R2 |
+
+### 16.6 已知待办
+
+- **staging 的 Google 登录尚未启用**:`GET /api/auth/config` 目前返回 `{"google":false,"environment":"staging"}`,因为 staging Worker 没写 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`(Worker secret 只写不可读,无法从生产复制)。启用需两步:①在 Google Cloud Console 给同一 OAuth 客户端追加回调 URI `https://forge-v2-staging.needle.workers.dev/api/auth/google/callback`;②`npx wrangler secret put GOOGLE_CLIENT_ID --env staging`(密钥同理)。
+- staging D1 里留有本次 E2E 的 1 用户 / 1 项目 / 1 版本(测试环境,可保留或按需清)。
