@@ -7,7 +7,7 @@
     "dev:web": "npm --prefix web run dev",
     "build": "npm --prefix web run build",
     "deploy": "npm run build && wrangler deploy --env=\"\"",
-    "predeploy": "node scripts/require-clean-tree.mjs",
+    "predeploy": "node scripts/guard-prod-deploy.mjs",
     "deploy:prod": "npm run deploy",
     "deploy:staging": "npm run build && wrangler deploy --env staging",
     "typecheck": "tsc --noEmit && npm --prefix web run typecheck",

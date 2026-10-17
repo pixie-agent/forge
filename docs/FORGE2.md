@@ -442,7 +442,7 @@ npm run deploy:staging                            # 构建前端 + 部署 Worker
 ```
 
 - 环境名即 Worker 名:`env.staging.name = "forge-v2-staging"`,遵循官方 `<顶层名>-<环境名>` 规则。
-- **生产部署守卫**:`npm run deploy` 带 `predeploy` 钩子(`scripts/require-clean-tree.mjs`),工作区有未提交改动即拒绝部署生产——生产只允许从「已提交」的代码部署。staging **故意不挂**该守卫(测试环境存在的意义就是先验证还没提交的改动),用 `npm run deploy:staging`。
+- **生产部署守卫**:`npm run deploy` 带 `predeploy` 钩子(`scripts/guard-prod-deploy.mjs`),两道检查,任一不满足即中止:**(1) 当前分支必须是 `main`**;**(2) 工作区必须干净**(无未提交改动)。即生产只允许从「已验收并已提交的 main」部署。staging **故意不挂**该守卫,任何分支都能发到测试环境,用 `npm run deploy:staging`。
 - `npm run deploy` 显式写成 `wrangler deploy --env=""`,在多环境配置下明确指向顶层(生产),避免 wrangler 的裸 `deploy` 交互警告。
 
 ### 16.3 Google Cloud 侧(同项目内独立 Cloud Run 服务)
@@ -475,3 +475,32 @@ npm run deploy:staging                            # 构建前端 + 部署 Worker
 - **staging Google 登录已启用(2026-10-17)**:`GET /api/auth/config` = `{"google":true,"environment":"staging"}`。做法是在同一 OAuth 客户端(项目 `sixth-impulse-286413`,ID `323709989821-17kuk1ul970tl0sp16gsk4csli6peljm`)追加回调 URI `https://forge-v2-staging.needle.workers.dev/api/auth/google/callback`,再给 staging Worker 写入 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`(与生产同值)。校验:`GET /api/auth/google` 302 → `accounts.google.com/v3/signin/identifier`,无 `redirect_uri_mismatch`,说明 client + 回调白名单都生效。
 - ⚠️ **Worker secret 只写不可读**:生产那两个值无法被任何环境「读取后复制」。wrangler 实际写入方式一直是 `printf '%s' "$值" | npx wrangler secret put …`(日志里 `secretSource: stdin` / `isInteractive: false`,见 `~/Library/Preferences/.wrangler/logs/`),所以 shell 历史里查不到值——换新环境时只能由**持有原始 secret 的人**再输入一次,或给该环境另建一个 OAuth 客户端。
 - staging D1 里留有本次 E2E 的 1 用户 / 1 项目 / 1 版本(测试环境,可保留或按需清)。
+
+### 16.7 分支模型与上线流程
+
+**staging 分支开发测试 → 验证通过合并到 `main` → 从 `main` 上线。** 环境隔离(§16.2/§16.3)与分支是**两条独立的轴**:分支决定「跑的是哪份代码」,wrangler 环境决定「代码跑在哪套资源上」。两者组合出的日常流程:
+
+```bash
+# 1) 在 staging 分支开发
+git switch staging
+# ...改代码...
+npm run typecheck && npm run build
+
+# 2) 发到测试环境验证(任何分支都可发;不走生产守卫)
+npm run deploy:staging          # Worker forge-v2-staging
+npm run agent:deploy:staging    # 只在改了 agent/ 时需要
+
+# 3) 验证没问题 → 合并到 main
+git switch main && git merge staging && git push origin main
+
+# 4) 从 main 上线生产(predeploy 守卫:必须是 main 且工作区干净)
+npm run deploy                  # Worker forge-v2
+npm run agent:deploy:prod       # 只在改了 agent/ 时需要
+```
+
+要点:
+
+- **`main` 是「可上线」基线**:`main` 上的每个提交都应该是已验收、可随时部署的;不直接在 `main 上攒未验证的改动。
+- **守卫只拦生产**:`npm run deploy` 前置检查「分支 = main」+「工作区干净」(`scripts/guard-prod-deploy.mjs`)。`npm run deploy:staging` / `agent:deploy:staging` 不加任何守卫——未提交、未合并的改动正是要靠它验证。
+- **staging 与 main 共用同一份 `web/dist` 和 `agent/` 源码**:所以「代码在 staging 上跑通」不能靠构建期差异,环境差异只允许来自 §16.2/§16.3 的配置(绑定、`ENVIRONMENT`、Cloud Run 服务名与规格)。任何「只在某一环境生效」的行为都必须用运行时配置表达。
+- **前端环境角标**(§16.4)就是这条纪律的护栏:在 staging 域名看到琥珀色 `STAGING`,在 `forge-v2.needle.workers.dev` 看到干净顶栏。
