@@ -50,7 +50,7 @@ export default function AdminProjects() {
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
       <AdminBar />
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
+      <main className="mx-auto w-full max-w-6xl flex-1 px-3 py-5 sm:px-4 sm:py-6">
         <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold">产物列表</h1>
@@ -69,13 +69,13 @@ export default function AdminProjects() {
               setPage(1)
               setQuery(input.trim())
             }}
-            className="flex gap-2"
+            className="flex w-full gap-2 sm:w-auto"
           >
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="搜索名称 / slug / 属主邮箱"
-              className="w-64 rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+              className="w-full rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none focus:border-indigo-500 sm:w-64"
             />
             <button className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">搜索</button>
           </form>
@@ -90,7 +90,7 @@ export default function AdminProjects() {
             没有匹配的产物
           </div>
         ) : (
-          <div className="overflow-hidden rounded-2xl border border-gray-800">
+          <div className="overflow-x-auto rounded-2xl border border-gray-800">
             <table className="w-full text-left text-sm">
               <thead className="bg-gray-900 text-xs text-gray-500">
                 <tr>

@@ -61,7 +61,7 @@ export default function Projects() {
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
       <TopBar />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-3 py-6 sm:px-4 sm:py-8">
         <div className="mb-6 flex items-center justify-between">
           <h1 className="text-xl font-semibold">我的项目</h1>
           <button

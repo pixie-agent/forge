@@ -46,7 +46,7 @@ export default function AdminUser() {
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
       <AdminBar subtitle={user?.email} />
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
+      <main className="mx-auto w-full max-w-6xl flex-1 px-3 py-5 sm:px-4 sm:py-6">
         {error && <div className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</div>}
         {!detail || !user ? (
           <p className="text-sm text-gray-500">加载中…</p>

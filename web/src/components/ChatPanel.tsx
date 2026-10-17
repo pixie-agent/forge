@@ -19,6 +19,8 @@ interface Props {
   jobType: 'generate' | 'chat' | null
   /** 空闲时输入框的提示文案(默认描述想法);用于说明本次修改基于哪个版本 */
   idlePlaceholder?: string
+  /** 移动端是否隐藏(工作台用顶部标签在对话/预览间切换;桌面端始终显示) */
+  mobileHidden?: boolean
   onSend: (text: string) => void
   /** 失败后的一键重试(重发上一次任务的输入);无失败任务时不传 */
   onRetry?: () => void
@@ -37,7 +39,7 @@ const CHAT_STAGES: { key: StageKey; label: string }[] = [
   { key: 'building', label: '构建产物' },
 ]
 
-export default function ChatPanel({ messages, plan, streaming, error, stage, elapsed, agentLog, jobType, idlePlaceholder, onSend, onRetry }: Props) {
+export default function ChatPanel({ messages, plan, streaming, error, stage, elapsed, agentLog, jobType, idlePlaceholder, mobileHidden, onSend, onRetry }: Props) {
   const [input, setInput] = useState('')
   const [showProcess, setShowProcess] = useState(false)
   const [showThinking, setShowThinking] = useState(false)
@@ -83,7 +85,9 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
   const finishedOk = !streaming && !error
 
   return (
-    <aside className="flex w-[380px] shrink-0 flex-col border-r border-gray-800 bg-gray-950">
+    <aside
+      className={`${mobileHidden ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-gray-800 bg-gray-950 md:w-[380px]`}
+    >
       <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {messages.map((m) => (
           <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>

@@ -232,9 +232,9 @@ export default function CodeEditor({ src, filesPreview, manifest, streaming, exp
   if (paths.length > 0) {
     const active = activeFile && src ? src[activeFile] : ''
     return (
-      <div className="flex h-full gap-3">
+      <div className="flex h-full flex-col gap-3 md:flex-row">
         {/* 侧栏:目录树 + 下载 */}
-        <div className="flex w-60 shrink-0 flex-col overflow-hidden rounded-xl border border-gray-800 bg-gray-900">
+        <div className="flex h-44 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-800 bg-gray-900 md:h-auto md:w-60">
           <div className="flex shrink-0 items-center justify-between border-b border-gray-800 px-3 py-2">
             <span className="text-xs font-medium text-gray-400">文件</span>
             <span className="text-xs text-gray-600">{paths.length}</span>
@@ -254,7 +254,7 @@ export default function CodeEditor({ src, filesPreview, manifest, streaming, exp
         </div>
 
         {/* 右侧:标签页 + 代码 */}
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-gray-700 bg-gray-950">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-gray-700 bg-gray-950">
           <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-gray-800 bg-gray-900/60 px-1">
             {openFiles.map((p) => (
               <div

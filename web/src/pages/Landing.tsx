@@ -45,8 +45,8 @@ export default function Landing() {
         )}
       </header>
 
-      <main className="mx-auto max-w-3xl px-4 pb-20 pt-20 text-center">
-        <h1 className="text-4xl font-bold leading-tight sm:text-5xl">
+      <main className="mx-auto max-w-3xl px-4 pb-16 pt-10 text-center sm:pb-20 sm:pt-20">
+        <h1 className="text-3xl font-bold leading-tight sm:text-5xl">
           把想法锻造成
           <span className="bg-gradient-to-r from-indigo-400 to-fuchsia-400 bg-clip-text text-transparent">可上线的网站</span>
         </h1>
