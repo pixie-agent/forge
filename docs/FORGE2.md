@@ -470,7 +470,8 @@ npm run deploy:staging                            # 构建前端 + 部署 Worker
 | Cron 独立 | CF API 显示 `forge-v2` 与 `forge-v2-staging` 各有独立 `* * * * *` schedule,各自只巡检本环境任务 |
 | 端到端 | staging 注册 → 建项目 → `generate` → Cloud Run `forge-agent-staging` 写多文件 React → 构建 → commit 落版本(draft `version_no=0`,307834 B,20 个源文件)→ `GET /p/:token/` 200。全程只写 staging 的 D1/R2 |
 
-### 16.6 已知待办
+### 16.6 状态与注意
 
-- **staging 的 Google 登录尚未启用**:`GET /api/auth/config` 目前返回 `{"google":false,"environment":"staging"}`,因为 staging Worker 没写 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`(Worker secret 只写不可读,无法从生产复制)。启用需两步:①在 Google Cloud Console 给同一 OAuth 客户端追加回调 URI `https://forge-v2-staging.needle.workers.dev/api/auth/google/callback`;②`npx wrangler secret put GOOGLE_CLIENT_ID --env staging`(密钥同理)。
+- **staging Google 登录已启用(2026-10-17)**:`GET /api/auth/config` = `{"google":true,"environment":"staging"}`。做法是在同一 OAuth 客户端(项目 `sixth-impulse-286413`,ID `323709989821-17kuk1ul970tl0sp16gsk4csli6peljm`)追加回调 URI `https://forge-v2-staging.needle.workers.dev/api/auth/google/callback`,再给 staging Worker 写入 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`(与生产同值)。校验:`GET /api/auth/google` 302 → `accounts.google.com/v3/signin/identifier`,无 `redirect_uri_mismatch`,说明 client + 回调白名单都生效。
+- ⚠️ **Worker secret 只写不可读**:生产那两个值无法被任何环境「读取后复制」。wrangler 实际写入方式一直是 `printf '%s' "$值" | npx wrangler secret put …`(日志里 `secretSource: stdin` / `isInteractive: false`,见 `~/Library/Preferences/.wrangler/logs/`),所以 shell 历史里查不到值——换新环境时只能由**持有原始 secret 的人**再输入一次,或给该环境另建一个 OAuth 客户端。
 - staging D1 里留有本次 E2E 的 1 用户 / 1 项目 / 1 版本(测试环境,可保留或按需清)。
