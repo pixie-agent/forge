@@ -19,6 +19,11 @@ export type Env = {
   GOOGLE_CLIENT_ID?: string
   /** Google OAuth 2.0 客户端密钥(Worker secret `GOOGLE_CLIENT_SECRET`);与上面成对配置 */
   GOOGLE_CLIENT_SECRET?: string
+  /** 连接器凭证的加密主密钥(Worker secret `CONNECTOR_KEK`,32 字节随机值的 hex/base64 文本)。
+   *  未设置时连接器整体不可用(接口返回明确错误),不影响其他功能。
+   *  注意:Worker secret 全局、只写不可读 —— 它装不下 per-user 凭证,所以用户凭证加密后存 D1,
+   *  这把密钥只用来加解密;换掉它 = 所有用户连接需重新授权。见 docs/CONNECTORS.md §4/§8 */
+  CONNECTOR_KEK?: string
   /** 可选:派发到 Cloud Run 的 fetch 超时(毫秒) */
   AGENT_DISPATCH_TIMEOUT_MS?: string
   /** 可选:平台部署环境标记。只有 staging 的 vars 里设成 'staging',生产不设(按 production 处理);
@@ -99,4 +104,46 @@ export interface ArtifactManifest {
   buildHash: string
   bytes: number
   files: { path: string; size: number }[]
+}
+
+// ─────────────────────────── 连接器(见 docs/CONNECTORS.md)───────────────────────────
+
+/** 账号级连接:用户授权过的外部系统账号(一个账号可服务多个项目) */
+export interface ConnectionRow {
+  id: string
+  user_id: string
+  provider: string
+  account_label: string
+  scopes: string
+  credentials: string
+  status: 'active' | 'revoked' | 'error'
+  created_at: string
+  updated_at: string
+}
+
+/** 项目级绑定:决定「这个项目的这一轮生成自动带上什么」 */
+export interface ProjectConnectorRow {
+  project_id: string
+  provider: string
+  env: 'draft' | 'live'
+  config_json: string
+  created_at: string
+}
+
+/**
+ * 派发给 agent 的一份「本次可用能力」。只读默认带上;可写要用户在本轮显式点亮(见 §7)。
+ * 含 token 的字段**只存在于这一条 dispatch 请求里**,随 Cloud Run 容器销毁,不落 D1/R2/versions。
+ */
+export interface ConnectorGrant {
+  provider: string
+  accountLabel: string
+  scopes: string[]
+  /** true = 本次含可写能力(agent 触发写操作前应先取得用户确认) */
+  writable?: boolean
+  /** 凭证明文(仅 auth: oauth 的 provider);agent 侧落到 .forge/connectors.json,用完即弃 */
+  credentials?: Record<string, string>
+  /** 非密配置(measurementId / paymentLink 等),agent 侧可直接读 */
+  config?: Record<string, string>
+  /** 生成期用法说明(来自 provider 定义的 agentHint) */
+  hint?: string
 }

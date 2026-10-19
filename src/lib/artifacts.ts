@@ -138,16 +138,34 @@ function injectTitle(html: string, title: string): string {
   return tag + html
 }
 
+/** JSON 序列化后转义 '<',避免值里的 </script> 提前闭合脚本标签(连接器的 public 值来自用户输入) */
+function safeJson(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, '\\u003c')
+}
+
 /**
  * 给入口 HTML 注入运行时数据接口基址与数据环境:
- *   <script>window.__FORGE_API_BASE__="…/api";window.__FORGE_ENV__="draft"|"live"</script>
+ *   <script>window.__FORGE_API_BASE__="…/api";window.__FORGE_ENV__="draft"|"live"
+ *     [;window.__FORGE_CONNECTORS__={ ga4:{measurementId:"G-XXXX"} }]</script>
  * 生成页里的 forge SDK 读该全局变量调用平台后端,无需在构建期替换占位符。
+ * 连接器只下发 provider 定义里标了 public 的非密值(见 src/lib/connectors/store.ts 的 publicConfig);
+ * 凭证永不下发。没有可用连接器时不注入该全局,产物逐字节与从前一致。
  * 草稿(draft)预览额外注入「测试环境」角标,与线上公开页(live)明确区分。
  * 传入 title 时同时替换浏览器标签标题(生成应用共用同一份平台 index.html)。
  */
-export function injectRuntime(html: string, apiBase: string, dataEnv: 'draft' | 'live', title?: string | null): string {
-  const script = `<script>window.__FORGE_API_BASE__=${JSON.stringify(apiBase)};window.__FORGE_ENV__=${JSON.stringify(dataEnv)}</script>`
-  let out = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${script}`) : script + html
+export function injectRuntime(
+  html: string,
+  apiBase: string,
+  dataEnv: 'draft' | 'live',
+  title?: string | null,
+  connectors?: Record<string, Record<string, string>> | null
+): string {
+  let script = `window.__FORGE_API_BASE__=${JSON.stringify(apiBase)};window.__FORGE_ENV__=${JSON.stringify(dataEnv)}`
+  if (connectors && Object.keys(connectors).length) {
+    script += `;window.__FORGE_CONNECTORS__=${safeJson(connectors)}`
+  }
+  const tag = `<script>${script}</script>`
+  let out = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${tag}`) : tag + html
   if (title && title.trim()) out = injectTitle(out, title.trim().slice(0, 60))
   return dataEnv === 'draft' ? injectEnvBadge(out) : out
 }

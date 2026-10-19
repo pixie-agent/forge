@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../App'
 import ChatPanel from '../components/ChatPanel'
+import ConnectorCard from '../components/ConnectorCard'
+import ConnectorChips, { type ConnectorChip } from '../components/ConnectorChips'
+import ConnectorsPanel from '../components/ConnectorsPanel'
 import PreviewPane from '../components/PreviewPane'
 import TopBar from '../components/TopBar'
 import { api, cancelJob, getActiveJob, startJob, steerJob, subscribeJob } from '../lib/api'
 import { attachmentMarker, type OutgoingAttachment } from '../lib/attachments'
-import type { ArtifactManifest, JobSnapshot, Message, Plan, Project, ProjectDetail, ProjectDraft, ProjectVersionDetail, VersionMeta } from '../lib/types'
+import type { ArtifactManifest, JobSnapshot, Message, Plan, Project, ProjectConnectorsResponse, ProjectDetail, ProjectDraft, ProjectVersionDetail, SiteDataEnv, VersionMeta } from '../lib/types'
 
 type FilePreview = { path: string; content: string }
 
@@ -45,6 +48,13 @@ export default function Workspace() {
   const started = useRef(false)
   // 移动端:用顶部标签在「对话 / 预览」间切换(桌面端始终左右分栏,该状态不生效)
   const [mobileTab, setMobileTab] = useState<'chat' | 'preview'>('chat')
+  // 连接器:两个环境的绑定状态(草稿优先于线上生效)、本轮临时开关(不落库)、管理面板开关
+  const [connectorData, setConnectorData] = useState<{ draft: ProjectConnectorsResponse; live: ProjectConnectorsResponse } | null>(null)
+  const [connectorOff, setConnectorOff] = useState<string[]>([])
+  const [connectorOn, setConnectorOn] = useState<string[]>([])
+  const [showConnectors, setShowConnectors] = useState(false)
+  /** 正在对话流里展开凭证卡片的 provider(见 ConnectorCard);null = 没有卡片 */
+  const [addingProvider, setAddingProvider] = useState<string | null>(null)
 
   const streaming = !!job && (job.status === 'pending' || job.status === 'running')
   const runningAction = job?.type ?? null
@@ -77,12 +87,91 @@ export default function Workspace() {
     }
   }, [id])
 
+  /**
+   * 拉取连接器绑定状态(draft 与 live 各一次)。
+   * 生成链路是「优先草稿绑定,没有才回落到线上」(见 routes/generate.ts 的 jobConnectorGrants),
+   * 所以能力条按同一口径取"草稿优先"的并集,保证用户看到的就是本轮真的会生效的。
+   */
+  const loadConnectors = useCallback(async (): Promise<{ draft: ProjectConnectorsResponse; live: ProjectConnectorsResponse } | null> => {
+    if (!id) return null
+    try {
+      const [draft, live] = await Promise.all([
+        api<ProjectConnectorsResponse>(`/api/projects/${id}/connectors?env=draft`),
+        api<ProjectConnectorsResponse>(`/api/projects/${id}/connectors?env=live`),
+      ])
+      setConnectorData({ draft, live })
+      return { draft, live }
+    } catch {
+      // 连接器是增强能力:拉取失败不影响生成,静默降级为"没有连接器"
+      setConnectorData(null)
+      return null
+    }
+  }, [id])
+
+  useEffect(() => {
+    void loadConnectors()
+  }, [loadConnectors])
+
+  /** 能力条上的 chip:草稿有绑定用草稿,否则用线上的;只读默认亮、可写默认关(见 CONNECTORS.md §7) */
+  const connectorChips = useMemo<ConnectorChip[]>(() => {
+    if (!connectorData) return []
+    const byEnv: Record<SiteDataEnv, Map<string, ProjectConnectorsResponse['providers'][number]>> = {
+      draft: new Map(connectorData.draft.providers.map((p) => [p.id, p])),
+      live: new Map(connectorData.live.providers.map((p) => [p.id, p])),
+    }
+    /** 只有"绑定且授权/密钥可用"才算本轮真能生效:绑定在但凭证缺失/撤销的不上能力条(与 resolveGrants 同口径) */
+    const usable = (p: ProjectConnectorsResponse['providers'][number]) =>
+      Boolean(p.binding) && (p.auth === 'config' || p.binding?.connectionStatus === 'active')
+    const chips: ConnectorChip[] = []
+    for (const p of connectorData.draft.providers) {
+      const boundEnv: SiteDataEnv | null = usable(p) ? 'draft' : byEnv.live.get(p.id) && usable(byEnv.live.get(p.id)!) ? 'live' : null
+      if (!boundEnv) continue
+      const on = p.writable ? connectorOn.includes(p.id) : !connectorOff.includes(p.id)
+      chips.push({ id: p.id, name: p.name, writable: p.writable, env: boundEnv, on })
+    }
+    return chips
+  }, [connectorData, connectorOff, connectorOn])
+
+  const connectorsEnabled = Boolean(connectorData?.draft.enabled && connectorData?.live.enabled)
+
+  /** 「+ 连接」里可选的 provider 列表(草稿环境的定义为准,两环境同一份 provider 定义) */
+  const connectorProviders = useMemo(() => connectorData?.draft.providers ?? [], [connectorData])
+
+  /** 当前要展开凭证卡片的 provider 定义;找不到(如 KEK 未配置)就当作没有卡片 */
+  const addingProfile = useMemo(
+    () => (addingProvider ? connectorProviders.find((p) => p.id === addingProvider) ?? null : null),
+    [addingProvider, connectorProviders],
+  )
+
+  /**
+   * 账号下**已保存过**的该 provider 凭证(跨项目复用)。
+   * 连接是账号级的(见 routes/connections.ts),draft / live 两个响应拿到的是同一份列表,取任一份即可。
+   * 卡片据此先给「点一下直接接入」,省掉重复贴 key / 重复走授权页。
+   */
+  const addingReusable = useMemo(() => {
+    if (!addingProvider || !connectorData) return []
+    return connectorData.draft.connections.filter((c) => c.provider === addingProvider && c.status === 'active')
+  }, [addingProvider, connectorData])
+
+  /** 本轮开关 → 请求体:只读的"关掉"进 disabled,可写的"点亮"进 enabled;两者都是本轮的,不落库 */
+  const connectorOptions = useMemo(() => {
+    if (!connectorChips.length) return undefined
+    const ids = new Set(connectorChips.map((c) => c.id))
+    return {
+      disabled: connectorOff.filter((x) => ids.has(x)),
+      enabled: connectorOn.filter((x) => ids.has(x)),
+    }
+  }, [connectorChips, connectorOff, connectorOn])
+
   /** 任务收尾:成功则刷新详情与积分,失败则展示错误(幂等:同一任务只结算一次) */
   const settled = useRef(new Set<string>())
   const settle = useCallback(
     async (finished: JobSnapshot) => {
       if (settled.current.has(finished.id)) return
       settled.current.add(finished.id)
+      // 本轮结束:连接器的临时开关复位回默认(绑定仍然生效,无需用户重选)
+      setConnectorOff([])
+      setConnectorOn([])
       if (finished.status === 'failed') {
         // 失败但有产物:记下原想法,后续消息作为补充要求继续该任务;同时保留失败任务用于重试
         if (finished.idea) setResumeIdea(finished.idea)
@@ -127,6 +216,8 @@ export default function Workspace() {
     async (action: 'generate' | 'chat', body: Record<string, unknown>, userText: string) => {
       setError('')
       setFailedJob(null)
+      // 新任务开始:凭证卡片(含「已接入」完成态)收起来,它是单轮的一次性痕迹
+      setAddingProvider(null)
       const localId = crypto.randomUUID()
       setMessages((m) => [...m, { id: localId, role: 'user', content: userText, created_at: '' }])
       if (action === 'generate') {
@@ -226,11 +317,40 @@ export default function Workspace() {
           if (resume.plan) setPlan(resume.plan)
           if (resume.files_preview) setFilesPreview(resume.files_preview)
         }
+        // 连接器 OAuth 回调回来时带的结果提示(见 routes/connections.ts 的 backToWorkspace)
+        const connected = sp.get('connected')
+        const connectorError = sp.get('connector_error')
+        if (connected || connectorError) {
+          const fresh = await loadConnectors()
+          if (connected) {
+            const profile = fresh?.draft.providers.find((p) => p.id === connected) ?? fresh?.live.providers.find((p) => p.id === connected)
+            const name = profile?.name ?? connected
+            const missing = profile?.binding?.missing ?? []
+            if (missing.length) {
+              // 授权成功但必填配置还差(如 GA4 的 propertyId):半截能力递下去只会让 agent 白跑,
+              // 所以这里直接把面板打开,让用户补完再生成(与 resolveGrants 的跳过口径一致)
+              setNoticeTone('err')
+              setNotice(`已接入 ${name},但还差「${missing.join('、')}」没填,请补上后再生成`)
+              setShowConnectors(true)
+            } else if (profile?.writable) {
+              setNoticeTone('ok')
+              setNotice(`已接入 ${name}。它带写能力,默认不带上 —— 要用它的那一轮请在对话栏点亮`)
+            } else {
+              setNoticeTone('ok')
+              setNotice(`已接入 ${name},之后的生成会默认带上它`)
+            }
+          } else {
+            setNoticeTone('err')
+            setNotice(`连接未完成:${connectorError}`)
+          }
+        }
         const idea = sp.get('idea')
         if (idea && detail.project.current_version === 0 && !started.current) {
           started.current = true
           setSp({}, { replace: true })
           void run('generate', { idea }, idea)
+        } else if (connected || connectorError) {
+          setSp({}, { replace: true })
         }
       } catch (err) {
         if (!cancelled) setError((err as Error).message)
@@ -281,14 +401,14 @@ export default function Workspace() {
       // 允许「只发附件」:后端要求 idea/message 非空,这里补一句默认说明
       const finalText = text || (attachments?.length ? '请参考我上传的附件' : '')
       if (!finalText) return
-      const body = { attachments: attachments?.length ? attachments : undefined }
+      const body = { attachments: attachments?.length ? attachments : undefined, connectors: connectorOptions }
       // 本地消息与服务端落库用同一段附件清单,刷新前后显示一致
       const userText = finalText + attachmentMarker(attachments)
       if (draft || (project?.current_version ?? 0) > 0) void run('chat', { message: finalText, ...body }, userText)
       else if (resumeIdea) void run('generate', { idea: resumeIdea, note: finalText, ...body }, userText)
       else void run('generate', { idea: finalText, ...body }, userText)
     },
-    [draft, project?.current_version, resumeIdea, run]
+    [draft, project?.current_version, resumeIdea, run, connectorOptions]
   )
 
   /**
@@ -437,6 +557,47 @@ export default function Workspace() {
           onRetry={failedJob && !streaming ? retry : undefined}
           onStop={streaming ? () => void stopTask() : undefined}
           stopping={stopping}
+          connectorsBar={
+            <ConnectorChips
+              chips={connectorChips}
+              providers={connectorProviders}
+              enabled={connectorsEnabled}
+              locked={streaming}
+              onToggle={(pid, next) => {
+                // 可写:点亮 = 进 enabled(默认关);只读:默认亮,关掉 = 进 disabled
+                const writable = connectorChips.find((c) => c.id === pid)?.writable
+                if (writable) {
+                  setConnectorOn((l) => (next ? (l.includes(pid) ? l : [...l, pid]) : l.filter((x) => x !== pid)))
+                } else {
+                  setConnectorOff((l) => (next ? l.filter((x) => x !== pid) : l.includes(pid) ? l : [...l, pid]))
+                }
+              }}
+              onPick={(pid) => setAddingProvider(pid)}
+              onOpenPanel={() => setShowConnectors(true)}
+            />
+          }
+          credentialCard={
+            addingProfile ? (
+              <ConnectorCard
+                key={addingProfile.id}
+                projectId={id ?? ''}
+                provider={addingProfile}
+                reusable={addingReusable}
+                jobRunning={streaming}
+                onSaved={async (providerName) => {
+                  const writable = addingProfile?.writable ?? false
+                  await loadConnectors()
+                  setNoticeTone('ok')
+                  setNotice(
+                    writable
+                      ? `已接入 ${providerName}。它带写能力,默认不带上 —— 要用它的那一轮请在对话栏点亮`
+                      : `已接入 ${providerName},之后的生成会默认带上它`,
+                  )
+                }}
+                onClose={() => setAddingProvider(null)}
+              />
+            ) : null
+          }
         />
         <PreviewPane
           mobileHidden={mobileTab !== 'preview'}
@@ -458,8 +619,18 @@ export default function Workspace() {
           onCommit={() => void commitVersion()}
           onPublish={(v) => void publish(v)}
           onUnpublish={unpublish}
+          onOpenConnectors={() => setShowConnectors(true)}
+          connectorCount={connectorChips.length}
         />
       </div>
+      {showConnectors && (
+        <ConnectorsPanel
+          projectId={id ?? ''}
+          data={connectorData}
+          onClose={() => setShowConnectors(false)}
+          onChanged={loadConnectors}
+        />
+      )}
     </div>
   )
 }

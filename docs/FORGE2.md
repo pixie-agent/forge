@@ -173,6 +173,8 @@ npx wrangler secret put AGENT_SECRET     # 与 Cloud Run 侧同名同值
 # 4) 可选:启用 Google 登录(见下方说明)
 # npx wrangler secret put GOOGLE_CLIENT_ID
 # npx wrangler secret put GOOGLE_CLIENT_SECRET
+# 5) 可选:启用连接器(见 §19;值只需随机 32 字节,换掉即所有连接需重新授权)
+# npx wrangler secret put CONNECTOR_KEK
 npm run deploy                            # 构建前端 + 部署 Worker(名:forge-v2)
 ```
 
@@ -281,7 +283,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 | 组件 | 值 |
 | --- | --- |
-| Cloudflare Worker | `forge-v2` → `https://forge-v2.needle.workers.dev` |
+| Cloudflare Worker | `forge-v2` → `https://app.1forgen.site`(Custom Domain,2026-10-19 起;`forge-v2.needle.workers.dev` 保留) |
 | D1 | `forge-v2`(`6fd724ad-b430-4d2b-9eae-6353c6dbde56`) |
 | Cloud Run Service | `forge-agent`(us-central1)→ `https://forge-agent-323709989821.us-central1.run.app` |
 | GCP 项目 | `sixth-impulse-286413`(项目号 `323709989821`) |
@@ -300,7 +302,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 | 组件 | 生产 | staging |
 | --- | --- | --- |
-| Cloudflare Worker | `forge-v2` → `forge-v2.needle.workers.dev` | `forge-v2-staging` → `forge-v2-staging.needle.workers.dev` |
+| Cloudflare Worker | `forge-v2` → `app.1forgen.site` + `forge-v2.needle.workers.dev` | `forge-v2-staging` → `app-staging.1forgen.site` + `forge-v2-staging.needle.workers.dev` |
 | wrangler 环境 | 顶层(不带 `--env`,`npm run deploy`) | `env.staging`(`npm run deploy:staging`) |
 | D1 | `forge-v2`(`6fd724ad-…`) | `forge-v2-staging`(`da94e0ba-…`) |
 | R2 | `forge-v2-artifacts` | `forge-v2-artifacts-staging` |
@@ -385,7 +387,7 @@ SSR 让**产物应用本身**更简单(前后端合一、loader 直连 D1、无 
 
 - 若将来要 SSR / 统一全栈:**Remix / React Router v7**(Cloudflare 一等支持),接受平台绑框架 + 预览改为"跑预览 Worker"。
 - **SSG 桥**:用支持 SSG 的框架,在 agent 容器里构建时把各路由渲染成静态 HTML——保留统一开发模型,又留住静态预览/发布链路;代价是动态数据退回客户端调平台数据接口。
-- **自定义域名**:暂不做(未来付费增值能力;届时仍需 Cloudflare for SaaS)。
+- **自定义域名**:**用户项目**的自定义域名暂不做(未来付费增值能力;届时仍需 Cloudflare for SaaS)。**平台自己的域名已经挂上**(2026-10-19):`app.1forgen.site` → `forge-v2`、`app-staging.1forgen.site` → `forge-v2-staging`,两个都是 Custom Domain,根域名 `1forgen.site` 留空未用。注意这与「用户项目挂自己买的域名」是两件事——后者才需要 Cloudflare for SaaS。
 
 ### 13.7 阶段一实现落点(已落地)
 
@@ -400,7 +402,7 @@ SSR 让**产物应用本身**更简单(前后端合一、loader 直连 D1、无 
 - commit 回调回传 `{src, dist, manifest, plan}`;Worker 侧 `commit.ts` 把 `src` 写 D1、`dist` 写 R2、生成并落 `manifest`。
 
 **服务与后端 API**
-- `src/routes/serve.ts`:`/s/:slug/*`(发布,env=live)与 `/p/:token/*`(草稿预览,env=draft,HMAC 令牌绑定 project+version)服务 R2 里的构建产物;入口 HTML 注入 `window.__FORGE_API_BASE__` 指向同源 `/api` 子路径;`assets/` 长缓存,其余 no-store;SPA 兜底回退入口。
+- `src/routes/serve.ts`:`/s/:slug/*`(发布,env=live)与 `/p/:token/*`(草稿预览,env=draft,HMAC 令牌绑定 project+version)服务 R2 里的构建产物;入口 HTML 注入 `window.__FORGE_API_BASE__` 指向同源 `/api` 子路径;`assets/` 长缓存,其余 no-store;SPA 兜底回退入口。有连接器绑定时,入口 HTML 还会多注一份 `window.__FORGE_CONNECTORS__`(只含 public 非密值,见 §19)。
 - `src/lib/appdata.ts`:平台通用数据 API,同一套端点覆盖文档集合(`/db/:collection`)、KV 键值(`/kv/:key`)、R2 对象(`/blob/:key`),按项目 + 环境(draft/live)命名空间隔离,响应带 CORS(页面跑在 sandbox opaque origin)。其中 `/db` 的存储已从共享 D1 的 `site_data` 迁到每项目每环境的独立 SQLite(见 §15),HTTP 契约不变。
 - `src/lib/projectDb.ts`:每项目 × 每环境一个 Durable Object(绑定 `PROJECT_DB`,类 `ProjectDb`,`new_sqlite_classes`),实例名 `${projectId}:${env}`;承载 `/db` 文档接口(集合 → 一张固定列的表)与 owner 的 SQL 控制台(任意 DDL/DML/索引)。
 
@@ -566,7 +568,7 @@ npm run agent:deploy:prod       # 只在改了 agent/ 时需要
 - **`main` 是「可上线」基线**:`main` 上的每个提交都应该是已验收、可随时部署的;不直接在 `main 上攒未验证的改动。
 - **守卫只拦生产**:`npm run deploy` 前置检查「分支 = main」+「工作区干净」(`scripts/guard-prod-deploy.mjs`)。`npm run deploy:staging` / `agent:deploy:staging` 不加任何守卫——未提交、未合并的改动正是要靠它验证。
 - **staging 与 main 共用同一份 `web/dist` 和 `agent/` 源码**:所以「代码在 staging 上跑通」不能靠构建期差异,环境差异只允许来自 §16.2/§16.3 的配置(绑定、`ENVIRONMENT`、Cloud Run 服务名与规格)。任何「只在某一环境生效」的行为都必须用运行时配置表达。
-- **前端环境角标**(§16.4)就是这条纪律的护栏:在 staging 域名看到琥珀色 `STAGING`,在 `forge-v2.needle.workers.dev` 看到干净顶栏。
+- **前端环境角标**(§16.4)就是这条纪律的护栏:在 `app-staging.1forgen.site` 看到琥珀色 `STAGING`,在 `app.1forgen.site` 看到干净顶栏。
 
 ## 17. 生成质量:模板设计系统 + 设计复查回路(2026-10-17)
 
@@ -596,6 +598,7 @@ src/components/ui/{Button,Card,Field,Modal,Tabs,Toast,Feedback,Layout,Icon,Revea
 src/lib/cx.js                     className 拼接
 src/lib/motion.jsx                Reveal/Stagger/useCountUp/formatNumber(包装 motion/react)
 src/lib/forge.js                  db / kv / counter / blob / storage
+src/lib/connectors.js             外部连接器的公开配置(connector/hasConnector/loadGA4)
 src/lib/store.js                  useCollection / useCollectionStats / useKv / useCounter / useUpload / useBlobs / useDebounced
 src/App.jsx                       示例应用(留言墙)= 模板自身的冒烟基线
 ```
@@ -627,7 +630,7 @@ src/App.jsx                       示例应用(留言墙)= 模板自身的冒烟
 ### 17.5 staging 验证清单
 
 ```bash
-BASE=https://forge-v2-staging.needle.workers.dev/s/<slug>/api
+BASE=https://app-staging.1forgen.site/s/<slug>/api
 curl -s "$BASE/db/todos?limit=5&offset=0&order=asc&q=买"   # {items:[…],total:N,limit:5,offset:0}
 curl -s -X POST "$BASE/kv/visits/incr" -H 'content-type: application/json' -d '{"by":1}'   # {key,value:1}
 curl -s "$BASE/kv/visits/incr"                             # {key,value:1}
@@ -659,3 +662,69 @@ curl -s -X PUT "$BASE/blob" -d x                           # 405(列举只允许
 - **粘贴图片**:`Cmd/Ctrl+V` 直接把剪贴板里的图片加进待发送附件,走浏览器原生 `clipboardData.items`,无额外依赖。粘贴来源常缺扩展名,`withPastedName()` 按 MIME 补一个(`粘贴图片-<ts>.jpg`),否则过不了白名单。纯文本粘贴不拦截,仍是浏览器默认行为。
 - **附件限额随状态切换**:空闲发送用 `SEND_LIMITS`(图片 2MB / 文本 256KB / 合计 4MB),生成中追加用更紧的 `STEER_LIMITS`(1MB / 128KB / 1.2MB,见 §5.2);两套常量在 `web/src/lib/attachments.ts` 与 Worker 侧 `src/lib/attachments.ts` 各写一份,以后者为准(前端只是提前拦)。工具提示里的上限文案按当前状态动态生成。
 - **对话栏宽度可调**:桌面端把右边缘的 6px 拖拽条拖动即改宽(`pointerdown` → 跟随位移 → 松手落库),双击复位。默认宽度从 380px 提到 **460px**;范围 `340–760px`,并额外受 `window.innerWidth - 360` 约束,保证预览区不被挤没。宽度存 `localStorage['forge.chatWidth']`(读写都做 `clampWidth` + try/catch,隐私模式下调宽仍生效、只是不记忆)。窄屏(`<768px`)由 `w-full` 决定,内联宽度只在桌面端生效,移动端仍是整屏 + 顶部标签切换。
+
+## 19. 连接器:让生成的站点用上外部系统(2026-10-19)
+
+用户侧「能不能接支付/统计/仓库」的答案不是 MCP,而是**平台手写的 provider 适配器**。完整设计与取舍见 `docs/CONNECTORS.md`,本节只记落在平台里的实现与运行约束。
+
+### 19.1 为什么不走 MCP
+
+- pi **刻意不支持 MCP**(`pi-coding-agent/README.md:446`),当前会话只挂 `createCodingTools`;接 MCP 得自己写 pi 扩展,还要引入进程生命周期、鉴权、工具命名冲突三摊新问题。
+- 生成期需要的"用外部账号做件事"用**注入凭证 + 提示词说明 + agent 自带 bash**就能实现,零新增运行时。
+- 运行期(访客页面)不是 MCP client 场景:页面跑在 CSP `sandbox` 的 opaque origin 里,调外部 API 只能靠 public 值或用户自带后端。
+
+### 19.2 三种形态与本期范围
+
+| 形态 | 例子 | 凭证 | 本期 |
+| --- | --- | --- | --- |
+| A 纯注入 | GA4 `measurementId`、Stripe Payment Link、地图 key | 全 public | ✅ |
+| B 生成期授权 | GA4 Data API、Search Console、GitHub | OAuth,生成时用完即弃 | ✅(首个 provider:GA4) |
+| **B′ 自带密钥(`auth:'apikey'`)** | **Stripe、Supabase、各类长尾 SaaS** | **用户从对方控制台生成密钥自己贴进来** | ✅(首个 provider:Stripe) |
+| C 运行期闭环 | Stripe 运行期代持 + webhook | 含 secret,平台须服务端保管 | ❌ 延后(平台不代持资金密钥) |
+
+加一个 provider = 加一个文件 `src/lib/connectors/providers/*.ts` 并在 `registry.ts` 注册,**不改 schema、不动核心代码**。
+
+**B′ 是本设计里的扩展策略**:`oauth` 形态要求平台替该 provider 登记 OAuth 客户端 + 回调地址(常有审批),
+对长尾不可能成立;`apikey` 形态**零平台侧登记** —— 用户自己已有对方账号,复制一个 key 的成本远低于平台逐个申请。
+所以除少数"只有 OAuth / 值得登记"的 provider(GA4、GitHub),**其余一律走 `apikey`**。
+它复用与 GA4 完全相同的存储与解析链路(同一张 `connections`、同一把 `CONNECTOR_KEK`、同一个 `resolveGrants`),
+**唯一区别是凭证来源**:从「上游换回的 token」变成「用户贴上来的 key」。
+
+### 19.3 数据模型(两张表,`schema.migrate-connectors.sql`)
+
+- `connections`(**账号级**):一个外部账号可服务多个项目,避免 n 个项目走 n 次 OAuth。凭证 AES-GCM 加密后存 `credentials`(主密钥 `CONNECTOR_KEK`),`UNIQUE(user_id, provider, account_label)`,重新授权即覆盖。
+- `project_connectors`(**项目级绑定**):`PRIMARY KEY(project_id, provider, env)`。**必须有 `env` 维度**,与 KV/R2/DO 的「项目 × 环境」同口径,否则迟早出现"草稿的测试付款打进真账"。
+
+### 19.4 四条链路
+
+0. **自带密钥 → 加密落库(B′ 专属)**:面板贴密钥 → `POST /api/connections/:provider/secret`(`src/routes/connections.ts`)。
+   校验只接受 `provider.secretInputs` 声明过的键、必填缺失即拒;密钥 AES-GCM 加密后写 `connections`(与 OAuth 同表同 KEK),
+   顺手写非密配置并 `setBinding` 到 `(project, env)` —— 与 OAuth 回调同一语义。**值只上行、不回显**:列表接口永不返回 `credentials`。
+1. **public 值 → 生成页**:`injectRuntime()`(`src/lib/artifacts.ts`)多注一个 `window.__FORGE_CONNECTORS__`,只含 `configFields` 里标了 `public` 的键。SDK 在 `agent/template/src/lib/connectors.js`(平台文件,进 `PLATFORM_FILES` 强制还原),提供 `connector()/hasConnector()/loadGA4()`。无绑定时**不注入该全局**,产物与从前逐字节一致。
+2. **生成期读真实数据**:`launchJob`(`src/routes/generate.ts`)按「草稿绑定优先、回落线上」解析授权(`resolveGrants`),随 `AgentRunRequest.connectors` 一次性派发;agent 侧落到工作目录 `.forge/connectors.json`(`.forge` 进 `SKIP_DIRS`,不进源码树/产物),由 `connectorsBrief()` 把用法拼进 user prompt。**凭证明文只活在这一次请求与容器里**,不落 D1/R2/versions。
+3. **运行期闭环(C 类)**:不做。将来的后路是在 `src/lib/appdata.ts` 加 `ext` 代理分支,且只考虑代理**测试模式**凭证。
+
+### 19.5 交互:默认继承,override 才动手
+
+- 规则:**绑定即默认全生效**;per-turn 的 chip 只是"临时关掉/临时点亮"的开关,**不落库、本轮结束自动复位**,避免连接器变成第二个"每条消息都要重选"的附件。
+- **权限分档**:只读 provider 默认每一轮都带上;可写 provider(`writeScopes` 非空)默认**不**带上,要用户本轮点亮,且 agent 动手前先说明影响。
+- 能力条 `web/src/components/ConnectorChips.tsx` 挂在对话栏输入框上方(chip 永远带 `只读`/`可写` 徽标);完整管理在 `web/src/components/ConnectorsPanel.tsx`(顶栏「连接器」入口,管换账号/撤销/重新上传密钥/draft 与 live 各绑什么/A 类配置)。**对话栏只做开关,不做配置。**
+- 能力条只显示**真能生效**的绑定:绑定在但凭证缺失/已撤销的 provider 不上条(与 `resolveGrants` 同口径),免得用户看到一个亮了却什么都没生效的 chip。
+- 面板入口按 `auth` 分三种:`oauth` →「连接」跳授权页;`apikey` → 密码框粘贴 + 「保存并绑定」(已保存后折叠,可「重新上传」覆盖轮换,也可「用已有的密钥」把账号级连接绑到本项目);`config` → 纯输入框。
+- **第一次接入在对话里完成,不在面板**:能力条「+ 连接」展开内联 provider 列表 → 选中后对话流末尾展开 `web/src/components/ConnectorCard.tsx` 凭证卡片。密钥**只上行、永不回显**,且**不走消息链路**(直接 `POST /api/connections/:provider/secret`)—— 明文不进 `messages` 表、不进 prompt、不进 `agent_log`。面板只留慢变量(换账号/撤销/重新上传/draft 与 live 分开配)。卡片默认绑 `draft`,要发线上需显式点「线上」。
+- **卡片先给复用、再给新建**:卡片顶部列出账号下已保存过的该 provider 凭证(点一下只写一条项目级绑定,**不重传密钥**;`oauth` 也适用,选已授权账号即**免二次授权**),要换账号/传新密钥才走下面的输入框或授权页。数据来自 `GET /api/projects/:id/connectors` 响应里的账号级 `connections`(draft/live 两份是同一份列表)。
+- 生成中 chip 只读:凭证在 dispatch 时已定,steering 不改连接器。
+
+### 19.6 运行约束
+
+- `CONNECTOR_KEK` 是 **Worker secret,顶层与 `env.staging` 各写一次**(`wrangler secret put`,绑定类配置不可继承)。**换掉 = 所有用户连接需重新授权**(解密失败统一按「请重新授权」处理)。
+- 信任模型:平台主密钥能解开所有用户的连接凭证 —— 这一点写在面板文案里,不隐藏;要规避需等 Workers for Platforms。
+- 未配置 `CONNECTOR_KEK` 时连接器整体降级为不可用(接口返回 `enabled:false`,面板提示),**不影响其它功能**;生成链路 `resolveGrants` 直接返回空。
+- OAuth 复用登录那套 Google 客户端(`GOOGLE_CLIENT_ID/SECRET`),state 随机数存 HttpOnly cookie 防 CSRF;回调顶层跳回工作台并带 `?connected=` / `?connector_error=`。state 形如 `<随机数>~<projectId>~<env>~<非密配置 base64url>` —— 卡片里已填的必填配置随授权往返带过去,回调时与 `connectionId` **合并**落库(不是整体覆盖),所以「换账号重授权」不会把之前填好的 `propertyId` 抹掉,也不需要用户回来再补一次。
+- 提示词里的支付口径改为分档:允许**外链支付按钮**(Payment Link),继续禁止收集/存储卡号、CVC、密码。
+
+### 19.7 待用户在平台侧完成(v0 验收依赖)
+
+1. Google Cloud Console 在现有 OAuth 客户端追加回调 URI:`${PUBLIC_BASE_URL}/api/connections/ga4/callback`(staging 与生产各一次)。
+2. 启用 **Analytics Data API**(`analyticsdata.googleapis.com`),否则生成期读数为 403。
+3. GA4 首个 provider 的验收判据:生成的应用统计区块显示**真实 GA 数字**(不是模型编的),且页面上报用的 `G-XXXX` 来自绑定配置。

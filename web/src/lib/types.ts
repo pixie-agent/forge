@@ -153,6 +153,83 @@ export interface SqlObject {
   count: number | null
 }
 
+// ---------- 连接器(外部系统接入,见 docs/CONNECTORS.md) ----------
+
+/** 连接器形态:oauth=授权外部账号;apikey=用户粘贴自己的密钥;config=只要用户填个值 */
+export type ConnectorAuth = 'oauth' | 'apikey' | 'config'
+
+/** provider 的一个配置项(非密);public=true 的值会随生成页下发 */
+export interface ConnectorConfigField {
+  key: string
+  label: string
+  hint?: string
+  placeholder?: string
+  public?: boolean
+  required?: boolean
+}
+
+/** auth='apikey' 时要用户粘贴的一项密钥(密码输入框,值只上行、永不回显) */
+export interface ConnectorSecretField {
+  key: string
+  label: string
+  hint?: string
+  placeholder?: string
+  required?: boolean
+}
+
+/** provider 的对外形状(不含任何内部定义) */
+export interface ConnectorProviderProfile {
+  id: string
+  name: string
+  blurb: string
+  auth: ConnectorAuth
+  /** true = 含可写能力:绑定后不默认生效,需在本轮显式点亮 */
+  writable: boolean
+  configFields: ConnectorConfigField[]
+  /** 该 provider 需要 OAuth 客户端而平台未配置(前端据此禁用「连接」按钮) */
+  needsOauthClient: boolean
+  /** OAuth 回调地址:需在外部控制台原样登记,未登记会 400 redirect_uri_mismatch */
+  redirectUri?: string
+  /** auth='apikey' 时由用户粘贴的密钥项 */
+  secretInputs?: ConnectorSecretField[]
+}
+
+/** 账号级连接(一个外部账号可服务多个项目);凭证永不出现在响应里 */
+export interface ConnectorConnection {
+  id: string
+  provider: string
+  accountLabel: string
+  scopes: string[]
+  status: 'active' | 'revoked' | 'error'
+}
+
+/** 项目级绑定(按 env 区分,与预览/线上同口径) */
+export interface ProjectConnectorBinding {
+  config: Record<string, string>
+  connectionId: string
+  /** 绑定的外部账号名;未绑或连接已删为 null */
+  accountLabel: string | null
+  /** missing = 绑了 provider 但还没授权账号 */
+  connectionStatus: 'active' | 'revoked' | 'error' | 'missing' | null
+  /** 必填但尚未填写的配置项 key */
+  missing: string[]
+  createdAt: string
+}
+
+export interface ProjectConnectorProvider extends ConnectorProviderProfile {
+  binding: ProjectConnectorBinding | null
+}
+
+/** GET /api/projects/:id/connectors 的响应(按 env 各取一次) */
+export interface ProjectConnectorsResponse {
+  enabled: boolean
+  /** enabled=false 时的原因(如未配置 CONNECTOR_KEK) */
+  reason?: string
+  env: SiteDataEnv
+  providers: ProjectConnectorProvider[]
+  connections: ConnectorConnection[]
+}
+
 // ---------- 管理后台(只读) ----------
 
 /** 草稿(工作副本,version_no = 0)的元信息;has_artifacts=false 时 preview_token 为 null */

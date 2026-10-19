@@ -47,6 +47,13 @@ interface Props {
   onStop?: () => void
   /** 停止请求在途 */
   stopping?: boolean
+  /** 输入框上方的「本轮可用外部系统」能力条(由 Workspace 组装成 chip,见 ConnectorChips) */
+  connectorsBar?: React.ReactNode
+  /**
+   * 对话流末尾的「接入外部系统」凭证卡片(由 Workspace 在用户选了某个 provider 后传入)。
+   * 卡片自带滚动定位;不传则什么都不渲染。
+   */
+  credentialCard?: React.ReactNode
 }
 
 /** generate 的执行路径(三步) */
@@ -95,7 +102,7 @@ function storeWidth(w: number): void {
   }
 }
 
-export default function ChatPanel({ messages, plan, streaming, error, stage, elapsed, agentLog, jobType, idlePlaceholder, mobileHidden, onSend, onSteer, onRetry, onStop, stopping }: Props) {
+export default function ChatPanel({ messages, plan, streaming, error, stage, elapsed, agentLog, jobType, idlePlaceholder, mobileHidden, onSend, onSteer, onRetry, onStop, stopping, connectorsBar, credentialCard }: Props) {
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [attachError, setAttachError] = useState('')
@@ -452,9 +459,14 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
             )}
           </div>
         )}
+
+        {/* 接入外部系统的凭证卡片:密钥走独立通道,不进消息、不进 prompt(见 ConnectorCard) */}
+        {credentialCard}
       </div>
 
       <div className="border-t border-gray-800 p-3">
+        {/* 本轮可用的外部系统(连接器能力条):绑定即默认生效,这里只是临时开关 */}
+        {connectorsBar}
         {/* 已选附件:图片给缩略图、文本给图标;逐个可移除 */}
         {attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-2">
