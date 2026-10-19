@@ -3,6 +3,11 @@
 /** 未完成任务判定:任务创建互斥与断线恢复共用同一语义 */
 export const ACTIVE_STATUS_SQL = "status IN ('pending','running')"
 
+/** 终态判定:SSE 推完即关流、前端停止订阅,统一以此为准(cancelled 也是终态) */
+export function isTerminalStatus(status: string): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'cancelled'
+}
+
 export async function assertCredits(db: D1Database, userId: string): Promise<boolean> {
   const row = await db.prepare('SELECT credits FROM users WHERE id = ?').bind(userId).first<{ credits: number }>()
   return !!row && row.credits >= 1
@@ -18,6 +23,15 @@ export async function insertMessage(
     .prepare('INSERT INTO messages (id, project_id, role, content) VALUES (?, ?, ?, ?)')
     .bind(crypto.randomUUID(), projectId, role, content)
     .run()
+}
+
+/**
+ * 清掉某任务的「追加要求」投递队列(见 docs/FORGE2.md §5.2)。
+ * 队列只是投递通道,内容早已作为 user 消息写进 messages,所以删掉不影响对话记录;
+ * 顺带把里面可能带着的附件 base64(最大 1.6MB)一起释放掉——它本来就只该活到任务落定。
+ */
+export async function clearJobMessages(db: D1Database, jobId: string): Promise<void> {
+  await db.prepare('DELETE FROM job_messages WHERE job_id = ?').bind(jobId).run().catch(() => {})
 }
 
 const SNAPSHOT_COLUMNS =

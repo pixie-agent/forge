@@ -33,7 +33,9 @@ export default function AdminProject() {
     try {
       const d = await api<AdminProjectDetail>(`/api/admin/projects/${id}`)
       setDetail(d)
-      if (d.versions[0]) setVersionNo(d.versions[0].version_no)
+      // 默认看草稿(工作副本):它就是用户此刻看到的样子;没有草稿才回退到最新正式版本
+      if (d.draft) setVersionNo(0)
+      else if (d.versions[0]) setVersionNo(d.versions[0].version_no)
     } catch (err) {
       setError((err as Error).message)
     }
@@ -81,7 +83,8 @@ export default function AdminProject() {
   }, [dataEnv])
 
   const project = detail?.project
-  // 每个版本都签发草稿令牌,后台可直接预览该版本(与线上/当前版本解耦)
+  const draft = detail?.draft ?? null
+  // 每个版本都签发草稿令牌,后台可直接预览该版本(与线上/当前版本解耦);无构建产物时不签发,previewUrl 为 null
   const previewUrl = versionPreviewToken ? `/p/${versionPreviewToken}/` : null
   const envCollections = (detail?.collections ?? []).filter((c) => c.env === dataEnv)
 
@@ -109,6 +112,16 @@ export default function AdminProject() {
                   >
                     {project.status === 'published' ? '已发布' : '草稿'}
                   </span>
+                  {draft?.preview_token && (
+                    <a
+                      href={`/p/${draft.preview_token}/`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="rounded-lg border border-amber-500/40 px-3 py-1.5 text-xs text-amber-400 hover:bg-amber-500/10"
+                    >
+                      预览草稿 ↗
+                    </a>
+                  )}
                   <a
                     href={`/s/${project.slug}`}
                     target="_blank"
@@ -123,6 +136,7 @@ export default function AdminProject() {
                 <span>属主:{project.owner_email}</span>
                 <span>项目 ID:{project.id.slice(0, 8)}</span>
                 <span>当前版本:v{project.current_version}</span>
+                <span>草稿:{draft ? formatTime(draft.created_at) : '无'}</span>
                 <span>更新:{formatTime(project.updated_at)}</span>
               </div>
               <div className="mt-1 text-xs text-gray-600">
@@ -135,7 +149,7 @@ export default function AdminProject() {
             <div className="mb-4 flex flex-wrap gap-1">
               {(
                 [
-                  ['versions', `版本 (${detail.versions.length})`],
+                  ['versions', `版本 (${detail.versions.length}${draft ? ' + 草稿' : ''})`],
                   ['chat', `对话 (${detail.messages.length})`],
                   ['jobs', `任务 (${detail.jobs.length})`],
                   ['data', `站点数据 (${detail.collections.reduce((s, c) => s + c.count, 0)})`],
@@ -154,6 +168,21 @@ export default function AdminProject() {
             {tab === 'versions' && (
               <div className="flex flex-col gap-4 md:flex-row">
                 <div className="w-full shrink-0 space-y-1 md:w-56">
+                  {/* 草稿(工作副本)固定置顶:它不在正式版本序列里,但正是用户当下看到的样子 */}
+                  {draft && (
+                    <button
+                      onClick={() => setVersionNo(0)}
+                      className={`w-full rounded-lg px-3 py-2 text-left text-sm ${
+                        versionNo === 0 ? 'bg-amber-500/15 text-amber-200' : 'text-amber-400/80 hover:bg-gray-800/50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">草稿</span>
+                        <span className="text-xs text-amber-400/50">{(draft.bytes / 1024).toFixed(1)} KB</span>
+                      </div>
+                      <div className="truncate text-xs text-amber-400/50">{formatTime(draft.created_at)}</div>
+                    </button>
+                  )}
                   {detail.versions.map((v) => (
                     <button
                       key={v.version_no}
@@ -169,6 +198,11 @@ export default function AdminProject() {
                       <div className="truncate text-xs text-gray-600">{formatTime(v.created_at)}</div>
                     </button>
                   ))}
+                  {!draft && detail.versions.length === 0 && (
+                    <div className="rounded-lg border border-dashed border-gray-700 px-3 py-4 text-center text-xs text-gray-600">
+                      暂无草稿与版本
+                    </div>
+                  )}
                 </div>
 
                 <div className="min-w-0 flex-1">
@@ -194,6 +228,9 @@ export default function AdminProject() {
                           ))}
                         </div>
                         <div className="flex items-center gap-3">
+                          {versionNo === 0 && (
+                            <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-400">草稿 · 工作副本</span>
+                          )}
                           {versionManifest && (
                             <span className="text-xs text-gray-600">构建产物 {versionManifest.files.length} 个文件</span>
                           )}
@@ -232,7 +269,7 @@ export default function AdminProject() {
                         />
                       ) : (
                         <div className="flex h-[70vh] items-center justify-center rounded-xl border border-dashed border-gray-700 text-sm text-gray-500">
-                          该版本暂无构建产物
+                          {versionNo === 0 ? '草稿暂无构建产物(可能生成失败或从未构建)' : '该版本暂无构建产物'}
                         </div>
                       )}
                     </>

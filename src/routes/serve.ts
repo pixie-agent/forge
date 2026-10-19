@@ -33,7 +33,7 @@ async function manifestOf(env: Env, projectId: string, versionNo: number): Promi
 }
 
 /** 服务某个版本:subpath 为空或含扩展名 → 静态产物;以 api/ 开头 → 后端数据 API */
-async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo: number, dataEnv: 'draft' | 'live', apiBase: string, subpath: string): Promise<Response> {
+async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo: number, dataEnv: 'draft' | 'live', apiBase: string, subpath: string, title?: string | null): Promise<Response> {
   const env = c.env
   if (subpath.startsWith('api/') || subpath === 'api') {
     if (c.req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS })
@@ -51,7 +51,7 @@ async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo
   const renderEntry = async (): Promise<Response | null> => {
     const obj = await env.ARTIFACTS.get(prefix + entry)
     if (!obj) return null
-    const html = injectRuntime(await obj.text(), apiBase, dataEnv)
+    const html = injectRuntime(await obj.text(), apiBase, dataEnv, title)
     return new Response(html, {
       headers: {
         ...ASSET_CORS,
@@ -68,7 +68,7 @@ async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo
   const obj = await env.ARTIFACTS.get(prefix + clean)
   if (obj) {
     const isHtml = contentTypeFor(clean).startsWith('text/html')
-    const body = isHtml ? injectRuntime(await obj.text(), apiBase, dataEnv) : obj.body
+    const body = isHtml ? injectRuntime(await obj.text(), apiBase, dataEnv, title) : obj.body
     return new Response(body, {
       headers: {
         ...ASSET_CORS,
@@ -88,12 +88,12 @@ app.get('/s/:slug', (c) => c.redirect(`${c.req.path}/`, 301))
 app.all('/s/:slug/*', async (c) => {
   const slug = c.req.param('slug')
   const row = await c.env.DB
-    .prepare("SELECT id, published_version FROM projects WHERE slug = ? AND status = 'published'")
+    .prepare("SELECT id, published_version, name FROM projects WHERE slug = ? AND status = 'published'")
     .bind(slug)
-    .first<{ id: string; published_version: number }>()
+    .first<{ id: string; published_version: number; name: string }>()
   if (!row || row.published_version < 1) return c.text('404 Not Found', 404)
   const subpath = c.req.path.slice(`/s/${slug}/`.length)
-  return serve(c, row.id, row.published_version, 'live', `/s/${slug}/api`, subpath)
+  return serve(c, row.id, row.published_version, 'live', `/s/${slug}/api`, subpath, row.name)
 })
 
 /** 草稿预览:HMAC 令牌 → 项目+版本(同样 all,支持预览环境里的数据写入) */
@@ -102,8 +102,9 @@ app.all('/p/:token/*', async (c) => {
   const token = c.req.param('token')
   const loc = await verifyPreviewToken(c.env, token)
   if (!loc) return c.text('404 Not Found', 404)
+  const name = await c.env.DB.prepare('SELECT name FROM projects WHERE id = ?').bind(loc.projectId).first<{ name: string }>()
   const subpath = c.req.path.slice(`/p/${token}/`.length)
-  return serve(c, loc.projectId, loc.versionNo, 'draft', `/p/${token}/api`, subpath)
+  return serve(c, loc.projectId, loc.versionNo, 'draft', `/p/${token}/api`, subpath, name?.name)
 })
 
 export const serveRoutes = app

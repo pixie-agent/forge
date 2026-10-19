@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   user_id        TEXT NOT NULL REFERENCES users(id),
   type           TEXT NOT NULL,             -- 'generate' | 'chat'
   payload        TEXT NOT NULL,             -- JSON:{idea} 或 {message}
-  status         TEXT NOT NULL DEFAULT 'pending',  -- pending | running | succeeded | failed
+  status         TEXT NOT NULL DEFAULT 'pending',  -- pending | running | succeeded | failed | cancelled(用户手动停止)
   stage          TEXT NOT NULL DEFAULT 'planning', -- planning | coding | building
   progress       TEXT,                      -- 人读的分段进度(agent 写入)
   plan_json      TEXT,
@@ -74,6 +74,18 @@ CREATE TABLE IF NOT EXISTS jobs (
   started_at     TEXT,
   updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))  -- 任务总龄的计时起点(cron 据此永久判死)
+);
+
+-- 生成过程中用户「追加的要求」投递队列(见 docs/FORGE2.md §5.2):
+-- agent 每 5s 轮询 /internal/jobs/:id/state 取走未消费的行,交给 pi 的 session.steer()。
+-- attachments 里是 base64(上限 1.2MB),生命周期只到任务落定 —— 落定时整表按 job_id 清掉。
+CREATE TABLE IF NOT EXISTS job_messages (
+  id           TEXT PRIMARY KEY,
+  job_id       TEXT NOT NULL REFERENCES jobs(id),
+  content      TEXT NOT NULL,
+  attachments  TEXT,                        -- JSON:[{name,mimeType,data}],无附件为 NULL
+  consumed_at  TEXT,                        -- 已被 agent 取走(仅防重复投递,不代表消息已删除)
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- 生成应用的后端(D1 文档集合),路径 /s/:slug/api/db/:collection 读写

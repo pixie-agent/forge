@@ -1,0 +1,105 @@
+/*
+ * 把 tokens.css 的变量桥接成 Tailwind 工具类(@theme inline 会保留 var() 引用,
+ * 所以浅/暗色切换是纯 CSS 生效,组件不需要写 dark: 变体)。
+ *
+ * 可用类名(组件里只用这些,不要写死颜色):
+ *   底色  bg-canvas / bg-panel / bg-panel-2 / bg-brand-soft
+ *   边框  border-line
+ *   文字  text-ink / text-muted / text-brand / text-brand-600 / text-accent
+ *   状态  text-success / text-warning / text-danger
+ *   圆角  rounded-card / rounded-field / rounded-pill
+ *   阴影  shadow-card / shadow-lift / shadow-pop
+ *   缓动  ease-soft / ease-spring
+ *   字体  font-sans(默认) / font-num(数字与代码)
+ */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-brand-soft: var(--brand-soft);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-brand: var(--brand);
+  --color-brand-50: var(--brand-50);
+  --color-brand-100: var(--brand-100);
+  --color-brand-500: var(--brand-500);
+  --color-brand-600: var(--brand-600);
+  --color-brand-700: var(--brand-700);
+  --color-accent: var(--accent);
+  --color-accent-50: var(--accent-50);
+  --color-accent-500: var(--accent-500);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  --font-sans: var(--font-app);
+  --font-num: var(--font-num);
+
+  --radius-card: var(--r-card);
+  --radius-field: var(--r-field);
+  --radius-pill: 9999px;
+
+  --shadow-card: var(--elev-card);
+  --shadow-lift: var(--elev-lift);
+  --shadow-pop: var(--elev-pop);
+
+  --ease-soft: var(--motion-soft);
+  --ease-spring: var(--motion-spring);
+}
+
+/* 进场 / 强调用的关键帧与工具类(手写,避免依赖额外插件) */
+@keyframes forge-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+@keyframes forge-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes forge-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@keyframes forge-shimmer {
+  to {
+    background-position: 200% 0;
+  }
+}
+@keyframes forge-float {
+  50% {
+    transform: translateY(-8px);
+  }
+}
+@keyframes forge-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.anim-fade-up {
+  animation: forge-fade-up 0.5s var(--motion-soft) both;
+}
+.anim-fade-in {
+  animation: forge-fade-in 0.4s var(--motion-soft) both;
+}
+.anim-scale-in {
+  animation: forge-scale-in 0.28s var(--motion-spring) both;
+}
+.anim-float {
+  animation: forge-float 4s ease-in-out infinite;
+}
+.anim-spin {
+  animation: forge-spin 0.9s linear infinite;
+}
+/* 骨架屏底纹 */
+.shimmer {
+  background-image: linear-gradient(90deg, transparent, color-mix(in oklab, var(--ink) 8%, transparent), transparent);
+  background-size: 200% 100%;
+  animation: forge-shimmer 1.6s linear infinite;
+}

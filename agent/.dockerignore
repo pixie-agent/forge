@@ -1,6 +1,10 @@
-node_modules
-dist
-.npm-cache
+# 构建上下文只该包含源码。宿主 node_modules / 构建产物 / 本地缓存一律排除。
+# 关键:template/node_modules 若不排除,会覆盖容器内 npm install 的 Linux 结果,
+# 且其 .bin 符号链接在上下文传输中被解引用成普通文件,路径错位导致 vite CLI
+# 解析到 node_modules/dist/node/cli.js → ERR_MODULE_NOT_FOUND。
+**/node_modules
+**/dist
+**/.npm-cache
 .env
 .env.*
 *.log

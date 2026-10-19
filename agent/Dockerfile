@@ -11,9 +11,13 @@ RUN npm run build
 # 预装 Vite+React 脚手架依赖:每个 job 直接拷贝模板 + 符号链接 node_modules,运行期不再 npm install
 FROM node:22-bookworm-slim AS template
 WORKDIR /opt/forge-template
-COPY template/package.json ./
-RUN npm install && npm cache clean --force
+# 先落源码、再装依赖:npm install 会重建 node_modules,保证镜像里是 Linux 原生安装。
+# (构建上下文已用 .dockerignore/.gcloudignore 排除宿主 node_modules;这里 rm -rf 是第二道保险,
+#  即使有残留也不会让宿主的 .bin 软链覆盖掉正确安装。)
 COPY template/ ./
+RUN rm -rf node_modules \
+  && npm install --no-audit --no-fund \
+  && npm cache clean --force
 
 FROM node:22-bookworm-slim
 WORKDIR /app

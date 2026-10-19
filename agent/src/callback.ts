@@ -1,6 +1,6 @@
 /** 与 Cloudflare Worker 内部接口的通信:进度/心跳上报,以及最终结果的 commit / fail 回调 */
 
-import type { Plan, RunResult } from './types.js'
+import type { Plan, RunResult, SteerMessage } from './types.js'
 
 export interface ProgressUpdate {
   stage?: 'planning' | 'coding' | 'building'
@@ -128,6 +128,53 @@ export function startHeartbeat(callbackBase: string, secret: string, jobId: stri
   tick()
   const timer = setInterval(tick, intervalMs)
   return () => clearInterval(timer)
+}
+
+/**
+ * 任务巡检(每 5s 一次 GET /internal/jobs/:id/state),一次轮询承担两件事:
+ * - **取消**:用户点「停止」→ onCancel,调用方 abort 当前轮次(Cloud Run 的在途请求无法被
+ *   Worker 反向杀掉,所以取消是协作式的:agent 自己查、自己收手);
+ * - **追加要求**:用户在生成过程中补充的话/图 → onMessages,调用方 session.steer() 进去。
+ * 取消是终态,一旦命中就停止轮询;消息只管转发,不用回执(Worker 侧已标记 consumed)。
+ * 请求异常只当网络抖动,下一轮再试(不因此放弃巡检)。
+ * 返回停止函数。
+ */
+export interface JobWatchHandlers {
+  onCancel: () => void
+  onMessages?: (messages: SteerMessage[]) => void
+}
+
+export function startJobWatcher(
+  callbackBase: string,
+  secret: string,
+  jobId: string,
+  handlers: JobWatchHandlers,
+  intervalMs = 5_000,
+): () => void {
+  let stopped = false
+  const url = `${callbackBase.replace(/\/+$/, '')}/internal/jobs/${jobId}/state`
+  const tick = async () => {
+    if (stopped) return
+    try {
+      const res = await fetch(url, { headers: { 'X-Agent-Secret': secret } })
+      if (stopped || !res.ok) return
+      const data = (await res.json()) as { cancelled?: boolean; messages?: SteerMessage[] }
+      if (data.cancelled) {
+        stopped = true
+        clearInterval(timer)
+        handlers.onCancel()
+        return
+      }
+      if (data.messages?.length) handlers.onMessages?.(data.messages)
+    } catch {
+      // 网络抖动/网关抖动:下一轮再问
+    }
+  }
+  const timer = setInterval(() => void tick(), intervalMs)
+  return () => {
+    stopped = true
+    clearInterval(timer)
+  }
 }
 
 /** 最终结果回调(与 HTTP 响应二选一即可:Worker 以该回调为准,响应不作为交付依据) */

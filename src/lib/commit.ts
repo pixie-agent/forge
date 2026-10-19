@@ -1,7 +1,7 @@
 /** 任务终态落定:由 agent 的 commit/fail 回调触发(见 docs/FORGE2.md) */
 
 import type { Env, Plan } from '../types'
-import { insertMessage } from './jobHelpers'
+import { clearJobMessages, insertMessage } from './jobHelpers'
 import { deductCredit } from './credits'
 import { clearArtifacts, DRAFT_VERSION_NO, putArtifacts } from './artifacts'
 import type { AgentRunResult, FileMap } from './agent'
@@ -31,6 +31,9 @@ export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunR
     .first<JobRow>()
   if (!job) throw new Error('任务不存在')
   if (job.status !== 'running' && job.status !== 'pending') return { ok: true, reason: 'already-settled' }
+
+  // 任务到此为止:追加要求的投递队列(含附件 base64)可以整批释放了
+  await clearJobMessages(db, jobId)
 
   const payload = JSON.parse(job.payload) as { idea?: string; message?: string }
   const prompt = String(payload.idea ?? payload.message ?? '')
@@ -102,10 +105,32 @@ export async function markJobFailed(env: Env, jobId: string, error: string): Pro
     .bind(error.slice(0, 300), jobId)
     .run()
     .catch(() => null)
+  if (res?.meta.changes) await clearJobMessages(env.DB, jobId)
   return !!res?.meta.changes
 }
 
 /** 失败落定(agent fail 回调入口) */
 export async function failJobWith(env: Env, jobId: string, error: string): Promise<void> {
   await markJobFailed(env, jobId, error)
+}
+
+/**
+ * 手动停止落定(用户点「停止」):把活动任务置为 cancelled。
+ * - 立即释放项目锁(ACTIVE_STATUS_SQL 不再命中 cancelled),用户可以马上发起新任务;
+ * - 不扣积分、不写产物;agent 侧的协作式取消只是"尽快停手",已跑出的中间结果一并丢弃;
+ * - 与 commit 的竞态:commit 的落定守卫是 `WHERE status IN ('pending','running')`,先取消则
+ *   迟到的 commit 只会返回 already-settled,不会把已停止的任务复活成成功。
+ * 返回是否真的从活动态迁移到 cancelled(已终态/不存在返回 false)。
+ */
+export async function cancelJob(env: Env, jobId: string): Promise<boolean> {
+  const res = await env.DB
+    .prepare(
+      `UPDATE jobs SET status = 'cancelled', error = '已手动停止', files_preview = NULL, updated_at = datetime('now')
+       WHERE id = ? AND status IN ('pending','running')`
+    )
+    .bind(jobId)
+    .run()
+    .catch(() => null)
+  if (res?.meta.changes) await clearJobMessages(env.DB, jobId)
+  return !!res?.meta.changes
 }

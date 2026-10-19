@@ -20,7 +20,9 @@
 | R2 | `forge-v2-artifacts` | `forge-v2-artifacts-staging` |
 | KV | `f6b66c90…` | `67e46b44…` |
 | 内部密钥 | Secret `agent-secret` | Secret `agent-secret-staging` |
-| LLM 密钥 | Secret `llm-api-key` | 复用同一把 |
+| LLM 密钥 | Secret `llm-api-key`(DeepSeek) | Secret `llm-api-key-staging`(GLM,另一把) |
+| LLM 模型 | `deepseek-flash`(Anthropic 方言) | `glm-5.3-flash`(OpenAI 兼容 + `zai` 思考格式) |
+| 用户上传图片给模型看 | **关闭**(`PI_MODEL_INPUT_IMAGE` 未设) | 开启(`PI_MODEL_INPUT_IMAGE=true`) |
 | 环境标识 | 不设 `ENVIRONMENT` | `ENVIRONMENT=staging` |
 
 ### 分支模型
@@ -63,6 +65,7 @@ npm run agent:deploy:prod                                       #    只在改�
 - **wrangler 的绑定类配置不可继承**:`vars` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `durable_objects` / secrets 必须在顶层与 `env.staging` 里**各写一遍**。漏写不会在部署时报错,而是运行时 `c.env.XXX === undefined`(例如漏 `PROJECT_DB` 会让生成应用的数据面板直接 500)。**新增任何绑定必须两边同时加。**
 - **前端环境角标**走运行时下发:staging 的 `vars.ENVIRONMENT=staging` → `GET /api/auth/config` 返回 `environment` → `<EnvBadge>` 渲染琥珀色角标。生产不设该变量,回落 `production`、不渲染。
 - **Worker secret 只写不可读**:没有任何 API 或命令能把已写入的 secret 读回来(`secrets` 接口只返回名字)。换环境只能由持有原始值的人重新输入,不要承诺「把生产的复制过去」。
+- **模型的多模态能力也是环境差异**:`PI_MODEL_INPUT_IMAGE=true` 才会在 `models.json` 里声明 `input: ['text','image']`。上游网关方言不一定认 image 块,声明了却发不出去会直接 400,所以**不要为了「保持一致」把生产的这个开关打开**——先实测生产端点。
 
 ---
 

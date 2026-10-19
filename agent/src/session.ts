@@ -24,7 +24,7 @@ function modelsJson(config: AgentConfig): string {
     name: config.modelId,
     api: config.llmApi,
     reasoning: config.modelReasoning,
-    input: ['text'],
+    input: config.supportsImageInput ? ['text', 'image'] : ['text'],
     contextWindow: 200_000,
     maxTokens: 16_384,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
