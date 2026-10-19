@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import type { AppEnv } from '../types'
 import { requireUser } from '../lib/auth'
-import { jobSnapshot } from '../lib/jobHelpers'
+import { jobSnapshot, isTerminalStatus } from '../lib/jobHelpers'
 
 /** 任务状态轮询:仅任务属主可查 */
 const app = new Hono<AppEnv>()
@@ -48,7 +48,7 @@ app.get('/:id/events', async (c) => {
           lastSentAt = now
           await stream.writeSSE({ data: JSON.stringify(snap) })
         }
-        if (snap.status === 'succeeded' || snap.status === 'failed') break
+        if (isTerminalStatus(snap.status)) break
         if (stream.aborted) break
         await stream.sleep(1500)
       }

@@ -92,7 +92,7 @@ export default function AdminUser() {
                         <th className="px-4 py-2.5 font-medium">对话</th>
                         <th className="px-4 py-2.5 font-medium">产物</th>
                         <th className="px-4 py-2.5 font-medium">数据</th>
-                        <th className="px-4 py-2.5 font-medium">公开链接</th>
+                        <th className="px-4 py-2.5 font-medium">链接 / 预览</th>
                         <th className="px-4 py-2.5 font-medium">更新时间</th>
                       </tr>
                     </thead>
@@ -112,20 +112,41 @@ export default function AdminUser() {
                               {p.status === 'published' ? '已发布' : '草稿'}
                             </span>
                           </td>
-                          <td className="px-4 py-2.5 text-gray-400">v{p.current_version}（{p.versions_count}）</td>
+                          <td className="px-4 py-2.5 text-gray-400">
+                            v{p.current_version}（{p.versions_count}）
+                            {p.draft && (
+                              <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-400">草稿</span>
+                            )}
+                          </td>
                           <td className="px-4 py-2.5 text-gray-400">{p.messages_count}</td>
                           <td className="px-4 py-2.5 text-gray-400">{formatBytes(p.bytes)}</td>
                           <td className="px-4 py-2.5 text-gray-400">{p.data_count}</td>
                           <td className="px-4 py-2.5">
-                            <a
-                              href={`/s/${p.slug}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-indigo-400 hover:text-indigo-300"
-                            >
-                              /s/{p.slug}
-                            </a>
+                            <div className="flex flex-col gap-1">
+                              {p.status === 'published' && (
+                                <a
+                                  href={`/s/${p.slug}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-indigo-400 hover:text-indigo-300"
+                                >
+                                  /s/{p.slug}
+                                </a>
+                              )}
+                              {p.draft?.preview_token && (
+                                <a
+                                  href={`/p/${p.draft.preview_token}/`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-amber-400 hover:text-amber-300"
+                                >
+                                  草稿预览 ↗
+                                </a>
+                              )}
+                              {p.status !== 'published' && !p.draft?.preview_token && <span className="text-xs text-gray-600">—</span>}
+                            </div>
                           </td>
                           <td className="px-4 py-2.5 text-xs text-gray-600">{formatTime(p.updated_at)}</td>
                         </tr>

@@ -3,7 +3,8 @@ import { ACTIVE_STATUS_SQL } from './jobHelpers'
 import { markJobFailed } from './commit'
 
 export type JobType = 'generate' | 'chat'
-export type JobStatus = 'pending' | 'running' | 'succeeded' | 'failed'
+/** cancelled = 用户手动停止(终态,不扣积分);由 POST /api/projects/:id/cancel 落定,见 src/lib/commit.ts */
+export type JobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
 /** agent 心跳间隔 20s;超过这么久没心跳即认为执行体失联(Cold start + 首跳留足余量) */
 const HEARTBEAT_TIMEOUT_SECONDS = 180
@@ -49,4 +50,10 @@ export async function sweepJobs(env: Env): Promise<void> {
     .prepare(`SELECT id FROM jobs WHERE ${ACTIVE_STATUS_SQL} AND created_at < datetime('now', '-${JOB_MAX_SECONDS} seconds')`)
     .all<{ id: string }>()
   for (const row of timedOut.results) await markJobFailed(env, row.id, '任务超时未完成,请重新发起')
+
+  // 兜底:追加要求的投递队列只活到任务落定(落定路径已清),这里扫掉异常退出留下的孤儿行
+  await env.DB
+    .prepare(`DELETE FROM job_messages WHERE job_id NOT IN (SELECT id FROM jobs WHERE ${ACTIVE_STATUS_SQL})`)
+    .run()
+    .catch(() => {})
 }

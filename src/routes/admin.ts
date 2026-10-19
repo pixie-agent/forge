@@ -2,17 +2,69 @@
  * 管理后台(只读):跨用户查看全部产物 —— 项目列表、每个项目的全部版本 HTML、对话记录、
  * 任务(含 agent 流式日志)、站点数据,以及公开链接。并可按用户聚合查看使用情况
  * (项目/版本/对话/任务数、积分、活跃度、产物体量)。
- * 鉴权与普通用户体系隔离,见 lib/admin.ts(`ADMIN_PASSWORD` 口令 + 派生 cookie)。
+ * 版本与「草稿(version_no = 0,工作副本)」都可预览:草稿不进版本列表,作为独立字段下发,
+ * 列表页可直接预览尚未生成正式版本的项目。鉴权与普通用户体系隔离,见 lib/admin.ts(`ADMIN_PASSWORD` 口令 + 派生 cookie)。
  */
 
 import { Hono } from 'hono'
-import type { Env } from '../types'
+import type { ArtifactManifest, Env } from '../types'
 import { adminCookie, clearAdminCookie, isAdmin, requireAdmin, verifyAdminPassword } from '../lib/admin'
 import { isSecureRequest } from '../lib/auth'
-import { signPreviewToken } from '../lib/artifacts'
+import { DRAFT_VERSION_NO, signPreviewToken } from '../lib/artifacts'
 import { callProjectDb, projectSchema, runProjectSql, seedProjectDocs, type SeedRow } from '../lib/projectDb'
 
 const app = new Hono<{ Bindings: Env }>()
+
+/** 草稿(工作副本)在后台呈现所需的元信息 */
+interface AdminDraftMeta {
+  version_no: number
+  bytes: number
+  prompt: string
+  created_at: string
+  /** 是否已有构建产物(产物在 R2,清单的 files 长度即产物文件数) */
+  has_artifacts: boolean
+  /** 预览令牌;无产物时为 null,前端据此显示空状态而不是打开一个 404 的 iframe */
+  preview_token: string | null
+}
+
+/**
+ * 草稿行(version_no = 0)的查询:产物文件数交给 SQL 算,避免把整棵清单 manifest_json 拉进 Worker。
+ * json_valid 兜底损坏数据(json_extract 遇到非法 JSON 会直接报错)。
+ */
+const DRAFT_SELECT = `SELECT bytes, prompt, created_at,
+    COALESCE(CASE WHEN json_valid(manifest_json) THEN json_array_length(json_extract(manifest_json, '$.files')) END, 0) AS artifact_files
+  FROM versions WHERE project_id = ? AND version_no = ${DRAFT_VERSION_NO}`
+
+interface DraftRow {
+  bytes: number
+  prompt: string
+  created_at: string
+  artifact_files: number
+}
+
+/**
+ * 把草稿行加工成后台可用的预览项。
+ * 后台原先只列正式版本(version_no > 0),于是「只对话过、还没生成过版本」的项目在这里没有任何可看的内容;
+ * 草稿才是真正的工作副本,补上它才能预览到用户当下看到的样子。
+ * 令牌是无状态 HMAC(绑定 projectId + versionNo),与 /p/:token 的定位方式一致,不依赖 cookie。
+ */
+async function draftMeta(env: Env, projectId: string, row: DraftRow | null): Promise<AdminDraftMeta | null> {
+  if (!row) return null
+  const hasArtifacts = (row.artifact_files ?? 0) > 0
+  return {
+    version_no: DRAFT_VERSION_NO,
+    bytes: row.bytes,
+    prompt: row.prompt,
+    created_at: row.created_at,
+    has_artifacts: hasArtifacts,
+    preview_token: hasArtifacts ? await signPreviewToken(env, projectId, DRAFT_VERSION_NO) : null,
+  }
+}
+
+/** 某行的构建清单是否有产物:后台只在有产物时才签发预览令牌 */
+function hasArtifactsOf(manifest: ArtifactManifest | null): boolean {
+  return Array.isArray(manifest?.files) && manifest.files.length > 0
+}
 
 /**
  * 单个用户使用情况的聚合列(SELECT 片段,供列表/详情复用)。
@@ -129,11 +181,18 @@ app.get('/projects', async (c) => {
     .bind(...filterBinds, limit, offset)
     .all()
 
-  // 数据条数:文档存储已迁到「项目 × 环境」的独立 SQLite,逐项目实时统计(旧 D1 site_data 已停写)
+  // 数据条数与草稿:文档存储已迁到「项目 × 环境」的独立 SQLite(旧 D1 site_data 已停写);
+  // 草稿(version_no = 0)不进 versions_count,单独带上,列表页可直接预览未确认的工作副本
   const rows = results as unknown as Record<string, unknown>[]
   await Promise.all(
     rows.map(async (p) => {
-      p.data_count = await countProjectData(c.env, String(p.id))
+      const projectId = String(p.id)
+      const [dataCount, draftRow] = await Promise.all([
+        countProjectData(c.env, projectId),
+        c.env.DB.prepare(DRAFT_SELECT).bind(projectId).first<DraftRow>(),
+      ])
+      p.data_count = dataCount
+      p.draft = await draftMeta(c.env, projectId, draftRow)
     })
   )
 
@@ -202,18 +261,24 @@ app.get('/users/:id', async (c) => {
       .all(),
   ])
 
-  // 数据行数需逐项目读 Durable Object,仅在该用户的项目集上计算(按用户维度,量可控)
+  // 数据行数与草稿需逐项目读(前者读 Durable Object,后者读 versions),仅在该用户的项目集上计算
   const projects = projectsRes.results as unknown as Record<string, unknown>[]
   await Promise.all(
     projects.map(async (p) => {
-      p.data_count = await countProjectData(c.env, String(p.id))
+      const projectId = String(p.id)
+      const [dataCount, draftRow] = await Promise.all([
+        countProjectData(c.env, projectId),
+        c.env.DB.prepare(DRAFT_SELECT).bind(projectId).first<DraftRow>(),
+      ])
+      p.data_count = dataCount
+      p.draft = await draftMeta(c.env, projectId, draftRow)
     })
   )
 
   return c.json({ user, projects, jobs: jobsRes.results })
 })
 
-/** 单个产物详情:项目 + 属主 + 版本元信息 + 对话 + 任务(含 agent 日志尾部)+ 站点数据计数 */
+/** 单个产物详情:项目 + 属主 + 版本元信息 + 草稿 + 对话 + 任务(含 agent 日志尾部)+ 站点数据计数 */
 app.get('/projects/:id', async (c) => {
   const id = c.req.param('id')
   const project = await c.env.DB
@@ -224,7 +289,7 @@ app.get('/projects/:id', async (c) => {
     .first()
   if (!project) return c.json({ error: '项目不存在' }, 404)
 
-  const [versions, messages, jobs, collections] = await Promise.all([
+  const [versions, messages, jobs, collections, draftRow] = await Promise.all([
     c.env.DB
       .prepare('SELECT version_no, bytes, prompt, created_at FROM versions WHERE project_id = ? AND version_no > 0 ORDER BY version_no DESC')
       .bind(id)
@@ -247,37 +312,44 @@ app.get('/projects/:id', async (c) => {
       }
       return out
     })(),
+    // 草稿(工作副本):不进版本列表,作为独立字段返回,后台可直接预览用户当下的工作副本
+    c.env.DB.prepare(DRAFT_SELECT).bind(id).first<DraftRow>(),
   ])
 
   return c.json({
     project,
     versions: versions.results,
+    draft: await draftMeta(c.env, id, draftRow),
     messages: messages.results,
     jobs: jobs.results,
     collections,
   })
 })
 
-/** 某个版本的完整源码树与产物清单(只读) */
+/** 某个版本的完整源码树与产物清单(只读);version_no = 0 即草稿(工作副本) */
 app.get('/projects/:id/versions/:no', async (c) => {
+  const id = c.req.param('id')
+  const no = Number(c.req.param('no'))
+  if (!Number.isInteger(no) || no < 0) return c.json({ error: '版本号不合法' }, 400)
   const row = await c.env.DB
     .prepare('SELECT version_no, src_json, manifest_json, bytes, prompt, created_at FROM versions WHERE project_id = ? AND version_no = ?')
-    .bind(c.req.param('id'), Number(c.req.param('no')))
+    .bind(id, no)
     .first<{ version_no: number; src_json: string; manifest_json: string; bytes: number; prompt: string; created_at: string }>()
   if (!row) return c.json({ error: '版本不存在' }, 404)
   let src: Record<string, string> = {}
-  let manifest: unknown = null
+  let manifest: ArtifactManifest | null = null
   try {
     src = JSON.parse(row.src_json) as Record<string, string>
   } catch {
     src = {}
   }
   try {
-    manifest = JSON.parse(row.manifest_json)
+    manifest = JSON.parse(row.manifest_json) as ArtifactManifest
   } catch {
     manifest = null
   }
-  const previewToken = await signPreviewToken(c.env, c.req.param('id'), row.version_no)
+  // 无构建产物时下发 null:前端据此显示空状态,而不是打开一个必然 404 的 iframe
+  const previewToken = hasArtifactsOf(manifest) ? await signPreviewToken(c.env, id, row.version_no) : null
   return c.json({ version: { version_no: row.version_no, bytes: row.bytes, prompt: row.prompt, created_at: row.created_at, src, manifest, previewToken } })
 })
 

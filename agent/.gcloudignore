@@ -1,0 +1,14 @@
+# gcloud --source agent 的上传排除表。
+# 与 .dockerignore 同一目的:绝不把宿主 node_modules / 构建产物 / 本地缓存传上去。
+# (宿主 macOS 的 node_modules 会覆盖容器内 npm install 的结果,其 .bin 符号链接
+#  被解引用后路径错位,vite CLI 会解析到 node_modules/dist/node/cli.js 而报
+#  ERR_MODULE_NOT_FOUND;同时白传 100MB+ 拖慢部署。)
+node_modules/
+template/node_modules/
+template/dist/
+dist/
+.npm-cache/
+.env
+.env.*
+*.log
+.gcloudignore

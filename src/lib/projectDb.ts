@@ -41,6 +41,12 @@ export interface SeedRow {
 
 const COLLECTION_RE = /^[a-z][a-z0-9_-]{0,31}$/
 const META_TABLE = '_forge_meta'
+/** 原子计数器表(生成应用的 kv.incr 落在这里;下划线前缀 → 不出现在 owner 的库结构树里) */
+const COUNTERS_TABLE = '_forge_counters'
+/** 分页参数上限(与 appdata.ts 的钳制口径一致) */
+const MAX_LIST_LIMIT = 200
+const MAX_LIST_OFFSET = 10_000
+const MAX_QUERY_LEN = 64
 
 function parseJson(text: unknown): unknown {
   if (typeof text !== 'string') return {}
@@ -79,7 +85,7 @@ export class ProjectDb implements DurableObject {
         case 'schema':
           return json({ objects: this.schema() })
         case 'db.list':
-          return json(this.listDocuments(String(payload.collection), Number(payload.limit ?? 100)))
+          return json(this.listDocuments(String(payload.collection), payload))
         case 'db.add':
           return this.addDocument(payload)
         case 'db.update':
@@ -89,6 +95,10 @@ export class ProjectDb implements DurableObject {
           return json({ ok: true })
         case 'db.collections':
           return json({ collections: this.listCollections() })
+        case 'counter.incr':
+          return json(this.counterIncr(String(payload.key ?? ''), Number(payload.by ?? 1), Number(payload.start ?? 0)))
+        case 'counter.get':
+          return json(this.counterGet(String(payload.key ?? '')))
         case 'seed':
           return json(this.seed(payload.rows as SeedRow[] | undefined))
         case 'seeded':
@@ -141,13 +151,69 @@ export class ProjectDb implements DurableObject {
 
   // ---------- 生成应用的「文档」接口 ----------
 
-  private listDocuments(collection: string, limit = 100) {
+  /**
+   * 列举集合里的文档(生成应用的数据列表接口)。
+   * 支持服务端分页 / 搜索 / 排序方向,并回传符合条件的总行数(total),
+   * 让生成应用做分页列表、搜索框与真实统计,而不是把 100 条拉回前端再算。
+   * 兼容旧调用:不传任何可选参数时行为与升级前一致(最新 100 条,倒序)。
+   */
+  private listDocuments(collection: string, opts: Record<string, unknown> = {}) {
     this.ensureTable(collection)
-    const n = Math.min(200, Math.max(1, Number(limit) || 100))
+    const table = quoteId(collection)
+    const rawLimit = Number(opts.limit ?? 100)
+    const n = Math.min(MAX_LIST_LIMIT, Math.max(1, Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : 100))
+    const rawOffset = Number(opts.offset ?? 0)
+    const offset = Math.min(MAX_LIST_OFFSET, Math.max(0, Number.isFinite(rawOffset) ? Math.trunc(rawOffset) : 0))
+    // 只接受 'asc' 这一个字面量,其余一律按倒序(最新在前),避免把外部输入拼进 SQL
+    const dir = opts.order === 'asc' ? 'ASC' : 'DESC'
+    const q = typeof opts.q === 'string' ? opts.q.trim().slice(0, MAX_QUERY_LEN) : ''
+    // 用 instr 而非 LIKE:免去 %/_ 转义,语义是「JSON 文本里包含该子串」
+    const where = q ? ' WHERE instr(data, ?) > 0' : ''
+    const whereArgs = q ? [q] : []
+
+    const total = Number(
+      (this.sql.exec(`SELECT COUNT(*) AS n FROM ${table}${where}`, ...whereArgs).one() as { n: number } | null)?.n ?? 0
+    )
     const rows = this.sql
-      .exec(`SELECT id, data, created_at FROM ${quoteId(collection)} ORDER BY rowid DESC LIMIT ?`, n)
+      .exec(`SELECT id, data, created_at FROM ${table}${where} ORDER BY rowid ${dir} LIMIT ? OFFSET ?`, ...whereArgs, n, offset)
       .toArray() as unknown as { id: string; data: string; created_at: string }[]
-    return { items: rows.map((r) => ({ id: r.id, data: parseJson(r.data), created_at: r.created_at })) }
+    return { items: rows.map((r) => ({ id: r.id, data: parseJson(r.data), created_at: r.created_at })), total, limit: n, offset }
+  }
+
+  // ---------- 原子计数器(kv.incr) ----------
+
+  /** 计数器表按需创建;keys 只允许短标识符,值一律整数 */
+  private ensureCounters(): void {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS ${COUNTERS_TABLE} (k TEXT PRIMARY KEY, v INTEGER NOT NULL DEFAULT 0)`)
+  }
+
+  private counterKey(key: string): string {
+    const k = key.trim().slice(0, MAX_QUERY_LEN)
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(k)) throw new Error('计数器名不合法')
+    return k
+  }
+
+  /**
+   * 原子自增:单条 UPDATE(v = v + ?)由 SQLite 保证原子性,
+   * 不依赖「读-改-写」,所以并发访问/点赞不会丢计数(Workers KV 做不到这点)。
+   */
+  private counterIncr(key: string, by: number, start: number): { value: number } {
+    const k = this.counterKey(key)
+    const delta = Number.isFinite(by) ? Math.max(-1000, Math.min(1000, Math.trunc(by))) : 1
+    const init = Number.isFinite(start) ? Math.trunc(start) : 0
+    this.ensureCounters()
+    this.sql.exec(`INSERT OR IGNORE INTO ${COUNTERS_TABLE} (k, v) VALUES (?, ?)`, k, init)
+    this.sql.exec(`UPDATE ${COUNTERS_TABLE} SET v = v + ? WHERE k = ?`, delta, k)
+    const row = this.sql.exec(`SELECT v FROM ${COUNTERS_TABLE} WHERE k = ?`, k).one() as { v: number } | null
+    return { value: Number(row?.v ?? 0) }
+  }
+
+  /** 读计数器;未创建过返回 value: null(调用方据此回落或给默认值) */
+  private counterGet(key: string): { value: number | null } {
+    const k = this.counterKey(key)
+    this.ensureCounters()
+    const row = this.sql.exec(`SELECT v FROM ${COUNTERS_TABLE} WHERE k = ?`, k).one() as { v: number } | null
+    return { value: row ? Number(row.v) : null }
   }
 
   /** owner 控制台:列出该库里所有「文档集合」(表)及行数,排除平台内部表 */

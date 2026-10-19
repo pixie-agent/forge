@@ -33,6 +33,20 @@ export interface AgentConfig {
   /** 部分 OpenAI 兼容网关不认 developer 角色,置 false 走 system */
   supportsDeveloperRole: boolean
   supportsReasoningEffort: boolean
+  /**
+   * 模型是否支持图片输入:置 true 才会在 models.json 里声明 `input: ['text','image']`,
+   * 并把用户上传的图片作为多模态输入交给模型。默认关闭——上游网关方言不一定认 image 块,
+   * 声明了却发不出去会直接 400。
+   */
+  supportsImageInput: boolean
+  /**
+   * 第二轮「设计总监复查与打磨」的开关:
+   *   'generate' 只在从零生成时跑(默认) | 'always' generate 与 chat 都跑 | 'off' 关闭
+   * 复查轮失败不判 job 失败;复查产物构建失败会回滚到第一轮源码。
+   */
+  designReview: 'off' | 'generate' | 'always'
+  /** 复查轮单独的时长上限(ms),防止把总预算吃满 */
+  polishMaxMs: number
 }
 
 export function loadConfig(): AgentConfig {
@@ -54,5 +68,8 @@ export function loadConfig(): AgentConfig {
     thinkingFormat: (process.env.PI_THINKING_FORMAT || undefined) as AgentConfig['thinkingFormat'],
     supportsDeveloperRole: process.env.PI_SUPPORTS_DEVELOPER_ROLE !== 'false',
     supportsReasoningEffort: process.env.PI_SUPPORTS_REASONING_EFFORT !== 'false',
+    supportsImageInput: process.env.PI_MODEL_INPUT_IMAGE === 'true',
+    designReview: (process.env.AGENT_DESIGN_REVIEW ?? 'generate') as AgentConfig['designReview'],
+    polishMaxMs: Number(process.env.AGENT_POLISH_MAX_MS ?? 300_000),
   }
 }

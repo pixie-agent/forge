@@ -4,7 +4,8 @@ import { useAuth } from '../App'
 import ChatPanel from '../components/ChatPanel'
 import PreviewPane from '../components/PreviewPane'
 import TopBar from '../components/TopBar'
-import { api, getActiveJob, startJob, subscribeJob } from '../lib/api'
+import { api, cancelJob, getActiveJob, startJob, steerJob, subscribeJob } from '../lib/api'
+import { attachmentMarker, type OutgoingAttachment } from '../lib/attachments'
 import type { ArtifactManifest, JobSnapshot, Message, Plan, Project, ProjectDetail, ProjectDraft, ProjectVersionDetail, VersionMeta } from '../lib/types'
 
 type FilePreview = { path: string; content: string }
@@ -39,6 +40,8 @@ export default function Workspace() {
   const [resumeIdea, setResumeIdea] = useState<string | null>(null)
   // 最近一次失败的任务(本次会话内失败,或刷新后从服务端还原):用于渲染"未完成卡片 + 重试"
   const [failedJob, setFailedJob] = useState<JobSnapshot | null>(null)
+  // 「停止」请求在途(禁用按钮,避免连点)
+  const [stopping, setStopping] = useState(false)
   const started = useRef(false)
   // 移动端:用顶部标签在「对话 / 预览」间切换(桌面端始终左右分栏,该状态不生效)
   const [mobileTab, setMobileTab] = useState<'chat' | 'preview'>('chat')
@@ -87,6 +90,19 @@ export default function Workspace() {
         setError(finished.error ?? '生成失败,请重试')
         return
       }
+      if (finished.status === 'cancelled') {
+        // 用户主动停止:不是失败,不弹"未完成卡片"。清掉任务态的临时视图(半成品预览、过程中的
+        // 规划卡片与执行路径),否则会定格成"三步全打勾"的假成功;再拉一次详情补上服务端写的
+        // "已停止"消息。积分未扣,不用 refresh。
+        setResumeIdea(null)
+        setFailedJob(null)
+        setError('')
+        setJob(null)
+        setPlan(null)
+        setFilesPreview(null)
+        void reloadDetail()
+        return
+      }
       setResumeIdea(null)
       setFailedJob(null)
       setPlan((p) => (finished.type === 'generate' && finished.plan ? finished.plan : p))
@@ -108,7 +124,7 @@ export default function Workspace() {
 
   /** 创建后台任务;服务端已落用户消息,前端本地补一条保证即时反馈 */
   const run = useCallback(
-    async (action: 'generate' | 'chat', body: Record<string, string>, userText: string) => {
+    async (action: 'generate' | 'chat', body: Record<string, unknown>, userText: string) => {
       setError('')
       setFailedJob(null)
       const localId = crypto.randomUUID()
@@ -131,8 +147,8 @@ export default function Workspace() {
           progress: null,
           files_preview: null,
           agent_log: null,
-          idea: action === 'generate' ? (body.idea ?? null) : null,
-          prompt: body.idea ?? body.message ?? null,
+          idea: action === 'generate' ? String(body.idea ?? '') || null : null,
+          prompt: String(body.idea ?? body.message ?? '') || null,
           plan: null,
           error: null,
           version: null,
@@ -155,7 +171,7 @@ export default function Workspace() {
       if (next.plan) setPlan(next.plan)
       // 流式看代码:agent 每写完一个文件就更新这里
       if (next.files_preview) setFilesPreview(next.files_preview)
-      if (next.status === 'succeeded' || next.status === 'failed') void settle(next)
+      if (next.status === 'succeeded' || next.status === 'failed' || next.status === 'cancelled') void settle(next)
     }
     // 进度彻底拿不到(会话过期/持续断网):结束任务态并提示,避免输入被永久禁用
     return subscribeJob(job.id, apply, (message) => {
@@ -261,12 +277,46 @@ export default function Workspace() {
 
   /** 统一的发送入口:有内容(草稿或正式版本)→对话修改;失败但有产物→带补充说明续跑;否则全新生成 */
   const send = useCallback(
-    (text: string) => {
-      if (draft || (project?.current_version ?? 0) > 0) void run('chat', { message: text }, text)
-      else if (resumeIdea) void run('generate', { idea: resumeIdea, note: text }, text)
-      else void run('generate', { idea: text }, text)
+    (text: string, attachments?: OutgoingAttachment[]) => {
+      // 允许「只发附件」:后端要求 idea/message 非空,这里补一句默认说明
+      const finalText = text || (attachments?.length ? '请参考我上传的附件' : '')
+      if (!finalText) return
+      const body = { attachments: attachments?.length ? attachments : undefined }
+      // 本地消息与服务端落库用同一段附件清单,刷新前后显示一致
+      const userText = finalText + attachmentMarker(attachments)
+      if (draft || (project?.current_version ?? 0) > 0) void run('chat', { message: finalText, ...body }, userText)
+      else if (resumeIdea) void run('generate', { idea: resumeIdea, note: finalText, ...body }, userText)
+      else void run('generate', { idea: finalText, ...body }, userText)
     },
     [draft, project?.current_version, resumeIdea, run]
+  )
+
+  /**
+   * 生成中追加要求(steering):任务还在跑时输入的内容不再排队等下一个任务,而是投给正在执行的
+   * agent,由它在下一次 LLM 调用前注入(见 docs/FORGE2.md §5.2)。服务端只对活动任务受理,
+   * 任务刚好结束时返回 409 —— 这时退化成正常发送,别让用户白打一段话。
+   */
+  const steer = useCallback(
+    async (text: string, attachments?: OutgoingAttachment[]) => {
+      if (!id || !job) return
+      const finalText = text || (attachments?.length ? '请参考我上传的附件' : '')
+      if (!finalText) return
+      try {
+        await steerJob(id, { jobId: job.id, message: finalText, attachments })
+      } catch (err) {
+        if ((err as Error & { status?: number }).status === 409) {
+          send(finalText, attachments)
+          return
+        }
+        throw err
+      }
+      // 本地补一条用户消息即时反馈;任务收尾时 reloadDetail 会用服务端记录整体替换,不会重复
+      setMessages((m) => [
+        ...m,
+        { id: crypto.randomUUID(), role: 'user', content: finalText + attachmentMarker(attachments), created_at: '' },
+      ])
+    },
+    [id, job, send]
   )
 
   /** 一键重试:原样重发上一次失败任务的输入(chat→再对话,generate→重新生成) */
@@ -276,6 +326,25 @@ export default function Workspace() {
     if (failedJob.type === 'chat') void run('chat', { message: text }, text)
     else void run('generate', { idea: text }, text)
   }, [failedJob, run])
+
+  /**
+   * 停止当前任务。成功后不用自己改状态:服务端已落成 cancelled,SSE/轮询马上会把终态推来,
+   * 由 settle 统一收尾(清任务态视图 + 补"已停止"消息)。调用失败(任务刚好已结束)只提示。
+   */
+  const stopTask = useCallback(async () => {
+    if (!id || stopping) return
+    setStopping(true)
+    try {
+      await cancelJob(id)
+      setNoticeTone('ok')
+      setNotice('已停止本次任务(未扣除积分)')
+    } catch (err) {
+      setNoticeTone('err')
+      setNotice((err as Error).message)
+    } finally {
+      setStopping(false)
+    }
+  }, [id, stopping])
 
   /** 切换查看内容:0=草稿(工作副本),>0=历史正式版本(按需拉取源码树+产物清单+预览令牌) */
   async function selectVersion(no: number) {
@@ -366,6 +435,8 @@ export default function Workspace() {
           idlePlaceholder={idlePlaceholder}
           onSend={send}
           onRetry={failedJob && !streaming ? retry : undefined}
+          onStop={streaming ? () => void stopTask() : undefined}
+          stopping={stopping}
         />
         <PreviewPane
           mobileHidden={mobileTab !== 'preview'}

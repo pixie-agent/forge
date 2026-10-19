@@ -124,16 +124,32 @@ function injectEnvBadge(html: string): string {
   return html + ENV_BADGE
 }
 
+/** 转义 HTML 文本节点,避免应用名里的 & < > 破坏文档 */
+function escapeText(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** 用应用名（projects.name，由 plan.name 落库）替换 index.html 的 <title>。模板 index.html 是平台文件、
+ *  模型不可改，所以浏览器标签标题统一由平台在下发时注入；没有名字时保持模板原样。 */
+function injectTitle(html: string, title: string): string {
+  const tag = `<title>${escapeText(title)}</title>`
+  if (/<title>[\s\S]*?<\/title>/i.test(html)) return html.replace(/<title>[\s\S]*?<\/title>/i, tag)
+  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${tag}</head>`)
+  return tag + html
+}
+
 /**
  * 给入口 HTML 注入运行时数据接口基址与数据环境:
  *   <script>window.__FORGE_API_BASE__="…/api";window.__FORGE_ENV__="draft"|"live"</script>
  * 生成页里的 forge SDK 读该全局变量调用平台后端,无需在构建期替换占位符。
  * 草稿(draft)预览额外注入「测试环境」角标,与线上公开页(live)明确区分。
+ * 传入 title 时同时替换浏览器标签标题(生成应用共用同一份平台 index.html)。
  */
-export function injectRuntime(html: string, apiBase: string, dataEnv: 'draft' | 'live'): string {
+export function injectRuntime(html: string, apiBase: string, dataEnv: 'draft' | 'live', title?: string | null): string {
   const script = `<script>window.__FORGE_API_BASE__=${JSON.stringify(apiBase)};window.__FORGE_ENV__=${JSON.stringify(dataEnv)}</script>`
-  const withScript = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${script}`) : script + html
-  return dataEnv === 'draft' ? injectEnvBadge(withScript) : withScript
+  let out = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${script}`) : script + html
+  if (title && title.trim()) out = injectTitle(out, title.trim().slice(0, 60))
+  return dataEnv === 'draft' ? injectEnvBadge(out) : out
 }
 
 // ---------- 预览令牌(无状态 HMAC,绑定 projectId + versionNo) ----------

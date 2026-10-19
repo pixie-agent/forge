@@ -75,6 +75,44 @@ app.post('/jobs/:id/log', async (c) => {
   return c.json({ ok: true, changed: res.meta.changes })
 })
 
+/**
+ * 任务状态查询(agent 每 5s 巡检一次),一次请求同时承担两件事:
+ * - **取消**:协作式取消——Worker 无法反向杀掉 Cloud Run 的在途请求,只能由 agent 自己查、自己 abort。
+ * - **追加要求投递**(见 docs/FORGE2.md §5.2):生成过程中用户补充的话/图,先落进 job_messages,
+ *   在这里下发并标记 consumed_at。标记而非删除:万一响应在传输中丢了,内容仍留在对话记录里;
+ *   队列行(含附件 base64)由任务落定时的 clearJobMessages 整批清掉。
+ * 只回 status / cancelled / messages,不碰任何其它字段。
+ */
+app.get('/jobs/:id/state', async (c) => {
+  const id = c.req.param('id')
+  const row = await c.env.DB
+    .prepare('SELECT status FROM jobs WHERE id = ?')
+    .bind(id)
+    .first<{ status: string }>()
+
+  const { results } = await c.env.DB
+    .prepare('SELECT id, content, attachments FROM job_messages WHERE job_id = ? AND consumed_at IS NULL ORDER BY created_at, rowid LIMIT 5')
+    .bind(id)
+    .all<{ id: string; content: string; attachments: string | null }>()
+  if (results.length) {
+    await c.env.DB
+      .prepare(`UPDATE job_messages SET consumed_at = datetime('now') WHERE id IN (${results.map(() => '?').join(',')})`)
+      .bind(...results.map((r) => r.id))
+      .run()
+      .catch(() => {})
+  }
+
+  return c.json({
+    status: row?.status ?? null,
+    cancelled: row?.status === 'cancelled',
+    messages: results.map((r) => ({
+      id: r.id,
+      content: r.content,
+      attachments: r.attachments ? (JSON.parse(r.attachments) as unknown[]) : [],
+    })),
+  })
+})
+
 app.post('/jobs/:id/commit', async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>)
   try {

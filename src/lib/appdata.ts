@@ -1,8 +1,9 @@
 /**
  * 生成应用的后端数据 API(平台通用能力,非每项目手写):同一套端点同时覆盖
- *   - D1 文档集合: {base}/db/:collection         (留言板、表单、评论…)
- *   - KV 键值:     {base}/kv/:key                (配置、计数器、会话片段…)
- *   - R2 对象:     {base}/blob/:key              (上传文件、图片…)
+ *   - 文档集合: {base}/db/:collection          (留言板、表单、评论…;支持 limit/offset/order/q 分页搜索与 total 计数)
+ *   - KV 键值:  {base}/kv/:key                 (配置、设置项…)
+ *   - 原子计数: {base}/kv/:key/incr            (访问量、点赞…;落该项目的 SQLite,单条 UPDATE 保证并发不丢)
+ *   - R2 对象:  {base}/blob/:key               (上传文件、图片…;GET {base}/blob?prefix= 列举)
  *
  * base 由页面注入的 window.__FORGE_API_BASE__ 决定:
  *   - 发布页:/s/{slug}/api      → env = live
@@ -31,9 +32,30 @@ const DB_MAX_ROWS = 500
 const DB_RATE_LIMIT_WRITES = 20
 const KV_MAX_VALUE = 25 * 1024
 const BLOB_MAX_BODY = 2 * 1024 * 1024
+/** 列举对象的单页上限(与 /db 的分页口径一致,防止一次拉爆 R2 Class A 操作) */
+const BLOB_MAX_LIST = 500
+
+/** 原子计数子资源后缀:GET|POST {base}/kv/:key/incr */
+const INCR_SUFFIX = '/incr'
 
 function cors(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: CORS_HEADERS })
+}
+
+/**
+ * 解析列表类接口的分页/搜索参数(limit / offset / order / q)。
+ * 只回传「合法且非默认」的字段;非法值直接忽略,由 DO 侧再用同一套上限钳制一次。
+ */
+function listParams(url: URL): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  const limit = Number(url.searchParams.get('limit'))
+  if (Number.isFinite(limit) && limit > 0) out.limit = Math.trunc(limit)
+  const offset = Number(url.searchParams.get('offset'))
+  if (Number.isFinite(offset) && offset > 0) out.offset = Math.trunc(offset)
+  if (url.searchParams.get('order') === 'asc') out.order = 'asc'
+  const q = url.searchParams.get('q')?.trim()
+  if (q) out.q = q.slice(0, 64)
+  return out
 }
 
 /** 项目级 KV 存储键(owner 管理端与生成应用接口共用同一套,保证读到同一份数据) */
@@ -80,7 +102,10 @@ async function handleDb(env: Env, projectId: string, dataEnv: DataEnv, rest: str
   if (!COLLECTION_RE.test(collection ?? '')) return cors({ error: '集合名不合法' }, 400)
 
   if (request.method === 'GET' && !id) {
-    const { body } = await callProjectDb<{ items: unknown[] }>(env, projectId, dataEnv, 'db.list', { collection })
+    const { body } = await callProjectDb<{ items: unknown[] }>(env, projectId, dataEnv, 'db.list', {
+      collection,
+      ...listParams(new URL(request.url)),
+    })
     return cors(body)
   }
 
@@ -129,15 +154,53 @@ async function handleDb(env: Env, projectId: string, dataEnv: DataEnv, rest: str
   return cors({ error: '方法不支持' }, 405)
 }
 
-/** KV 键值:GET / PUT / DELETE */
+/**
+ * KV 键值:GET / PUT / DELETE,外加原子计数子资源 `/kv/:key/incr`。
+ *
+ * 计数为什么单独一套存储:Workers KV 是「最终一致 + 每键每秒 1 次写」的存储,
+ * 拿它做访问量/点赞这类高频自增会丢计数甚至被限流;所以 incr 落在该项目的
+ * SQLite(Durable Object)里用单条 UPDATE 保证原子性,get 在 KV 无值时回落读它。
+ * 键名允许 `.`/`-`/`_` 但不允许 `/`,所以 `/incr` 后缀不会与真实键名冲突。
+ */
 async function handleKv(env: Env, projectId: string, dataEnv: DataEnv, rest: string, request: Request): Promise<Response> {
-  const key = rest
+  const isIncr = rest.endsWith(INCR_SUFFIX)
+  const key = isIncr ? rest.slice(0, -INCR_SUFFIX.length) : rest
   if (!KV_KEY_RE.test(key)) return cors({ error: '键名不合法' }, 400)
+
+  // 原子计数器:GET 读当前值,POST 自增
+  if (isIncr) {
+    if (request.method === 'GET') {
+      const { body } = await callProjectDb<{ value: number | null }>(env, projectId, dataEnv, 'counter.get', { key })
+      return cors({ key, value: body.value ?? 0 })
+    }
+    if (request.method === 'PUT' || request.method === 'POST') {
+      const raw = await request.text()
+      let opts: { by?: unknown; start?: unknown } = {}
+      if (raw) {
+        try {
+          opts = JSON.parse(raw) as { by?: unknown; start?: unknown }
+        } catch {
+          return cors({ error: '请求体必须是 JSON' }, 400)
+        }
+      }
+      const { body } = await callProjectDb<{ value: number }>(env, projectId, dataEnv, 'counter.incr', {
+        key,
+        by: opts.by ?? 1,
+        start: opts.start ?? 0,
+      })
+      return cors({ key, value: body.value ?? 0 })
+    }
+    return cors({ error: '方法不支持' }, 405)
+  }
+
   const full = kvKey(projectId, dataEnv, key)
 
   if (request.method === 'GET') {
     const value = await env.APPDATA.get(full, 'json')
-    return cors({ key, value })
+    if (value !== null && value !== undefined) return cors({ key, value })
+    // KV 无值:回落到计数器(否则 kv.get 读不到刚 incr 过的键)
+    const counted = await callProjectDb<{ value: number | null }>(env, projectId, dataEnv, 'counter.get', { key })
+    return cors({ key, value: counted.body.value })
   }
   if (request.method === 'PUT' || request.method === 'POST') {
     const raw = await request.text()
@@ -158,11 +221,40 @@ async function handleKv(env: Env, projectId: string, dataEnv: DataEnv, rest: str
   return cors({ error: '方法不支持' }, 405)
 }
 
-/** R2 对象:GET / PUT / DELETE */
+/**
+ * 对象存储:R2 对象 GET / PUT / DELETE;`GET /blob?prefix=&limit=&cursor=` 列举。
+ * 列举只返回该「项目 × 环境」前缀下的对象(键名去掉前缀,便于 `blob.url(key)` 直接回填)。
+ */
 async function handleBlob(env: Env, projectId: string, dataEnv: DataEnv, rest: string, request: Request): Promise<Response> {
+  const root = blobPrefix(projectId, dataEnv)
+
+  // 列举:路径为 /blob(无 key),仅支持 GET
+  if (rest === '') {
+    if (request.method !== 'GET') return cors({ error: '方法不支持' }, 405)
+    const url = new URL(request.url)
+    const prefix = (url.searchParams.get('prefix') ?? '').replace(/^\/+/, '')
+    if (prefix.includes('..')) return cors({ error: '路径不合法' }, 400)
+    const rawLimit = Number(url.searchParams.get('limit'))
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(BLOB_MAX_LIST, Math.trunc(rawLimit)) : 100
+    const listed = await env.ARTIFACTS.list({
+      prefix: root + prefix,
+      cursor: url.searchParams.get('cursor') ?? undefined,
+      limit,
+    })
+    return cors({
+      items: listed.objects.map((o) => ({
+        key: o.key.slice(root.length),
+        size: o.size,
+        uploaded: o.uploaded instanceof Date ? o.uploaded.toISOString() : String(o.uploaded),
+      })),
+      cursor: listed.truncated ? listed.cursor : null,
+      truncated: listed.truncated,
+    })
+  }
+
   const key = rest
   if (!BLOB_KEY_RE.test(key) || key.includes('..')) return cors({ error: '路径不合法' }, 400)
-  const full = blobKey(projectId, dataEnv, key)
+  const full = root + key
 
   if (request.method === 'GET') {
     const obj = await env.ARTIFACTS.get(full)

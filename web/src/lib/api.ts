@@ -1,3 +1,4 @@
+import type { OutgoingAttachment } from './attachments'
 import type { JobSnapshot } from './types'
 
 export async function api<T>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
@@ -21,8 +22,8 @@ export async function api<T>(path: string, opts: { method?: string; body?: unkno
   return (await res.json()) as T
 }
 
-/** 创建后台生成任务,立即返回 jobId */
-export function startJob(path: string, body: Record<string, string>): Promise<{ jobId: string }> {
+/** 创建后台生成任务,立即返回 jobId;body 里可带 attachments(对话附件,见 lib/attachments) */
+export function startJob(path: string, body: Record<string, unknown>): Promise<{ jobId: string }> {
   return api<{ jobId: string }>(path, { method: 'POST', body })
 }
 
@@ -54,7 +55,7 @@ export function subscribeJob(
   }
 
   const apply = (job: JobSnapshot) => {
-    if (job.status === 'succeeded' || job.status === 'failed') {
+    if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
       terminal = true
       stop()
     }
@@ -101,6 +102,25 @@ export function subscribeJob(
 export async function getJob(jobId: string): Promise<JobSnapshot | null> {
   const data = await api<{ job: JobSnapshot | null }>(`/api/jobs/${jobId}`)
   return data.job
+}
+
+/**
+ * 停止项目当前活动任务:服务端立即置 cancelled(项目锁当场释放);Cloud Run 侧的在途执行
+ * 由 agent 自己巡检到 cancelled 后中止,因此产物/积分都不会落地。已结束的任务返回 409。
+ */
+export function cancelJob(projectId: string): Promise<{ ok: boolean; jobId: string }> {
+  return api<{ ok: boolean; jobId: string }>(`/api/projects/${projectId}/cancel`, { method: 'POST', body: {} })
+}
+
+/**
+ * 生成过程中追加要求(steering):投给正在执行的任务,由 agent 在下一轮 LLM 调用前注入。
+ * 只对活动任务有效,任务已结束返回 409(调用方应退化成正常发送)。附件限额比首次提交更紧。
+ */
+export function steerJob(
+  projectId: string,
+  body: { jobId: string; message: string; attachments?: OutgoingAttachment[] }
+): Promise<{ ok: boolean }> {
+  return api<{ ok: boolean }>(`/api/projects/${projectId}/steer`, { method: 'POST', body })
 }
 
 /** 活动任务(接管轮询)+ 可续任务(最近一次失败但有产物的任务,继续对话即续跑) */

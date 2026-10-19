@@ -48,7 +48,8 @@ export interface ArtifactManifest {
 export interface JobSnapshot {
   id: string
   type: 'generate' | 'chat'
-  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  /** cancelled = 用户手动停止的终态(不扣积分、不写产物) */
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   stage: 'planning' | 'coding' | 'building'
   /** 人读的分段进度(如「正在编写 src/App.jsx」),无则回退到按 stage 推导的文案 */
   progress: string | null
@@ -154,6 +155,17 @@ export interface SqlObject {
 
 // ---------- 管理后台(只读) ----------
 
+/** 草稿(工作副本,version_no = 0)的元信息;has_artifacts=false 时 preview_token 为 null */
+export interface AdminDraftMeta {
+  version_no: number
+  bytes: number
+  prompt: string
+  created_at: string
+  has_artifacts: boolean
+  /** 预览令牌,拼成 /p/:token/ 即可打开草稿;无构建产物时为 null */
+  preview_token: string | null
+}
+
 export interface AdminProject {
   id: string
   slug: string
@@ -168,6 +180,8 @@ export interface AdminProject {
   versions_count: number
   messages_count: number
   data_count: number
+  /** 未生成正式版本的草稿(工作副本);没有草稿时为 null */
+  draft: AdminDraftMeta | null
 }
 
 /** 全站统计(后台列表页头部) */
@@ -217,6 +231,8 @@ export interface AdminUserProject {
   messages_count: number
   bytes: number
   data_count: number
+  /** 未生成正式版本的草稿(工作副本);没有草稿时为 null */
+  draft: AdminDraftMeta | null
 }
 
 export interface AdminVersionMeta {
@@ -234,8 +250,8 @@ export interface AdminVersionDetail {
   created_at: string
   src: Record<string, string>
   manifest: ArtifactManifest | null
-  /** 该版本的草稿预览令牌:后台 iframe 用 /p/:token/ 预览任意版本 */
-  previewToken: string
+  /** 该版本的草稿预览令牌:后台 iframe 用 /p/:token/ 预览任意版本;无构建产物时为 null */
+  previewToken: string | null
 }
 
 export interface AdminJob {
@@ -257,6 +273,8 @@ export interface AdminJob {
 export interface AdminProjectDetail {
   project: AdminProject & { user_id: string }
   versions: AdminVersionMeta[]
+  /** 草稿(工作副本),与 versions 并列,便于直接预览;无草稿时为 null */
+  draft: AdminDraftMeta | null
   messages: Message[]
   jobs: AdminJob[]
   collections: SiteCollection[]

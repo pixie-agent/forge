@@ -17,6 +17,27 @@ export interface FileMap {
   [path: string]: string
 }
 
+/** 用户随需求一起上传的附件(Worker 侧 src/lib/attachments.ts 有对应副本) */
+export interface RunAttachment {
+  /** 原始文件名(已去掉路径与非法字符) */
+  name: string
+  /** 由扩展名判定的 MIME,如 image/png、text/markdown */
+  mimeType: string
+  /** base64(不含 data: 前缀) */
+  data: string
+}
+
+/**
+ * 生成过程中用户追加的要求(见 docs/FORGE2.md §5.2):
+ * Worker 把 /api/projects/:id/steer 提交的内容放进 job_messages,
+ * agent 每 5s 巡检 /internal/jobs/:id/state 取走后交给 pi 的 session.steer()。
+ */
+export interface SteerMessage {
+  id: string
+  content: string
+  attachments: RunAttachment[]
+}
+
 export interface ArtifactManifest {
   /** 入口 HTML(默认 index.html) */
   entry: string
@@ -39,6 +60,8 @@ export interface RunRequest {
   currentFiles?: FileMap
   /** chat:此前的对话历史(用户/助手交替),供 agent 理解上下文,实现连续对话 */
   history?: { role: 'user' | 'assistant'; content: string }[]
+  /** 用户随消息上传的图片/文本附件(generate 与 chat 通用) */
+  attachments?: RunAttachment[]
   /** Cloudflare 回调基址,如 https://forge-v2.xxx.workers.dev */
   callbackBase: string
 }
