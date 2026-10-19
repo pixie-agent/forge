@@ -1,6 +1,6 @@
 /** 把 job 派发给 Cloud Run 的 agent service,并接收其回传的多文件产物(源码树 + 构建产物) */
 
-import type { Env, Plan } from '../types'
+import type { Env, ConnectorGrant, Plan } from '../types'
 import type { AgentAttachment } from './attachments'
 
 /** 路径 → 文件内容 */
@@ -26,6 +26,11 @@ export interface AgentRunRequest {
   history?: { role: 'user' | 'assistant'; content: string }[]
   /** 用户随消息上传的图片/文本附件(generate 与 chat 通用);图片会作为多模态输入直接交给模型 */
   attachments?: AgentAttachment[]
+  /**
+   * 本次生成可用的外部系统能力(连接器,见 docs/CONNECTORS.md §6b)。
+   * 只读默认带上、可写要用户显式点亮;里面的凭证明文只活在这一条请求里,随 Cloud Run 容器销毁。
+   */
+  connectors?: ConnectorGrant[]
   /** 进度回调基址 */
   callbackBase: string
 }

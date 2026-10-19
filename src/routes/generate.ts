@@ -1,10 +1,11 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
-import type { AppEnv, ProjectRow } from '../types'
+import type { AppEnv, ConnectorGrant, ProjectRow } from '../types'
 import { requireUser } from '../lib/auth'
 import { assertCredits, activeJobSnapshot, lastFailedJobSnapshot, insertMessage, ACTIVE_STATUS_SQL } from '../lib/jobHelpers'
 import { dispatchAgent, type FileMap } from '../lib/agent'
 import { attachmentMarkdown, parseAttachments, SEND_LIMITS, STEER_LIMITS, type AgentAttachment } from '../lib/attachments'
+import { resolveGrants } from '../lib/connectors/store'
 import { DRAFT_VERSION_NO } from '../lib/artifacts'
 import { type JobType, createJob } from '../lib/jobs'
 import { cancelJob } from '../lib/commit'
@@ -59,6 +60,38 @@ async function recentHistory(db: D1Database, projectId: string, limit = 8): Prom
 }
 
 /**
+ * 连接器的「本轮临时开关」(见 docs/CONNECTORS.md §7):
+ *   - disabled:用户本轮点灰的 provider(只影响这一轮,不落库)
+ *   - enabled:用户本轮点亮的「可写」provider(可写默认不带,必须显式点亮)
+ * 绑定本身在项目上,所以绝大多数轮次这两个都是空的 —— 用户不需要每次去选。
+ */
+interface ConnectorOptions {
+  disabled: string[]
+  enabled: string[]
+}
+
+function parseConnectorOptions(raw: unknown): ConnectorOptions {
+  const src = (raw && typeof raw === 'object' ? raw : {}) as { disabled?: unknown; enabled?: unknown }
+  const clean = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 40).slice(0, 20) : []
+  return { disabled: clean(src.disabled), enabled: clean(src.enabled) }
+}
+
+/** 消息里留一行痕迹:刷新后仍看得到"这一轮用了哪个连接器",与附件的 `📎 附件 N 个` 同一套路 */
+function connectorMarkdown(grants: ConnectorGrant[]): string {
+  if (!grants.length) return ''
+  const names = grants.map((g) => `${g.provider}${g.writable ? '(可写)' : '(只读)'}`).join('、')
+  return `\n\n🔌 连接器:${names}`
+}
+
+/** 解析本轮的连接器授权:生成的是草稿产物,优先用 draft 绑定(测试凭证),没有则回落到 live 绑定 */
+async function jobConnectorGrants(c: Context<AppEnv>, project: ProjectRow, opts: ConnectorOptions): Promise<ConnectorGrant[]> {
+  const draft = await resolveGrants(c.env, project.user_id, project.id, 'draft', opts)
+  if (draft.length) return draft
+  return resolveGrants(c.env, project.user_id, project.id, 'live', opts)
+}
+
+/**
  * 建任务 + 落用户消息 + 派发到 Cloud Run agent,返回 {jobId} 或 409。
  * 派发不等待结果:agent 执行期间通过 /internal 回调写进度,跑完通过 /internal commit 落定结果。
  * Cloudflare 对超长出站请求会掐断(524),但 Cloud Run 只要 handler 未返回就继续跑;交付以 commit 回调为准。
@@ -70,13 +103,17 @@ async function launchJob(
   type: JobType,
   payload: Record<string, string>,
   userText: string,
-  attachments?: AgentAttachment[]
+  attachments?: AgentAttachment[],
+  connectors?: ConnectorOptions
 ) {
+  // 先解析连接器再建任务:失败也不留下一个空跑的任务;不可用的连接会被静默跳过(面板负责提示重连)
+  const grants = await jobConnectorGrants(c, project, connectors ?? { disabled: [], enabled: [] })
+
   const jobId = await createJob(c.env.DB, project.id, c.get('user').id, type, payload)
   if (!jobId) return c.json({ error: '该项目已有生成任务在进行中,请稍候' }, 409)
   try {
     // 附件字节只走这次 dispatch;消息里补一行清单,刷新后仍能看到当时附了什么
-    await insertMessage(c.env.DB, project.id, 'user', userText + attachmentMarkdown(attachments))
+    await insertMessage(c.env.DB, project.id, 'user', userText + connectorMarkdown(grants) + attachmentMarkdown(attachments))
   } catch (err) {
     await c.env.DB.prepare(`DELETE FROM jobs WHERE id = ? AND status = 'pending'`).bind(jobId).run().catch(() => {})
     throw err
@@ -95,6 +132,7 @@ async function launchJob(
       currentFiles,
       history,
       attachments: attachments?.length ? attachments : undefined,
+      connectors: grants.length ? grants : undefined,
     })
   }
   // 不 await:agent 长跑期间连接可能被掐断(524);结果经 commit 回调交付
@@ -142,8 +180,8 @@ app.post('/:id/generate', async (c) => {
   if (!project) return c.json({ error: '项目不存在' }, 404)
 
   const body = await c.req
-    .json<{ idea?: string; note?: string; attachments?: unknown }>()
-    .catch(() => ({}) as { idea?: string; note?: string; attachments?: unknown })
+    .json<{ idea?: string; note?: string; attachments?: unknown; connectors?: unknown }>()
+    .catch(() => ({}) as { idea?: string; note?: string; attachments?: unknown; connectors?: unknown })
   const idea = String(body.idea ?? '').trim()
   if (!idea) return c.json({ error: '想法不能为空' }, 400)
   const note = String(body.note ?? '').trim()
@@ -151,7 +189,7 @@ app.post('/:id/generate', async (c) => {
   if (parsed.error) return c.json({ error: parsed.error }, 400)
   if (!(await assertCredits(c.env.DB, user.id))) return c.json({ error: '积分不足,无法生成' }, 402)
 
-  return launchJob(c, project, 'generate', note ? { idea, note } : { idea }, idea, parsed.attachments)
+  return launchJob(c, project, 'generate', note ? { idea, note } : { idea }, idea, parsed.attachments, parseConnectorOptions(body.connectors))
 })
 
 /** 对话式迭代修改:同样走后台任务,agent 在现有源码树上改并重新构建 */
@@ -161,8 +199,8 @@ app.post('/:id/chat', async (c) => {
   if (!project) return c.json({ error: '项目不存在' }, 404)
 
   const body = await c.req
-    .json<{ message?: string; attachments?: unknown }>()
-    .catch(() => ({}) as { message?: string; attachments?: unknown })
+    .json<{ message?: string; attachments?: unknown; connectors?: unknown }>()
+    .catch(() => ({}) as { message?: string; attachments?: unknown; connectors?: unknown })
   const message = String(body.message ?? '').trim()
   if (!message) return c.json({ error: '内容不能为空' }, 400)
 
@@ -172,7 +210,7 @@ app.post('/:id/chat', async (c) => {
   if (parsed.error) return c.json({ error: parsed.error }, 400)
   if (!(await assertCredits(c.env.DB, user.id))) return c.json({ error: '积分不足,无法生成' }, 402)
 
-  return launchJob(c, project, 'chat', { message }, message, parsed.attachments)
+  return launchJob(c, project, 'chat', { message }, message, parsed.attachments, parseConnectorOptions(body.connectors))
 })
 
 /** 断线/刷新恢复:活动任务(接管轮询)+ 最近一次失败任务(还原未完成卡片与半成品预览) */

@@ -10,6 +10,7 @@ import type { Context } from 'hono'
 import type { ArtifactManifest, Env } from '../types'
 import { CORS_HEADERS, handleAppApi } from '../lib/appdata'
 import { artifactPrefix, contentTypeFor, injectRuntime, normalizeAssetPath, verifyPreviewToken } from '../lib/artifacts'
+import { publicConfig } from '../lib/connectors/store'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -48,10 +49,14 @@ async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo
   const clean = normalizeAssetPath(subpath)
   if (clean === null) return c.text('404 Not Found', 404)
 
+  // 连接器的 public 配置(仅非密值)按「项目 × 环境」取;同一请求内只查一次,只在渲染 HTML 时用得上
+  let connectorsPromise: Promise<Record<string, Record<string, string>>> | null = null
+  const connectors = () => (connectorsPromise ??= publicConfig(env, projectId, dataEnv))
+
   const renderEntry = async (): Promise<Response | null> => {
     const obj = await env.ARTIFACTS.get(prefix + entry)
     if (!obj) return null
-    const html = injectRuntime(await obj.text(), apiBase, dataEnv, title)
+    const html = injectRuntime(await obj.text(), apiBase, dataEnv, title, await connectors())
     return new Response(html, {
       headers: {
         ...ASSET_CORS,
@@ -68,7 +73,7 @@ async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo
   const obj = await env.ARTIFACTS.get(prefix + clean)
   if (obj) {
     const isHtml = contentTypeFor(clean).startsWith('text/html')
-    const body = isHtml ? injectRuntime(await obj.text(), apiBase, dataEnv, title) : obj.body
+    const body = isHtml ? injectRuntime(await obj.text(), apiBase, dataEnv, title, await connectors()) : obj.body
     return new Response(body, {
       headers: {
         ...ASSET_CORS,

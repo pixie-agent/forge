@@ -14,6 +14,8 @@
 | --- | --- | --- |
 | 分支 | `main` | `staging` |
 | Worker | `forge-v2` | `forge-v2-staging` |
+| 对外域名 | `app.1forgen.site`(Custom Domain,根域名留空) | `app-staging.1forgen.site`(同上) |
+| workers.dev | `forge-v2.needle.workers.dev`(保留,旧链接依赖它) | `forge-v2-staging.needle.workers.dev`(同上) |
 | wrangler 环境 | 顶层(不带 `--env`) | `env.staging` |
 | Cloud Run | `forge-agent` | `forge-agent-staging`(`--max-instances 1`) |
 | D1 | `forge-v2`(`6fd724ad-…`) | `forge-v2-staging`(`da94e0ba-…`) |
@@ -63,6 +65,8 @@ npm run agent:deploy:prod                                       #    只在改�
 
 - **环境差异只能来自运行时配置**(wrangler 绑定 / `vars` / Cloud Run 的 env 与规格)。两套环境共用同一份 `web/dist` 与 `agent/` 源码,所以**禁止**用构建期变量(如 Vite `import.meta.env`)表达环境差异——那会把 staging 的东西打进生产包。
 - **wrangler 的绑定类配置不可继承**:`vars` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `durable_objects` / secrets 必须在顶层与 `env.staging` 里**各写一遍**。漏写不会在部署时报错,而是运行时 `c.env.XXX === undefined`(例如漏 `PROJECT_DB` 会让生成应用的数据面板直接 500)。**新增任何绑定必须两边同时加。**
+- **`routes` 反过来是「可继承」的**:顶层写了 `routes`,`env.staging` 不显式覆盖就会继承 → 发 staging 会去抢生产的域名;而且 `publishCustomDomains` 是 `replace_state` 语义,会把该 Worker 上**没写进配置**的 Custom Domain 删掉。所以两套环境各写各的 `routes`。
+- **配了 `routes` 就必须显式 `workers_dev: true`**:wrangler 的规则是「配置里有 routes 时 workers.dev 默认关闭」,不写会把 `*.needle.workers.dev` 关掉,已发布链接与还没切过去的回调地址一起断。
 - **前端环境角标**走运行时下发:staging 的 `vars.ENVIRONMENT=staging` → `GET /api/auth/config` 返回 `environment` → `<EnvBadge>` 渲染琥珀色角标。生产不设该变量,回落 `production`、不渲染。
 - **Worker secret 只写不可读**:没有任何 API 或命令能把已写入的 secret 读回来(`secrets` 接口只返回名字)。换环境只能由持有原始值的人重新输入,不要承诺「把生产的复制过去」。
 - **模型的多模态能力也是环境差异**:`PI_MODEL_INPUT_IMAGE=true` 才会在 `models.json` 里声明 `input: ['text','image']`。上游网关方言不一定认 image 块,声明了却发不出去会直接 400,所以**不要为了「保持一致」把生产的这个开关打开**——先实测生产端点。

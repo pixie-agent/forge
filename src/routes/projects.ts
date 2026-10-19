@@ -5,6 +5,7 @@ import { requireUser } from '../lib/auth'
 import { clearArtifacts, copyArtifacts, deleteProjectArtifacts, DRAFT_VERSION_NO, signPreviewToken } from '../lib/artifacts'
 import { BLOB_KEY_RE, blobKey, blobPrefix, deleteProjectAppData, KV_KEY_RE, kvKey, kvPrefix, type DataEnv } from '../lib/appdata'
 import { projectSchema, runProjectSql } from '../lib/projectDb'
+import { deleteProjectBindings } from '../lib/connectors/store'
 import { ACTIVE_STATUS_SQL } from '../lib/jobHelpers'
 import { createZip } from '../lib/zip'
 
@@ -212,7 +213,7 @@ app.get('/:id/versions/:no/export', async (c) => {
 app.delete('/:id', async (c) => {
   const project = await ownedProject(c, c.req.param('id'))
   if (!project) return c.json({ error: '项目不存在' }, 404)
-  await Promise.all([deleteProjectArtifacts(c.env, project.id), deleteProjectAppData(c.env, project.id)])
+  await Promise.all([deleteProjectArtifacts(c.env, project.id), deleteProjectAppData(c.env, project.id), deleteProjectBindings(c.env.DB, project.id)])
   await c.env.DB.batch([
     c.env.DB.prepare('DELETE FROM messages WHERE project_id = ?').bind(project.id),
     c.env.DB.prepare('DELETE FROM versions WHERE project_id = ?').bind(project.id),

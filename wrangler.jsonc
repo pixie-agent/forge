@@ -9,6 +9,15 @@
     "directory": "./web/dist",
     "binding": "ASSETS"
   },
+  // 对外域名:Custom Domain(不是 route),Cloudflare 自动建 DNS 记录 + 签证书,
+  // 前提是 zone 与本 Worker 同账号(1forgen.site 已满足)。根域名 1forgen.site 故意不用,留作以后的官网/落地页。
+  // 两个必须一起写的注意点:
+  //   1) workers_dev 必须显式 true —— 配置里一旦出现 routes,wrangler 默认把 workers.dev 关掉,
+  //      已发布的 /s/:slug 旧链接、以及还没切过去的 Google 回调地址都会断。
+  //   2) routes 是「可继承」键(和 vars/d1_databases 那类绑定相反),env.staging 不显式写就会继承
+  //      顶层这条 → 发 staging 会去抢 app.1forgen.site;所以两套环境各写各的。见 §11.1 / docs/FORGE2.md
+  "workers_dev": true,
+  "routes": [{ "pattern": "app.1forgen.site", "custom_domain": true }],
   // 全新独立资源:本 Worker 用全新的 D1,不与线上 forge 共用任何数据
   // 首次搭建:npx wrangler d1 create forge-v2  → 把输出的 database_id 填到下面
   "d1_databases": [
@@ -44,10 +53,16 @@
     { "tag": "v1", "new_sqlite_classes": ["ProjectDb"] }
   ],
   // 非密钥变量;AGENT_SECRET 走 `wrangler secret put AGENT_SECRET`
+  // 连接器凭证的加密主密钥同理:`wrangler secret put CONNECTOR_KEK`(staging 需 --env staging 另写一次;
+  // secret 不可继承,未设置时连接器接口返回明确错误,不影响其他功能)。见 docs/CONNECTORS.md §8
   // AGENT_URL:部署 agent/ 到 Cloud Run 后拿到的服务地址(本地开发在 .dev.vars 覆盖)
   "vars": {
     "AGENT_URL": "https://forge-agent-323709989821.us-central1.run.app",
-    "PUBLIC_BASE_URL": "https://forge-v2.needle.workers.dev"
+    // 对外规范域名(2026-10-19 切换):Google OAuth 回调 + 连接器回调 + agent 进度回调都以它为准。
+    // 换这一行之前必须先在 Google 控制台的 OAuth 客户端里加好对应的「已获授权的重定向 URI」,
+    // 否则登录直接 redirect_uri_mismatch(错误发生在 Google 侧,平台收不到回调)。
+    // workers.dev 地址仍可用(见上面 workers_dev),但不再是规范地址。
+    "PUBLIC_BASE_URL": "https://app.1forgen.site"
   },
   // 交付不依赖长连接:agent 在 Cloud Run 跑,通过 /internal 回调写进度与最终结果;
   // cron 每分钟按心跳巡检,执行体失联/超龄的任务判死解锁(见 docs/FORGE2.md)
@@ -90,9 +105,11 @@
       "durable_objects": {
         "bindings": [{ "name": "PROJECT_DB", "class_name": "ProjectDb" }]
       },
+      // 覆盖顶层 routes(routes 是可继承键,不写这里就会继承 app.1forgen.site)
+      "routes": [{ "pattern": "app-staging.1forgen.site", "custom_domain": true }],
       "vars": {
         "AGENT_URL": "https://forge-agent-staging-323709989821.us-central1.run.app",
-        "PUBLIC_BASE_URL": "https://forge-v2-staging.needle.workers.dev",
+        "PUBLIC_BASE_URL": "https://app-staging.1forgen.site",
         // 仅 staging 设置;生产不设 → 前端按 production 处理(不显示环境角标)
         "ENVIRONMENT": "staging"
       }

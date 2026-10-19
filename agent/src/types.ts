@@ -38,6 +38,23 @@ export interface SteerMessage {
   attachments: RunAttachment[]
 }
 
+/**
+ * 本轮生成可用的外部连接器(Worker 侧 src/types.ts 有对应副本,见 docs/CONNECTORS.md §6b)。
+ * 凭证只活在这一条 dispatch 请求里:agent 落到工作目录 `.forge/connectors.json`(进 SKIP_DIRS,
+ * 不进源码树、不进产物),随容器销毁,不落 D1/R2/versions。
+ */
+export interface ConnectorGrant {
+  provider: string
+  accountLabel: string
+  scopes: string[]
+  /** true = 本次含可写能力(agent 触发写操作前应先取得用户确认) */
+  writable?: boolean
+  credentials?: Record<string, string>
+  config?: Record<string, string>
+  /** 生成期用法说明(来自 provider 定义的 agentHint) */
+  hint?: string
+}
+
 export interface ArtifactManifest {
   /** 入口 HTML(默认 index.html) */
   entry: string
@@ -62,6 +79,8 @@ export interface RunRequest {
   history?: { role: 'user' | 'assistant'; content: string }[]
   /** 用户随消息上传的图片/文本附件(generate 与 chat 通用) */
   attachments?: RunAttachment[]
+  /** 本轮已授权的外部连接器(见 docs/CONNECTORS.md);无则 undefined,行为与从前完全一致 */
+  connectors?: ConnectorGrant[]
   /** Cloudflare 回调基址,如 https://forge-v2.xxx.workers.dev */
   callbackBase: string
 }

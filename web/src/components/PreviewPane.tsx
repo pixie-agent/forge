@@ -37,6 +37,10 @@ interface Props {
   onPublish: (version: number) => void
   /** 下线:撤回公开发布页(公开链接随即 404) */
   onUnpublish: () => void
+  /** 打开项目级「连接器」管理面板(接入外部系统 / 换账号 / 分环境配置) */
+  onOpenConnectors: () => void
+  /** 已绑定的连接器数量(按草稿环境计),>0 时入口按钮上显示角标 */
+  connectorCount?: number
   /** 移动端是否隐藏(工作台用顶部标签在对话/预览间切换;桌面端始终显示) */
   mobileHidden?: boolean
 }
@@ -60,6 +64,8 @@ export default function PreviewPane({
   switchingVersion,
   onPublish,
   onUnpublish,
+  onOpenConnectors,
+  connectorCount = 0,
   mobileHidden,
 }: Props) {
   const [tab, setTab] = useState<'preview' | 'code' | 'data'>('preview')
@@ -192,6 +198,17 @@ export default function PreviewPane({
               </button>
             )
           })()}
+          <button
+            onClick={onOpenConnectors}
+            title="连接器:接入支付、统计、代码仓库等外部系统,让生成的站点真的用起来"
+            className="flex items-center gap-1 rounded-lg border border-gray-700 px-2.5 py-1.5 text-xs text-gray-300 hover:border-indigo-500 hover:text-gray-100"
+          >
+            <span>🔌</span>
+            <span className="hidden sm:inline">连接器</span>
+            {connectorCount > 0 && (
+              <span className="rounded-full bg-indigo-500/20 px-1.5 text-[10px] text-indigo-300">{connectorCount}</span>
+            )}
+          </button>
           <div className="relative">
             <button
               onClick={() => setShowHelp((v) => !v)}

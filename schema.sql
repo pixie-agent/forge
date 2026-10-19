@@ -88,6 +88,31 @@ CREATE TABLE IF NOT EXISTS job_messages (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 连接器(见 docs/CONNECTORS.md §4):账号级连接 + 项目级绑定。
+-- 要授权的才算「连接」(auth: oauth);只让用户填个 ID 的(GA4 measurementId / Stripe 付款链接)
+-- 没有 connections 行,只是 project_connectors.config_json 里的一段配置。
+CREATE TABLE IF NOT EXISTS connections (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  provider      TEXT NOT NULL,                    -- ga4 | stripe | github | supabase
+  account_label TEXT NOT NULL,                    -- "acme.com" / "me@x.com",仅展示
+  scopes        TEXT NOT NULL DEFAULT '',         -- 记下来才能显示「只读 / 可写」
+  credentials   TEXT NOT NULL,                    -- JSON,AES-GCM 密文(public 值也走这里,统一路径)
+  status        TEXT NOT NULL DEFAULT 'active',   -- active | revoked | error
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(user_id, provider, account_label)
+);
+
+CREATE TABLE IF NOT EXISTS project_connectors (
+  project_id  TEXT NOT NULL REFERENCES projects(id),
+  provider    TEXT NOT NULL,
+  env         TEXT NOT NULL DEFAULT 'live',       -- draft | live,与数据层同口径
+  config_json TEXT NOT NULL DEFAULT '{}',         -- 非密配置:measurementId / paymentLink / connectionId
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (project_id, provider, env)
+);
+
 -- 生成应用的后端(D1 文档集合),路径 /s/:slug/api/db/:collection 读写
 -- env = 'draft'(编辑器预览产生) / 'live'(发布后访客产生),两套数据互不可见
 CREATE TABLE IF NOT EXISTS site_data (
@@ -112,3 +137,6 @@ CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_jobs_user    ON jobs(user_id, status);
 -- cron 每分钟按 status + updated_at 清扫,走此索引避免全表扫描
 CREATE INDEX IF NOT EXISTS idx_jobs_sweep   ON jobs(status, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_connections_user ON connections(user_id, provider);
+CREATE INDEX IF NOT EXISTS idx_project_connectors_project ON project_connectors(project_id, env);

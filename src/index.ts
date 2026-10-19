@@ -2,6 +2,8 @@ import { Hono } from 'hono'
 import type { Env } from './types'
 import { authRoutes } from './routes/auth'
 import { projectRoutes } from './routes/projects'
+import { projectConnectorRoutes } from './routes/projectConnectors'
+import { connectionRoutes } from './routes/connections'
 import { generateRoutes } from './routes/generate'
 import { jobRoutes } from './routes/jobs'
 import { internalRoutes } from './routes/internal'
@@ -16,8 +18,12 @@ const app = new Hono<{ Bindings: Env }>()
 
 app.route('/api/auth', authRoutes)
 app.route('/api/projects', projectRoutes)
+// 项目级连接器(与 projectRoutes 并列挂在同一前缀:GET/PUT/DELETE /api/projects/:id/connectors)
+app.route('/api/projects', projectConnectorRoutes)
 app.route('/api/projects', generateRoutes)
 app.route('/api/jobs', jobRoutes)
+// 连接器 · 账号级(授权跳转与回调)
+app.route('/api/connections', connectionRoutes)
 // 管理后台(只读,独立口令鉴权):跨用户查看产物
 app.route('/api/admin', adminRoutes)
 // 内部回调:Cloud Run agent 上报进度(X-Agent-Secret 保护,不对外)

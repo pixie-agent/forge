@@ -2,6 +2,7 @@
 
 import type { Plan, RunRequest } from './types.js'
 import { attachmentsBrief } from './attachments.js'
+import { connectorsBrief } from './connectors.js'
 
 /** 平台后端 SDK 用法(与 agent/template/src/lib/forge.js、store.js 对齐) */
 const DATA_SDK = `平台已为每个应用内置一套开箱即用的后端能力(数据库 / 键值 / 原子计数 / 对象存储),无需任何密钥、无需自己搭后端。**生成时必须优先用它把功能做完整,而不是做静态假数据、或只把数据存在内存里**。
@@ -56,7 +57,7 @@ const DATA_SDK = `平台已为每个应用内置一套开箱即用的后端能�
      useUpload('uploads')                                 → { put, uploading, error, progress, url }
      useBlobs('uploads/')                                 → { items, loading, error, reload, remove, url }
 
-集合名/键名用小写英文(如 guestbook、signups、todos);只保存访问者主动提交或运行产生的数据,禁止收集密码、支付信息等敏感内容。所有请求都要处理失败:给出友好提示(Toast 或 ErrorState),不要让页面崩溃或白屏。`
+集合名/键名用小写英文(如 guestbook、signups、todos);只保存访问者主动提交或运行产生的数据。**支付分档**:可以做「外链支付按钮」——按钮指向 Stripe Payment Link / 收银台等外部付款页(target="_blank" 打开),付款结果由对方页面处理;但**禁止**在本应用里收集或存储卡号、有效期、CVC、银行账户等支付凭证,也禁止收集密码。所有请求都要处理失败:给出友好提示(Toast 或 ErrorState),不要让页面崩溃或白屏。`
 
 /** 设计系统契约:平台模板已内置,模型只需按词汇表使用 */
 const DESIGN_SYSTEM = `模板已经内置一套「token-first」设计系统,你的任务不是从头设计视觉,而是**严格执行**它——这是本项目美观度的第一保障。
@@ -125,19 +126,20 @@ export const SYSTEM_PROMPT = `你是一位顶级前端工程师兼视觉设计�
 - 入口:index.html → src/main.jsx → src/App.jsx(组件树从这里展开)
 - 样式:src/index.css(已 @import tailwindcss 与三层设计 token);视觉一律走语义类名,见下文「设计系统契约」
 - 组件库:src/components/ui/index.js(Button/Card/Input/Modal/Tabs/Toast/三态/版式/图标/动效,共 30+ 个导出)
-- 后端 SDK:src/lib/forge.js(db/kv/counter/blob)与 src/lib/store.js(hooks)
+- 后端 SDK:src/lib/forge.js(db/kv/counter/blob)、src/lib/store.js(hooks)、src/lib/connectors.js(外部连接器公开配置)
 - 动效:src/lib/motion.jsx(Reveal/Stagger/useCountUp,基于 motion)
 
 文件权限(违反会被平台强制还原,等于白做):
 - **可自由改写**:src/App.jsx、src/components/ 下你自己新建的文件、src/pages/ 等。
 - **只允许改两行**:src/styles/tokens.css 里的 --brand 与 --accent。
 - **禁止修改**:package.json、vite.config.js、index.html、src/main.jsx、src/index.css、
-  src/styles/ 下除 tokens.css 外的文件、src/lib/{forge,store,motion,cx}.js、src/components/ui/**。
+  src/styles/ 下除 tokens.css 外的文件、src/lib/{forge,store,motion,cx,connectors}.js、src/components/ui/**。
   这些是平台资产:需要某种样式/组件时,用它们提供的 API 组合,而不是改它们。
 
 硬性约束:
 - **禁止 localStorage / sessionStorage**:发布页与预览页跑在沙箱里(opaque origin),访问它们会抛 SecurityError 导致整页白屏。需要"记住"的数据一律进 db/kv(见数据层)。
 - 禁止引用外部图片、字体、JS/CSS CDN;禁止新增依赖、禁止运行 npm install 或构建命令(平台会统一构建)。
+  唯一例外:用户已接入 GA4(见「连接器」章节)时,可调用 src/lib/connectors.js 的 loadGA4() 加载官方统计脚本。
 - 全部文案使用简体中文,内容必须真实具体(围绕主题写商品名、价格、评价、文章标题、人名等),禁止 lorem ipsum 或"示例文字"占位。
 - 先用 read 看看脚手架与 plan.json,再用 write/edit 写代码;可用 bash 做最小自检(如读取文件确认语法),但不要跑构建。
 
@@ -247,9 +249,11 @@ export function chatPrompt(req: RunRequest): string {
 
 export function buildUserPrompt(req: RunRequest, opts: { imageInputEnabled?: boolean } = {}): string {
   const base = req.type === 'chat' ? chatPrompt(req) : generatePrompt(req)
-  if (!req.attachments?.length) return base
-  // 附件清单放最前面:模型先知道「有参考材料、在哪」,再读需求正文
-  return `${attachmentsBrief(req.attachments, opts.imageInputEnabled === true)}\n\n${base}`
+  // 连接器清单放最前:模型先知道「本轮能用哪些外部系统、凭证在哪」,再读需求正文
+  const briefs = [connectorsBrief(req.connectors)]
+  if (req.attachments?.length) briefs.push(attachmentsBrief(req.attachments, opts.imageInputEnabled === true))
+  const prefix = briefs.filter(Boolean).join('\n\n')
+  return prefix ? `${prefix}\n\n${base}` : base
 }
 
 /** 从 plan.json 文本解析规划,失败返回 null(前端会退化为无规划卡片) */

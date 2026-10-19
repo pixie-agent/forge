@@ -11,12 +11,13 @@ import type { AgentSession } from '@mariozechner/pi-coding-agent'
 import { POLISH_PROMPT, buildUserPrompt, parsePlan } from './prompt.js'
 import { createForgeSession } from './session.js'
 import { ATTACHMENT_DIR, attachmentFileName } from './attachments.js'
+import { CONNECTOR_DIR, materializeConnectors } from './connectors.js'
 import type { ArtifactManifest, FileMap, Plan, RunRequest, RunResult } from './types.js'
 
 const execFileAsync = promisify(execFile)
 
-/** 收集源码树时跳过的目录(依赖、临时、构建产物、用户附件) */
-const SKIP_DIRS = new Set(['node_modules', '.pi', '.git', 'dist', ATTACHMENT_DIR])
+/** 收集源码树时跳过的目录(依赖、临时、构建产物、用户附件、连接器凭证) */
+const SKIP_DIRS = new Set(['node_modules', '.pi', '.git', 'dist', ATTACHMENT_DIR, CONNECTOR_DIR])
 /** 顶层不作为“源码”交付的文件(计划与锁文件) */
 const SKIP_ROOT_FILES = new Set(['plan.json', 'package-lock.json'])
 const BUILD_TIMEOUT_MS = 5 * 60 * 1000
@@ -36,6 +37,7 @@ const PLATFORM_FILES = [
   'src/index.css',
   'src/lib/cx.js',
   'src/lib/forge.js',
+  'src/lib/connectors.js',
   'src/lib/motion.jsx',
   'src/lib/store.js',
 ]
@@ -302,6 +304,9 @@ export async function runJob(
 
   // 用户附件:图片直接作为多模态输入,文本落到 .attachments/ 供模型 read(不进源码树)
   const attachmentImages = await materializeAttachments(workspace, req.attachments, config.supportsImageInput)
+
+  // 本轮连接器:凭证明文落到 .forge/connectors.json(不进源码树、不进产物,随容器销毁)
+  await materializeConnectors(workspace, req.connectors)
 
   report({ stage: req.type === 'chat' ? 'coding' : 'planning', progress: req.type === 'chat' ? '正在按要求修改应用' : '正在规划方案' })
 
