@@ -9,6 +9,7 @@ import PreviewPane from '../components/PreviewPane'
 import TopBar from '../components/TopBar'
 import { api, cancelJob, getActiveJob, startJob, steerJob, subscribeJob } from '../lib/api'
 import { attachmentMarker, type OutgoingAttachment } from '../lib/attachments'
+import { useT } from '../lib/i18n'
 import type { ArtifactManifest, JobSnapshot, Message, Plan, Project, ProjectConnectorsResponse, ProjectDetail, ProjectDraft, ProjectVersionDetail, SiteDataEnv, VersionMeta } from '../lib/types'
 
 type FilePreview = { path: string; content: string }
@@ -17,6 +18,7 @@ export default function Workspace() {
   const { id } = useParams()
   const [sp, setSp] = useSearchParams()
   const { refresh } = useAuth()
+  const t = useT()
 
   const [project, setProject] = useState<Project | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -176,7 +178,7 @@ export default function Workspace() {
         // 失败但有产物:记下原想法,后续消息作为补充要求继续该任务;同时保留失败任务用于重试
         if (finished.idea) setResumeIdea(finished.idea)
         setFailedJob(finished)
-        setError(finished.error ?? '生成失败,请重试')
+        setError(finished.error ?? t('ws.generateFailed'))
         return
       }
       if (finished.status === 'cancelled') {
@@ -199,7 +201,7 @@ export default function Workspace() {
       for (let attempt = 0; ; attempt++) {
         if (await reloadDetail()) break
         if (attempt >= 2) {
-          setError('生成结果同步失败,请刷新页面查看最新版本')
+          setError(t('ws.syncFailed'))
           return
         }
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
@@ -208,7 +210,7 @@ export default function Workspace() {
       setFilesPreview(null)
       refresh()
     },
-    [reloadDetail, refresh]
+    [reloadDetail, refresh, t]
   )
 
   /** 创建后台任务;服务端已落用户消息,前端本地补一条保证即时反馈 */
@@ -277,12 +279,12 @@ export default function Workspace() {
     : job?.progress
       ? job.progress
       : runningAction === 'chat'
-        ? '正在按你的要求修改应用'
+        ? t('ws.stage.chat')
         : job?.stage === 'coding' || plan
-          ? '正在编写应用代码'
+          ? t('ws.stage.coding')
           : job?.stage === 'building'
-            ? '正在构建应用产物'
-            : '正在规划方案'
+            ? t('ws.stage.building')
+            : t('ws.stage.planning')
 
   useEffect(() => {
     if (!id) return
@@ -330,18 +332,18 @@ export default function Workspace() {
               // 授权成功但必填配置还差(如 GA4 的 propertyId):半截能力递下去只会让 agent 白跑,
               // 所以这里直接把面板打开,让用户补完再生成(与 resolveGrants 的跳过口径一致)
               setNoticeTone('err')
-              setNotice(`已接入 ${name},但还差「${missing.join('、')}」没填,请补上后再生成`)
+              setNotice(t('ws.conn.missing', { name, fields: missing.join(t('chat.listSep')) }))
               setShowConnectors(true)
             } else if (profile?.writable) {
               setNoticeTone('ok')
-              setNotice(`已接入 ${name}。它带写能力,默认不带上 —— 要用它的那一轮请在对话栏点亮`)
+              setNotice(t('ws.conn.writable', { name }))
             } else {
               setNoticeTone('ok')
-              setNotice(`已接入 ${name},之后的生成会默认带上它`)
+              setNotice(t('ws.conn.readonly', { name }))
             }
           } else {
             setNoticeTone('err')
-            setNotice(`连接未完成:${connectorError}`)
+            setNotice(t('ws.conn.failed', { reason: connectorError ?? '' }))
           }
         }
         const idea = sp.get('idea')
@@ -372,7 +374,7 @@ export default function Workspace() {
       )
       setProject((p) => (p ? { ...p, status: 'published', slug: data.slug, published_version: data.published_version } : p))
       setNoticeTone('ok')
-      setNotice(`已上线 v${data.published_version},公开链接已更新`)
+      setNotice(t('ws.published', { version: data.published_version }))
       window.open(data.url, '_blank')
     } catch (err) {
       setNoticeTone('err')
@@ -383,12 +385,12 @@ export default function Workspace() {
   /** 下线:公开页立即 404,版本/源码/数据保留,可随时重新发布 */
   async function unpublish() {
     if (!id || !project) return
-    if (!confirm('下线后公开链接会立即失效(404),版本、源码与数据都会保留,随时可以重新发布。确定下线?')) return
+    if (!confirm(t('ws.confirmUnpublish'))) return
     try {
       await api(`/api/projects/${id}/unpublish`, { method: 'POST' })
       setProject((p) => (p ? { ...p, status: 'draft' } : p))
       setNoticeTone('ok')
-      setNotice('已下线,公开链接已失效')
+      setNotice(t('ws.unpublished'))
     } catch (err) {
       setNoticeTone('err')
       setNotice((err as Error).message)
@@ -399,7 +401,7 @@ export default function Workspace() {
   const send = useCallback(
     (text: string, attachments?: OutgoingAttachment[]) => {
       // 允许「只发附件」:后端要求 idea/message 非空,这里补一句默认说明
-      const finalText = text || (attachments?.length ? '请参考我上传的附件' : '')
+      const finalText = text || (attachments?.length ? t('ws.attachmentDefault') : '')
       if (!finalText) return
       const body = { attachments: attachments?.length ? attachments : undefined, connectors: connectorOptions }
       // 本地消息与服务端落库用同一段附件清单,刷新前后显示一致
@@ -408,7 +410,7 @@ export default function Workspace() {
       else if (resumeIdea) void run('generate', { idea: resumeIdea, note: finalText, ...body }, userText)
       else void run('generate', { idea: finalText, ...body }, userText)
     },
-    [draft, project?.current_version, resumeIdea, run, connectorOptions]
+    [draft, project?.current_version, resumeIdea, run, connectorOptions, t]
   )
 
   /**
@@ -419,7 +421,7 @@ export default function Workspace() {
   const steer = useCallback(
     async (text: string, attachments?: OutgoingAttachment[]) => {
       if (!id || !job) return
-      const finalText = text || (attachments?.length ? '请参考我上传的附件' : '')
+      const finalText = text || (attachments?.length ? t('ws.attachmentDefault') : '')
       if (!finalText) return
       try {
         await steerJob(id, { jobId: job.id, message: finalText, attachments })
@@ -436,7 +438,7 @@ export default function Workspace() {
         { id: crypto.randomUUID(), role: 'user', content: finalText + attachmentMarker(attachments), created_at: '' },
       ])
     },
-    [id, job, send]
+    [id, job, send, t]
   )
 
   /** 一键重试:原样重发上一次失败任务的输入(chat→再对话,generate→重新生成) */
@@ -457,14 +459,14 @@ export default function Workspace() {
     try {
       await cancelJob(id)
       setNoticeTone('ok')
-      setNotice('已停止本次任务(未扣除积分)')
+      setNotice(t('ws.stopped'))
     } catch (err) {
       setNoticeTone('err')
       setNotice((err as Error).message)
     } finally {
       setStopping(false)
     }
-  }, [id, stopping])
+  }, [id, stopping, t])
 
   /** 切换查看内容:0=草稿(工作副本),>0=历史正式版本(按需拉取源码树+产物清单+预览令牌) */
   async function selectVersion(no: number) {
@@ -497,7 +499,7 @@ export default function Workspace() {
       const data = await api<{ version: number }>(`/api/projects/${id}/commit`, { method: 'POST' })
       await reloadDetail()
       setNoticeTone('ok')
-      setNotice(`已生成 v${data.version},可在版本下拉里查看,发布后上线`)
+      setNotice(t('ws.versionCommitted', { version: data.version }))
     } catch (err) {
       setNoticeTone('err')
       setNotice((err as Error).message)
@@ -509,9 +511,9 @@ export default function Workspace() {
   const currentVersion = project?.current_version ?? 0
   // 有草稿:在草稿上继续改;否则有正式版本:基于它改草稿;都没有:全新生成
   const idlePlaceholder = draft
-    ? '描述修改要求,将在草稿上继续修改(满意后点「生成新版本」)…'
+    ? t('ws.idleDraft')
     : currentVersion > 0
-      ? `描述修改要求,将基于 v${currentVersion} 继续修改草稿…`
+      ? t('ws.idleVersion', { version: currentVersion })
       : undefined
 
   return (
@@ -528,16 +530,16 @@ export default function Workspace() {
       )}
       {/* 移动端:对话 / 预览 切换标签(桌面端隐藏,两块并排显示) */}
       <div className="flex shrink-0 border-b border-gray-800 bg-gray-950 md:hidden">
-        {(['chat', 'preview'] as const).map((t) => (
+        {(['chat', 'preview'] as const).map((tab) => (
           <button
-            key={t}
-            onClick={() => setMobileTab(t)}
+            key={tab}
+            onClick={() => setMobileTab(tab)}
             className={`flex flex-1 items-center justify-center gap-1.5 py-2.5 text-sm font-medium ${
-              mobileTab === t ? 'border-b-2 border-indigo-500 text-gray-100' : 'text-gray-400'
+              mobileTab === tab ? 'border-b-2 border-indigo-500 text-gray-100' : 'text-gray-400'
             }`}
           >
-            {t === 'chat' ? '对话' : '预览'}
-            {t === 'chat' && streaming && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-400" />}
+            {tab === 'chat' ? t('nav.chat') : t('nav.preview')}
+            {tab === 'chat' && streaming && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-400" />}
           </button>
         ))}
       </div>
@@ -590,8 +592,8 @@ export default function Workspace() {
                   setNoticeTone('ok')
                   setNotice(
                     writable
-                      ? `已接入 ${providerName}。它带写能力,默认不带上 —— 要用它的那一轮请在对话栏点亮`
-                      : `已接入 ${providerName},之后的生成会默认带上它`,
+                      ? t('ws.conn.writable', { name: providerName })
+                      : t('ws.conn.readonly', { name: providerName }),
                   )
                 }}
                 onClose={() => setAddingProvider(null)}
@@ -605,7 +607,7 @@ export default function Workspace() {
           manifest={manifest}
           src={src}
           streaming={streaming}
-          progressText={stageText ? `${stageText} · 已 ${elapsed}s` : ''}
+          progressText={stageText ? `${stageText} · ${t('chat.elapsed', { seconds: elapsed })}` : ''}
           agentLog={job?.agent_log ?? ''}
           filesPreview={filesPreview}
           project={project}

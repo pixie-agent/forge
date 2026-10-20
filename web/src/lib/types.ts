@@ -363,3 +363,64 @@ export interface AdminUserDetail {
   projects: AdminUserProject[]
   jobs: AdminJob[]
 }
+
+// ─────────────────────────── 计费(见 docs/FORGE2.md §20)───────────────────────────
+
+/** 一次性充值包。价格是**占位值**,阶段四接入 MoR 时以对方后台商品为准(服务端 src/lib/plans.ts) */
+export interface CreditPack {
+  id: string
+  credits: number
+  /** 最小货币单位(美分):$9.00 → 900 */
+  priceMinor: number
+  badge: 'popular' | 'bestValue' | ''
+}
+
+/** 按月订阅档位:每月自动到账 creditsPerPeriod 分,可随时取消 */
+export interface SubscriptionPlan {
+  id: string
+  name: string
+  creditsPerPeriod: number
+  priceMinor: number
+  period: 'month'
+  badge: 'popular' | 'bestValue' | ''
+}
+
+export interface BillingPlans {
+  currency: string
+  jobCost: Record<string, number>
+  packs: CreditPack[]
+  plans: SubscriptionPlan[]
+  /** 支付通道是否已开通(服务端 Creem 密钥与商品映射就绪);未开通时禁用结账按钮 */
+  checkoutReady: boolean
+}
+
+/** 账本流水类型,与 src/lib/credits.ts 的 LedgerReason 对应(前端据此选文案) */
+export type LedgerReason = 'signup' | 'job_hold' | 'job_release' | 'purchase' | 'refund' | 'admin_grant' | 'expire'
+
+export interface LedgerEntry {
+  id: string
+  delta: number
+  reason: LedgerReason
+  refType: string
+  refId: string
+  balanceAfter: number
+  note: string
+  createdAt: string
+}
+
+export interface BillingOrder {
+  id: string
+  provider: string
+  amountMinor: number
+  currency: string
+  credits: number
+  status: 'pending' | 'paid' | 'failed' | 'refunded'
+  createdAt: string
+  paidAt: string | null
+}
+
+export interface BillingSummary {
+  credits: number
+  ledger: LedgerEntry[]
+  orders: BillingOrder[]
+}

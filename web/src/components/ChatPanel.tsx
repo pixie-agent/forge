@@ -15,6 +15,7 @@ import {
   type OutgoingAttachment,
   type PendingAttachment,
 } from '../lib/attachments'
+import { useT, type DictKey } from '../lib/i18n'
 import type { Message, Plan } from '../lib/types'
 
 type StageKey = 'planning' | 'coding' | 'building'
@@ -57,16 +58,16 @@ interface Props {
 }
 
 /** generate 的执行路径(三步) */
-const STAGES: { key: StageKey; label: string }[] = [
-  { key: 'planning', label: '规划方案' },
-  { key: 'coding', label: '编写应用' },
-  { key: 'building', label: '构建产物' },
+const STAGES: { key: StageKey; label: DictKey }[] = [
+  { key: 'planning', label: 'chat.stage.planning' },
+  { key: 'coding', label: 'chat.stage.coding' },
+  { key: 'building', label: 'chat.stage.building' },
 ]
 
 /** chat 不做规划,执行路径只有两步 */
-const CHAT_STAGES: { key: StageKey; label: string }[] = [
-  { key: 'coding', label: '修改代码' },
-  { key: 'building', label: '构建产物' },
+const CHAT_STAGES: { key: StageKey; label: DictKey }[] = [
+  { key: 'coding', label: 'chat.stage.modify' },
+  { key: 'building', label: 'chat.stage.building' },
 ]
 
 /** 对话栏宽度(桌面端):默认比原来的 380px 宽一些,可拖右边缘调节,双击复位 */
@@ -103,6 +104,7 @@ function storeWidth(w: number): void {
 }
 
 export default function ChatPanel({ messages, plan, streaming, error, stage, elapsed, agentLog, jobType, idlePlaceholder, mobileHidden, onSend, onSteer, onRetry, onStop, stopping, connectorsBar, credentialCard }: Props) {
+  const t = useT()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [attachError, setAttachError] = useState('')
@@ -185,7 +187,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
     for (const raw of Array.from(files)) {
       const file = withPastedName(raw)
       if (next.length >= limits.maxCount) {
-        setAttachError(`最多只能附 ${limits.maxCount} 个文件`)
+        setAttachError(t('attach.tooMany', { count: limits.maxCount }))
         break
       }
       const reason = rejectReason(file, limits)
@@ -194,7 +196,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
         continue
       }
       if (total + file.size > limits.totalBytes) {
-        setAttachError(`附件合计不能超过 ${formatBytes(limits.totalBytes)}`)
+        setAttachError(t('attach.totalTooLarge', { size: formatBytes(limits.totalBytes) }))
         break
       }
       try {
@@ -202,7 +204,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
         next.push(pending)
         total += pending.size
       } catch (err) {
-        setAttachError(err instanceof Error ? err.message : '读取文件失败')
+        setAttachError(err instanceof Error ? err.message : t('attach.readFailed'))
       }
     }
     setAttachments(next)
@@ -248,7 +250,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
         await onSteer(text, outgoing)
       } catch (err) {
         // 追加失败:输入与附件原样留着,用户可直接重试
-        setAttachError(err instanceof Error ? err.message : '追加失败,请重试')
+        setAttachError(err instanceof Error ? err.message : t('chat.steerFailed'))
         return
       }
     } else {
@@ -285,8 +287,8 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
           onDoubleClick={resetWidth}
           role="separator"
           aria-orientation="vertical"
-          aria-label="拖动调整对话栏宽度"
-          title="拖动调整对话栏宽度,双击复位"
+          aria-label={t('chat.resizeAria')}
+          title={t('chat.resizeTitle')}
           className="absolute right-0 top-0 z-20 h-full w-1.5 cursor-col-resize bg-transparent transition-colors hover:bg-indigo-500/40"
         />
       )}
@@ -311,17 +313,17 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
             <div className="mb-2 flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-indigo-200">
                 {streaming && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-indigo-400" />}
-                <span className="truncate">{plan ? `规划:${plan.name}` : streaming ? '处理中' : '生成过程'}</span>
+                <span className="truncate">{plan ? t('chat.planningPrefix', { name: plan.name }) : streaming ? t('chat.processing') : t('chat.processTitle')}</span>
               </span>
               {streaming ? (
-                <span className="shrink-0 text-xs text-gray-400">已 {elapsed}s</span>
+                <span className="shrink-0 text-xs text-gray-400">{t('chat.elapsed', { seconds: elapsed })}</span>
               ) : (
                 events.length > 0 && (
                   <button
                     onClick={() => setShowProcess((v) => !v)}
                     className="shrink-0 text-xs text-gray-400 hover:text-gray-200"
                   >
-                    {showProcess ? '收起 ▾' : '查看生成过程 ▸'}
+                    {showProcess ? t('chat.collapse') : t('chat.expand')}
                   </button>
                 )
               )}
@@ -347,9 +349,9 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                       {st === 'done' ? '✓' : st === 'failed' ? '✗' : st === 'active' ? '●' : '○'}
                     </span>
                     <span className={st === 'pending' ? 'text-gray-500' : st === 'failed' ? 'text-red-300' : 'text-gray-200'}>
-                      {s.label}
+                      {t(s.label)}
                     </span>
-                    {st === 'active' && <span className="text-gray-500">进行中…</span>}
+                    {st === 'active' && <span className="text-gray-500">{t('chat.stage.active')}</span>}
                   </li>
                 )
               })}
@@ -370,18 +372,18 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                       className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300"
                     >
                       <span>💭</span>
-                      <span>思考过程</span>
+                      <span>{t('chat.thinking')}</span>
                       <span>{showThinking ? '▾' : '▸'}</span>
                       {stillThinking && (
                         <span className="flex items-center gap-1 text-gray-600">
-                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-500" />思考中…
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-500" />{t('chat.thinkingNow')}
                         </span>
                       )}
                     </button>
                     {showThinking && (
                       <div className="mt-1.5 max-h-40 space-y-1.5 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 text-xs leading-relaxed text-gray-500">
-                        {thinkings.slice(-3).map((t, i) => (
-                          <p key={i}>{t}</p>
+                        {thinkings.slice(-3).map((text, i) => (
+                          <p key={i}>{text}</p>
                         ))}
                       </div>
                     )}
@@ -389,19 +391,19 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                 )}
                 {tools.length > 0 && (
                   <ul className="mt-2 space-y-1.5 text-xs">
-                    {tools.slice(-6).map((t, i) => (
+                    {tools.slice(-6).map((ev, i) => (
                       <li key={i} className="flex items-center gap-1.5 text-gray-400">
-                        {t.status === 'running' ? (
+                        {ev.status === 'running' ? (
                           <span className="h-3 w-3 shrink-0 animate-spin rounded-full border border-indigo-400/70 border-t-transparent" />
                         ) : (
-                          <span className={`shrink-0 ${t.status === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {t.status === 'ok' ? '✓' : '✗'}
+                          <span className={`shrink-0 ${ev.status === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {ev.status === 'ok' ? '✓' : '✗'}
                           </span>
                         )}
                         <span className="truncate">
-                          {t.status === 'running' ? '正在' : ''}
-                          {toolVerb(t.name)}
-                          {t.arg ? <span className="text-gray-500"> {t.arg}</span> : null}
+                          {ev.status === 'running' ? t('chat.toolRunning') : ''}
+                          {toolVerb(ev.name)}
+                          {ev.arg ? <span className="text-gray-500"> {ev.arg}</span> : null}
                         </span>
                       </li>
                     ))}
@@ -409,7 +411,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                 )}
                 {changedFiles.length > 0 && (
                   <div className="mt-2 border-t border-indigo-500/20 pt-1.5 text-xs text-gray-500">
-                    已改动 {changedFiles.length} 个文件:<span className="text-gray-400">{changedFiles.slice(-4).join('、')}</span>
+                    {t('chat.changedFiles', { count: changedFiles.length })}<span className="text-gray-400">{changedFiles.slice(-4).join(t('chat.listSep'))}</span>
                   </div>
                 )}
               </>
@@ -417,7 +419,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
 
             {plan && plan.sections.length > 0 && (
               <div className="mt-3 border-t border-indigo-500/20 pt-2">
-                <div className="mb-1.5 text-xs text-gray-400">本次包含的功能</div>
+                <div className="mb-1.5 text-xs text-gray-400">{t('chat.features')}</div>
                 <ul className="space-y-1 text-xs">
                   {plan.sections.map((s, i) => (
                     <li key={i} className="flex gap-1.5">
@@ -445,16 +447,16 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
           <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3">
             <div className="mb-1 flex items-center gap-1.5 text-sm font-medium text-red-300">
               <span>⚠️</span>
-              <span>本次未完成</span>
+              <span>{t('chat.jobFailed')}</span>
             </div>
             <p className="mb-2 whitespace-pre-wrap break-words text-xs leading-relaxed text-red-200/90">{error}</p>
-            <p className="mb-2.5 text-xs text-gray-400">积分未扣除。可一键重试,或在下方补充说明后继续。</p>
+            <p className="mb-2.5 text-xs text-gray-400">{t('chat.jobFailedHint')}</p>
             {onRetry && !streaming && (
               <button
                 onClick={onRetry}
                 className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-500/20"
               >
-                ↻ 重试
+                ↻ {t('chat.retry')}
               </button>
             )}
           </div>
@@ -485,7 +487,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                 <span className="text-[10px] text-gray-500">{formatBytes(a.size)}</span>
                 <button
                   onClick={() => removeAttachment(a.id)}
-                  aria-label={`移除 ${a.name}`}
+                  aria-label={t('attach.remove', { name: a.name })}
                   className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-1 text-gray-500 hover:text-red-300"
                 >
                   ×
@@ -512,8 +514,12 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
           <button
             onClick={() => fileRef.current?.click()}
             disabled={(streaming && !onSteer) || attachments.length >= limits.maxCount}
-            title={`添加图片或文本文件(最多 ${limits.maxCount} 个:图片 ≤${Math.round(limits.imageBytes / 1024 / 1024 * 10) / 10}MB,文本 ≤${Math.round(limits.textBytes / 1024)}KB);也可直接粘贴图片`}
-            aria-label="添加附件"
+            title={t('attach.addTitle', {
+              count: limits.maxCount,
+              imageMB: Math.round(limits.imageBytes / 1024 / 1024 * 10) / 10,
+              textKB: Math.round(limits.textBytes / 1024),
+            })}
+            aria-label={t('attach.add')}
             className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl border border-gray-700 bg-gray-900 text-lg text-gray-400 hover:border-indigo-500 hover:text-gray-200 disabled:opacity-40"
           >
             📎
@@ -523,9 +529,9 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
             placeholder={
               streaming
                 ? onSteer
-                  ? '生成中,可继续补充要求或粘贴图片,回车即时追加…'
-                  : '生成中…'
-                : idlePlaceholder ?? '描述你的想法,或提出修改要求(可粘贴图片)…'
+                  ? t('chat.placeholderStreaming')
+                  : t('chat.placeholderGenerating')
+                : idlePlaceholder ?? t('chat.placeholderIdle')
             }
             value={input}
             readOnly={streaming && !onSteer}
@@ -542,20 +548,20 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
             <button
               onClick={onStop}
               disabled={!onStop || stopping}
-              title="停止本次任务:已生成的中间结果不保留,不扣积分"
+              title={t('chat.stopTitle')}
               className="rounded-xl border border-gray-600 bg-gray-800 px-3 py-2 text-sm font-medium text-gray-200 hover:border-red-400/60 hover:bg-red-500/10 hover:text-red-200 disabled:opacity-40"
             >
-              {stopping ? '停止中…' : '■ 停止'}
+              {stopping ? t('chat.stopping') : `■ ${t('chat.stop')}`}
             </button>
           )}
           {(!streaming || onSteer) && (
             <button
               onClick={() => void submit()}
               disabled={!canSend}
-              title={streaming ? '把这条要求追加给正在执行的任务' : '发送'}
+              title={streaming ? t('chat.steerTitle') : t('chat.send')}
               className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
             >
-              {streaming ? '追加' : '发送'}
+              {streaming ? t('chat.steer') : t('chat.send')}
             </button>
           )}
         </div>

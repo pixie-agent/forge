@@ -25,6 +25,7 @@
 | LLM 密钥 | Secret `llm-api-key`(DeepSeek) | Secret `llm-api-key-staging`(GLM,另一把) |
 | LLM 模型 | `deepseek-flash`(Anthropic 方言) | `glm-5.3-flash`(OpenAI 兼容 + `zai` 思考格式) |
 | 用户上传图片给模型看 | **关闭**(`PI_MODEL_INPUT_IMAGE` 未设) | 开启(`PI_MODEL_INPUT_IMAGE=true`) |
+| 计费收款(MoR) | Creem **live 门店**:Secret `CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET`;`vars.CREEM_API_BASE=https://api.creem.io`;`vars.CREEM_PRODUCTS` 填 live 商品 id | Creem **测试门店**:两个 secret 加 `--env staging` 单独写,值用 test 模式;`CREEM_API_BASE=https://test-api.creem.io`;`CREEM_PRODUCTS` 填 test 商品 id |
 | 环境标识 | 不设 `ENVIRONMENT` | `ENVIRONMENT=staging` |
 
 ### 分支模型
@@ -104,7 +105,16 @@ npm run db:migrate:google:staging
 
 ---
 
-## 6. 不要做
+## 6. 多语言(中 / 英)
+
+- **用户可见文案一律走词典**,不许在组件里写死中文。词典在 `web/src/lib/i18n/`(`dict.zh.ts` 是基准,`dict.en.ts` 用 `Record<DictKey, string>` 约束,**漏译即编译错误**)。新增词条只改这两份文件 + 在组件里 `useT()`,加语言不必动组件。
+- **`/admin` 六个管理页面刻意保持中文**(面向中文运营),不要给它们接 i18n。
+- 带行内格式的词条用 `web/src/components/RichText.tsx`(`**加粗**` / `` `代码` ``);**不要**往 DOM 里注入 HTML 字符串。列表连接符走词条 `chat.listSep`,不要写死 `、`。
+- 非组件代码(如 `lib/api.ts`)取词条用 `tStatic()`,写库前要定语言的文案见 `src/lib/i18n.ts`(Worker 侧那份独立于前端,两者不共享模块)。
+
+---
+
+## 7. 不要做
 
 - **不要自动部署生产**(见 §1)。
 - 不要复用线上旧服务 `forge` 的任何 Worker / D1 / secrets / Cloud Run 服务;本项目资源全部自建。

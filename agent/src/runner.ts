@@ -12,7 +12,7 @@ import { POLISH_PROMPT, buildUserPrompt, parsePlan } from './prompt.js'
 import { createForgeSession } from './session.js'
 import { ATTACHMENT_DIR, attachmentFileName } from './attachments.js'
 import { CONNECTOR_DIR, materializeConnectors } from './connectors.js'
-import type { ArtifactManifest, FileMap, Plan, RunRequest, RunResult } from './types.js'
+import type { ArtifactManifest, FileMap, Plan, RunRequest, RunResult, RunUsage } from './types.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -270,6 +270,22 @@ export class CancelledError extends Error {
   }
 }
 
+/**
+ * 取本次会话累计的 token 用量。必须趁 session 还活着时读 —— dispose() 之后 agent state 就没了,
+ * 而失败/被停止的任务同样烧了这些 token,所以要在 finally 里读、而不是只在成功路径上读。
+ */
+function collectUsage(session: AgentSession, model: string): RunUsage {
+  const stats = session.getSessionStats()
+  return {
+    model,
+    input: stats.tokens.input,
+    output: stats.tokens.output,
+    cacheRead: stats.tokens.cacheRead,
+    cacheWrite: stats.tokens.cacheWrite,
+    turns: stats.assistantMessages,
+  }
+}
+
 export async function runJob(
   config: AgentConfig,
   req: RunRequest,
@@ -278,6 +294,11 @@ export async function runJob(
   signal?: AbortSignal,
   /** 会话建好后的回调:index.ts 借此拿到 session 引用,把用户追加的要求 steer 进去 */
   onSession?: (session: AgentSession) => void,
+  /**
+   * 用量回调:在 session 销毁前触发一次,成功、失败、用户停止三种终态都会触发
+   * (index.ts 据此上报 /internal/jobs/:id/usage)。回调抛错不影响主流程。
+   */
+  onUsage?: (usage: RunUsage) => void,
 ): Promise<RunResult> {
   // 冷启动期间就被停止:连工作目录都不用建
   if (signal?.aborted) throw new CancelledError()
@@ -434,6 +455,12 @@ export async function runJob(
     }
   } finally {
     signal?.removeEventListener('abort', onAbort)
+    // 用量快照必须在这里取:dispose() 之后就读不到了,而失败/被停止的任务同样烧了 token 与实例时间
+    try {
+      onUsage?.(collectUsage(session, config.modelId))
+    } catch (err) {
+      console.error(`[usage] ${err instanceof Error ? err.message : String(err)}`)
+    }
     unsubscribe()
     session.dispose()
   }

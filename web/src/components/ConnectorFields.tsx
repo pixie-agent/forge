@@ -1,3 +1,4 @@
+import { useT } from '../lib/i18n'
 import type { ConnectorConfigField, ConnectorSecretField } from '../lib/types'
 
 /**
@@ -17,12 +18,13 @@ export function SecretField({
   value: string
   onChange: (v: string) => void
 }) {
+  const t = useT()
   return (
     <label className="block">
       <span className="mb-1 flex items-center gap-1.5 text-xs text-gray-300">
         {field.label}
         {field.required && <span className="text-red-400">*</span>}
-        <span className="rounded bg-gray-800 px-1 text-[10px] text-gray-500">保密</span>
+        <span className="rounded bg-gray-800 px-1 text-[10px] text-gray-500">{t('conn.field.secret')}</span>
       </span>
       <input
         type="password"
@@ -50,12 +52,13 @@ export function ConfigField({
   missing: boolean
   onChange: (v: string) => void
 }) {
+  const t = useT()
   return (
     <label className="block">
       <span className="mb-1 flex items-center gap-1.5 text-xs text-gray-300">
         {field.label}
         {field.required && <span className="text-red-400">*</span>}
-        {field.public && <span className="rounded bg-gray-800 px-1 text-[10px] text-gray-500">会在页面上公开</span>}
+        {field.public && <span className="rounded bg-gray-800 px-1 text-[10px] text-gray-500">{t('conn.field.public')}</span>}
       </span>
       <input
         value={value}

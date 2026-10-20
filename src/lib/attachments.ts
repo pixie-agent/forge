@@ -6,6 +6,8 @@
  * 真实字节只跟着这次 dispatch 走到 Cloud Run 的 agent。
  */
 
+import { listSep, srv, type Lang } from './i18n'
+
 /** 单张图片上限:与生成应用的 blob 接口(2MB)保持一致,前端同一套提示 */
 export const MAX_IMAGE_BYTES = 2 * 1024 * 1024
 /** 单个文本文件上限 */
@@ -144,9 +146,9 @@ export function parseAttachments(
   return { attachments: out }
 }
 
-/** 落进用户消息文本的附件清单(刷新后仍能看到当时附了什么) */
-export function attachmentMarkdown(attachments: AgentAttachment[] | undefined): string {
+/** 落进用户消息文本的附件清单(刷新后仍能看到当时附了什么);文案按用户语言渲染(见 lib/i18n.ts) */
+export function attachmentMarkdown(attachments: AgentAttachment[] | undefined, lang: Lang = 'zh'): string {
   if (!attachments?.length) return ''
-  const names = attachments.map((a) => a.name).join('、')
-  return `\n\n📎 附件 ${attachments.length} 个:${names}`
+  const names = attachments.map((a) => a.name).join(listSep(lang))
+  return srv(lang, 'attach.marker', { count: attachments.length, names })
 }

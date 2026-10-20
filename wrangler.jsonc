@@ -62,7 +62,13 @@
     // 换这一行之前必须先在 Google 控制台的 OAuth 客户端里加好对应的「已获授权的重定向 URI」,
     // 否则登录直接 redirect_uri_mismatch(错误发生在 Google 侧,平台收不到回调)。
     // workers.dev 地址仍可用(见上面 workers_dev),但不再是规范地址。
-    "PUBLIC_BASE_URL": "https://app.1forgen.site"
+    "PUBLIC_BASE_URL": "https://app.1forgen.site",
+    // 计费(MoR = Creem,**非密**配置;密钥走 `wrangler secret put CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET`)。
+    // CREEM_PRODUCTS:本地目录 id(src/lib/plans.ts)→ Creem 后台商品 ID 的 JSON 映射。两套门店商品 ID 不同,
+    // 所以走 vars 而不是写进代码(AGENTS.md §2)。**留空 = 结账返回「商品未配置」、前端显示「支付通道未开通」**,
+    // 建好商品后填真值。webhook 端点登记:`https://app.1forgen.site/api/billing/webhook`
+    "CREEM_API_BASE": "https://api.creem.io",
+    "CREEM_PRODUCTS": "{\"pack_20\":\"\",\"pack_60\":\"\",\"pack_200\":\"\",\"plan_plus\":\"\",\"plan_pro\":\"\"}"
   },
   // 交付不依赖长连接:agent 在 Cloud Run 跑,通过 /internal 回调写进度与最终结果;
   // cron 每分钟按心跳巡检,执行体失联/超龄的任务判死解锁(见 docs/FORGE2.md)
@@ -111,7 +117,11 @@
         "AGENT_URL": "https://forge-agent-staging-323709989821.us-central1.run.app",
         "PUBLIC_BASE_URL": "https://app-staging.1forgen.site",
         // 仅 staging 设置;生产不设 → 前端按 production 处理(不显示环境角标)
-        "ENVIRONMENT": "staging"
+        "ENVIRONMENT": "staging",
+        // staging 用 Creem **测试门店**(test-api);商品 ID 填 test 模式商品。webhook 端点:
+        // https://app-staging.1forgen.site/api/billing/webhook(密钥 staging 单独 put --env staging)
+        "CREEM_API_BASE": "https://test-api.creem.io",
+        "CREEM_PRODUCTS": "{\"pack_20\":\"prod_2ShRXhW1eAZhLtXoQCZOEq\",\"pack_60\":\"prod_1JTaGgzickEq949Bx0cHSI\",\"pack_200\":\"prod_5bNr2ZVUETd2Aru6Q0nbvE\",\"plan_plus\":\"prod_37ucbu50c9ifHDDWDTQQIl\",\"plan_pro\":\"prod_52HkiGhNmstKT4ruOPvCWi\"}"
       }
     }
   }

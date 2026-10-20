@@ -10,6 +10,8 @@
  * 纯展示用途:解析失败/格式变化时退化为原文,绝不影响生成功能。
  */
 
+import { tStatic, type DictKey } from './i18n'
+
 export type AgentToolEvent = { kind: 'tool'; name: string; arg: string; status: 'running' | 'ok' | 'error' }
 export type AgentEvent = { kind: 'thinking'; text: string } | { kind: 'say'; text: string } | AgentToolEvent
 
@@ -72,19 +74,20 @@ export function parseAgentLog(log: string): AgentEvent[] {
   return events
 }
 
-/** 工具名 → 人读动词(与 runner.ts 的写文件摘要配合,呈现为「正在编写 src/App.jsx」) */
-const TOOL_VERB: Record<string, string> = {
-  write: '编写',
-  edit: '修改',
-  read: '查看',
-  bash: '运行',
-  grep: '检索',
-  find: '查找',
-  ls: '浏览',
+/** 工具名 → 词典键(与 runner.ts 的写文件摘要配合,呈现为「正在编写 src/App.jsx」)。
+ *  词条在词典里(中/英各一份);这里用非组件的 tStatic 取词,所以调用方签名不变。 */
+const TOOL_VERB_KEY: Record<string, DictKey> = {
+  write: 'tool.write',
+  edit: 'tool.edit',
+  read: 'tool.read',
+  bash: 'tool.bash',
+  grep: 'tool.grep',
+  find: 'tool.find',
+  ls: 'tool.ls',
 }
 
 export function toolVerb(name: string): string {
-  return TOOL_VERB[name] ?? '调用'
+  return tStatic(TOOL_VERB_KEY[name] ?? 'tool.other')
 }
 
 /** 从过程事件里提取本次被写入/修改的文件(去重,保持出现顺序) */

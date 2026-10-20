@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useT } from '../lib/i18n'
 import type { ConnectorProviderProfile, SiteDataEnv } from '../lib/types'
 
 /** 能力条上的一个 chip(由 Workspace 组装:哪些 provider 已绑定、本轮是否生效) */
@@ -41,13 +42,14 @@ interface Props {
  * 选中后由 Workspace 在对话流里展开凭证卡片,用户不用离开对话。
  */
 export default function ConnectorChips({ chips, providers, locked, onToggle, onPick, onOpenPanel, enabled }: Props) {
+  const t = useT()
   const [pickerOpen, setPickerOpen] = useState(false)
   if (!enabled) return null
 
   const picker = pickerOpen && (
     <div className="mt-1.5 w-full rounded-xl border border-gray-700 bg-gray-900/80 p-1.5">
       {providers.length === 0 ? (
-        <p className="px-2 py-1.5 text-xs text-gray-500">暂无可接入的外部系统</p>
+        <p className="px-2 py-1.5 text-xs text-gray-500">{t('conn.none')}</p>
       ) : (
         providers.map((p) => (
           <button
@@ -65,9 +67,9 @@ export default function ConnectorChips({ chips, providers, locked, onToggle, onP
               <span className="flex items-center gap-1.5">
                 <span className="text-xs font-medium text-gray-200">{p.name}</span>
                 <span className={`rounded px-1 text-[10px] ${p.writable ? 'bg-amber-500/15 text-amber-300' : 'bg-gray-800 text-gray-500'}`}>
-                  {p.writable ? '可写' : '只读'}
+                  {p.writable ? t('conn.writable') : t('conn.readonly')}
                 </span>
-                {chips.some((c) => c.id === p.id) && <span className="text-[10px] text-emerald-400">已接入</span>}
+                {chips.some((c) => c.id === p.id) && <span className="text-[10px] text-emerald-400">{t('conn.connected')}</span>}
               </span>
               <span className="mt-0.5 block truncate text-[11px] text-gray-500">{p.blurb}</span>
             </span>
@@ -81,7 +83,7 @@ export default function ConnectorChips({ chips, providers, locked, onToggle, onP
         }}
         className="mt-0.5 flex w-full items-center gap-1.5 rounded-lg border-t border-gray-800 px-2 py-1.5 text-left text-[11px] text-gray-400 hover:text-gray-200"
       >
-        管理全部连接器(换账号 / 解绑 / 分环境配置)▸
+        {t('conn.manageAll')}
       </button>
     </div>
   )
@@ -90,11 +92,12 @@ export default function ConnectorChips({ chips, providers, locked, onToggle, onP
     <div className="mb-2">
       <div className="flex flex-wrap items-center gap-1.5">
         {chips.map((c) => {
+          const kind = c.writable ? t('conn.writable') : t('conn.readonly')
           const title = locked
-            ? `本次任务已开始,连接器在派发时已固定,本轮不能改`
+            ? t('conn.chipLocked')
             : c.on
-              ? `${c.name}本轮生效(${c.writable ? '可写' : '只读'}),点击临时关闭(不保存,本轮结束自动复位)`
-              : `${c.name}本轮未生效,点击在本轮临时启用${c.writable ? '(可写:agent 动手前会先向你确认)' : ''}`
+              ? t('conn.chipOnTitle', { name: c.name, kind })
+              : t('conn.chipOffTitle', { name: c.name, hint: c.writable ? t('conn.chipWritableHint') : '' })
           return (
             <button
               key={c.id}
@@ -112,22 +115,22 @@ export default function ConnectorChips({ chips, providers, locked, onToggle, onP
                   c.writable ? (c.on ? 'bg-amber-500/20 text-amber-300' : 'bg-gray-800 text-gray-500') : 'bg-gray-800 text-gray-400'
                 }`}
               >
-                {c.writable ? '可写' : '只读'}
+                {c.writable ? t('conn.writable') : t('conn.readonly')}
               </span>
-              {c.env === 'live' && <span className="text-[10px] text-gray-500">线上</span>}
+              {c.env === 'live' && <span className="text-[10px] text-gray-500">{t('env.live')}</span>}
               {locked && <span className="text-[10px] text-gray-500">🔒</span>}
             </button>
           )
         })}
         <button
           onClick={() => setPickerOpen((v) => !v)}
-          title="接入外部系统(支付、统计、代码仓库…),让生成的站点真的用起来"
+          title={t('conn.chipsAddTitle')}
           className={`flex items-center gap-1 rounded-full border border-dashed px-2.5 py-1 text-xs hover:border-indigo-500 hover:text-gray-200 ${
             pickerOpen ? 'border-indigo-500 text-gray-200' : 'border-gray-700 text-gray-400'
           }`}
         >
           <span>🔌</span>
-          <span>连接外部系统</span>
+          <span>{t('conn.connectExternal')}</span>
           <span className="text-gray-600">{pickerOpen ? '▾' : '+'}</span>
         </button>
       </div>

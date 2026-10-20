@@ -1,11 +1,19 @@
 /** Cloud Run Service 入口:POST /run 跑一次 agent,GET /health 供健康检查 */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { createProgressReporter, createStreamLogger, reportCommit, reportFail, startHeartbeat, startJobWatcher } from './callback.js'
+import {
+  createProgressReporter,
+  createStreamLogger,
+  reportCommit,
+  reportFail,
+  reportUsage,
+  startHeartbeat,
+  startJobWatcher,
+} from './callback.js'
 import { loadConfig, type AgentConfig } from './config.js'
 import { runJob } from './runner.js'
 import type { AgentSession } from '@mariozechner/pi-coding-agent'
-import type { RunAttachment, RunRequest, SteerMessage } from './types.js'
+import type { RunAttachment, RunRequest, RunUsage, SteerMessage } from './types.js'
 
 const config = loadConfig()
 /**
@@ -135,6 +143,17 @@ const server = createServer((req, res) => {
     // 会话还没建好(拷模板 + 建 pi 会话要十几秒)时先缓冲追加要求,会话一就绪立刻补投
     let liveSession: AgentSession | null = null
     const bufferedSteer: SteerMessage[] = []
+    /**
+     * 本次运行的用量(tokens 由 runner 在会话销毁前回调给我们)。runMs 在这里补:取整个请求的耗时,
+     * 因为 Cloud Run 按实例存活时间计费 —— 拷模板、建会话、构建都在烧钱,只算 pi 那一段会低估成本。
+     */
+    let usage: RunUsage | null = null
+    const reportRunUsage = async () => {
+      const u = usage
+      if (!u) return
+      await reportUsage(body.callbackBase, config.agentSecret, body.jobId, { ...u, runMs: Date.now() - startedAt })
+      log(`usage in=${u.input} out=${u.output} cacheRead=${u.cacheRead} turns=${u.turns}`)
+    }
     const deliverSteer = (session: AgentSession, msg: SteerMessage) => {
       void steerSession(session, msg, config, log).catch((err) =>
         log(`steer failed: ${err instanceof Error ? err.message : String(err)}`),
@@ -156,12 +175,24 @@ const server = createServer((req, res) => {
     })
     try {
       const report = createProgressReporter(body.callbackBase, config.agentSecret, body.jobId)
-      const result = await runJob(config, body, report, streamLog, abortController.signal, (session) => {
-        liveSession = session
-        for (const msg of bufferedSteer.splice(0)) deliverSteer(session, msg)
-      })
+      const result = await runJob(
+        config,
+        body,
+        report,
+        streamLog,
+        abortController.signal,
+        (session) => {
+          liveSession = session
+          for (const msg of bufferedSteer.splice(0)) deliverSteer(session, msg)
+        },
+        (u) => {
+          usage = u
+        },
+      )
       await streamLog.stop()
       log(`done files=${Object.keys(result.src).length} dist=${result.manifest.files.length} plan=${result.plan?.name ?? '-'}`)
+      // 用量先落地再 commit:commit 之后响应就结束了,Cloud Run 会把 CPU 收走,那时再发就未必发得出去
+      await reportRunUsage()
       await reportCommit(body.callbackBase, config.agentSecret, body.jobId, result).catch((err) =>
         log(`commit callback failed: ${err instanceof Error ? err.message : String(err)}`),
       )
@@ -169,6 +200,8 @@ const server = createServer((req, res) => {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       await streamLog.stop()
+      // 失败/被停止同样烧了 token 与实例时间:用量照报(runner 的 finally 已经给到快照),只是不写产物
+      await reportRunUsage()
       // 用户主动停止:不报 fail(Worker 侧已是 cancelled 终态,报 fail 也只是幂等空转)
       if (cancelledByUser) {
         log('CANCELLED by user')

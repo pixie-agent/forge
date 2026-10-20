@@ -8,11 +8,6 @@ export function isTerminalStatus(status: string): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'cancelled'
 }
 
-export async function assertCredits(db: D1Database, userId: string): Promise<boolean> {
-  const row = await db.prepare('SELECT credits FROM users WHERE id = ?').bind(userId).first<{ credits: number }>()
-  return !!row && row.credits >= 1
-}
-
 export async function insertMessage(
   db: D1Database,
   projectId: string,

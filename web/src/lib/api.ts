@@ -1,5 +1,6 @@
 import type { OutgoingAttachment } from './attachments'
 import type { JobSnapshot } from './types'
+import { getActiveLang, tStatic, translateServer } from './i18n'
 
 export async function api<T>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
   const res = await fetch(path, {
@@ -8,10 +9,11 @@ export async function api<T>(path: string, opts: { method?: string; body?: unkno
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   })
   if (!res.ok) {
-    let message = `请求失败(${res.status})`
+    // 服务端只返回中文文案(lib/i18n/serverMessages.ts 负责映射);没映射到的原样透出,不吞原因
+    let message = tStatic('req.failed', { status: res.status })
     try {
       const data = (await res.json()) as { error?: string }
-      if (data.error) message = data.error
+      if (data.error) message = translateServer(data.error)
     } catch {
       // 保留默认消息
     }
@@ -22,9 +24,13 @@ export async function api<T>(path: string, opts: { method?: string; body?: unkno
   return (await res.json()) as T
 }
 
-/** 创建后台生成任务,立即返回 jobId;body 里可带 attachments(对话附件,见 lib/attachments) */
+/**
+ * 创建后台生成任务,立即返回 jobId;body 里可带 attachments(对话附件,见 lib/attachments)。
+ * 统一补 `lang`:服务端会把用户消息里的附件/连接器清单、以及任务收尾时补的 assistant 消息
+ * **按这里的语言写进库**(见 Worker 侧 src/lib/i18n.ts),所以请求必须带上当前界面语言。
+ */
 export function startJob(path: string, body: Record<string, unknown>): Promise<{ jobId: string }> {
-  return api<{ jobId: string }>(path, { method: 'POST', body })
+  return api<{ jobId: string }>(path, { method: 'POST', body: { ...body, lang: getActiveLang() } })
 }
 
 const POLL_INTERVAL_MS = 2000
@@ -73,7 +79,7 @@ export function subscribeJob(
         failures += 1
         if (failures >= MAX_POLL_FAILURES) {
           stop()
-          onError('任务进度获取失败,请稍后刷新页面查看结果')
+          onError(tStatic('job.progressLost'))
         }
       }
     }, POLL_INTERVAL_MS)
@@ -109,7 +115,10 @@ export async function getJob(jobId: string): Promise<JobSnapshot | null> {
  * 由 agent 自己巡检到 cancelled 后中止,因此产物/积分都不会落地。已结束的任务返回 409。
  */
 export function cancelJob(projectId: string): Promise<{ ok: boolean; jobId: string }> {
-  return api<{ ok: boolean; jobId: string }>(`/api/projects/${projectId}/cancel`, { method: 'POST', body: {} })
+  return api<{ ok: boolean; jobId: string }>(`/api/projects/${projectId}/cancel`, {
+    method: 'POST',
+    body: { lang: getActiveLang() },
+  })
 }
 
 /**
@@ -120,7 +129,10 @@ export function steerJob(
   projectId: string,
   body: { jobId: string; message: string; attachments?: OutgoingAttachment[] }
 ): Promise<{ ok: boolean }> {
-  return api<{ ok: boolean }>(`/api/projects/${projectId}/steer`, { method: 'POST', body })
+  return api<{ ok: boolean }>(`/api/projects/${projectId}/steer`, {
+    method: 'POST',
+    body: { ...body, lang: getActiveLang() },
+  })
 }
 
 /** 活动任务(接管轮询)+ 可续任务(最近一次失败但有产物的任务,继续对话即续跑) */

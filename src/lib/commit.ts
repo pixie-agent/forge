@@ -2,7 +2,8 @@
 
 import type { Env, Plan } from '../types'
 import { clearJobMessages, insertMessage } from './jobHelpers'
-import { deductCredit } from './credits'
+import { releaseJobCredits } from './credits'
+import { langOfPayload, srv } from './i18n'
 import { clearArtifacts, DRAFT_VERSION_NO, putArtifacts } from './artifacts'
 import type { AgentRunResult, FileMap } from './agent'
 
@@ -15,7 +16,8 @@ interface JobRow {
   status: string
 }
 
-/** 任务落定结果:把产物写入「草稿」(源码树进 D1、构建产物进 R2)、补 assistant 消息、扣积分。幂等:非活动任务直接忽略 */
+/** 任务落定结果:把产物写入「草稿」(源码树进 D1、构建产物进 R2)、补 assistant 消息。
+ *  幂等:非活动任务直接忽略。这里**不再扣积分** —— 发起任务时冻结的那笔就是这次的账(见 src/lib/credits.ts)。 */
 export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunResult>): Promise<{ ok: boolean; version?: number; reason?: string }> {
   const db = env.DB
   const src = body.src as FileMap | undefined
@@ -82,15 +84,19 @@ export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunR
   if (!claim.meta.changes) return { ok: true, reason: 'already-settled' }
 
   const name = plan?.name ?? ''
-  // 优先用 agent 的交付说明(带 Markdown 的详细回复,对话体验更好);缺失时回退到简短系统文案
+  // 优先用 agent 的交付说明(带 Markdown 的详细回复,对话体验更好);缺失时回退到简短系统文案。
+  // 回退文案按任务发起时的语言渲染 —— 回调是 agent/cron 触发的,不知道用户此刻用什么语言,
+  // 所以语言随 payload 落库(见 src/lib/i18n.ts)。
+  const lang = langOfPayload(job.payload)
   const summary = typeof body.summary === 'string' ? body.summary.trim() : ''
   const assistantText =
     summary ||
     (job.type === 'generate'
-      ? `已完成「${name || '应用'}」初稿并写入草稿。满意后点「生成新版本」保存为正式版本,再发布上线。`
-      : `已按「${prompt.slice(0, 30)}」更新草稿。满意后点「生成新版本」保存为正式版本。`)
+      ? srv(lang, 'commit.generate', { name: name || srv(lang, 'commit.defaultAppName') })
+      : srv(lang, 'commit.chat', { prompt: prompt.slice(0, 30) }))
   await insertMessage(db, job.project_id, 'assistant', assistantText)
-  await deductCredit(db, job.user_id)
+  // 不在这里扣积分:积分在任务发起时就已经冻结(见 src/lib/credits.ts 的冻结-结算模型),
+  // 成功落定即等于收费 —— 冻结那条流水就是这次的账。
   return { ok: true, version: DRAFT_VERSION_NO }
 }
 
@@ -98,6 +104,7 @@ export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunR
  * 失败落定:仅活动任务才置失败,避免覆盖已达终态的任务。返回是否真的从活动态迁移到失败
  * (重放/已终态返回 false)。失败态由前端从任务快照还原成"未完成卡片 + 重试",刷新后仍在,
  * 不会出现"失败了界面上什么都没留下"的情况。
+ * 真的完成迁移时退还该任务的冻结积分(失败不收费;计时/失联判死走同一条路径)。
  */
 export async function markJobFailed(env: Env, jobId: string, error: string): Promise<boolean> {
   const res = await env.DB
@@ -105,8 +112,10 @@ export async function markJobFailed(env: Env, jobId: string, error: string): Pro
     .bind(error.slice(0, 300), jobId)
     .run()
     .catch(() => null)
-  if (res?.meta.changes) await clearJobMessages(env.DB, jobId)
-  return !!res?.meta.changes
+  if (!res?.meta.changes) return false
+  await clearJobMessages(env.DB, jobId)
+  await releaseJobCredits(env.DB, jobId, '任务未完成,已退还积分').catch(() => 0)
+  return true
 }
 
 /** 失败落定(agent fail 回调入口) */
@@ -117,7 +126,9 @@ export async function failJobWith(env: Env, jobId: string, error: string): Promi
 /**
  * 手动停止落定(用户点「停止」):把活动任务置为 cancelled。
  * - 立即释放项目锁(ACTIVE_STATUS_SQL 不再命中 cancelled),用户可以马上发起新任务;
- * - 不扣积分、不写产物;agent 侧的协作式取消只是"尽快停手",已跑出的中间结果一并丢弃;
+ * - 不写产物,并退还发起时冻结的积分(前端提示的「已停止(未扣除积分)」由此成立);
+ * - agent 侧的协作式取消只是"尽快停手",已跑出的中间结果一并丢弃;它的用量仍会上报到 job_usage,
+ *   所以"用户停掉的任务花了多少钱"在后台照样看得到;
  * - 与 commit 的竞态:commit 的落定守卫是 `WHERE status IN ('pending','running')`,先取消则
  *   迟到的 commit 只会返回 already-settled,不会把已停止的任务复活成成功。
  * 返回是否真的从活动态迁移到 cancelled(已终态/不存在返回 false)。
@@ -131,6 +142,8 @@ export async function cancelJob(env: Env, jobId: string): Promise<boolean> {
     .bind(jobId)
     .run()
     .catch(() => null)
-  if (res?.meta.changes) await clearJobMessages(env.DB, jobId)
-  return !!res?.meta.changes
+  if (!res?.meta.changes) return false
+  await clearJobMessages(env.DB, jobId)
+  await releaseJobCredits(env.DB, jobId, '已停止,退还积分').catch(() => 0)
+  return true
 }

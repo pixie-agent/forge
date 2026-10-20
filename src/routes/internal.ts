@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { Env } from '../types'
 import { commitJob, failJobWith } from '../lib/commit'
+import { gcpCostUsd, llmCostUsd } from '../lib/pricing'
 
 /**
  * 内部回调接口:供 Cloud Run 的 agent service 上报执行进度与最终结果。用共享密钥(X-Agent-Secret)保护,
@@ -111,6 +112,70 @@ app.get('/jobs/:id/state', async (c) => {
       attachments: r.attachments ? (JSON.parse(r.attachments) as unknown[]) : [],
     })),
   })
+})
+
+/**
+ * 用量上报:agent 在任务收尾时调用,**成功、失败、用户停止三种终态都会调**。
+ * 刻意不做 status 守卫 —— 失败与被停掉的任务同样消耗 token 与实例时间,漏记就算不出真实毛利
+ * (这正是这次改造要解决的核心问题:在此之前平台完全不知道一次生成花了多少钱)。
+ * 幂等:按 job_id upsert,重放不会重复计。成本由 src/lib/pricing.ts 换算(token 才是留存下来的真相)。
+ */
+interface UsageBody {
+  model?: unknown
+  input?: unknown
+  output?: unknown
+  cacheRead?: unknown
+  cacheWrite?: unknown
+  turns?: unknown
+  runMs?: unknown
+}
+
+/** 只接受非负有限数,并给一个上限挡住脏数据把后台统计带偏 */
+function toCount(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return 0
+  return Math.min(Math.floor(v), 1e10)
+}
+
+app.post('/jobs/:id/usage', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json<UsageBody>().catch(() => ({}) as UsageBody)
+  const job = await c.env.DB
+    .prepare('SELECT user_id, project_id FROM jobs WHERE id = ?')
+    .bind(id)
+    .first<{ user_id: string; project_id: string }>()
+  if (!job) return c.json({ error: '任务不存在' }, 404)
+
+  const model = typeof body.model === 'string' ? body.model.slice(0, 80) : ''
+  const usage = {
+    input: toCount(body.input),
+    output: toCount(body.output),
+    cacheRead: toCount(body.cacheRead),
+    cacheWrite: toCount(body.cacheWrite),
+  }
+  const turns = toCount(body.turns)
+  const runMs = toCount(body.runMs)
+  const llm = llmCostUsd(model, usage)
+  const gcp = gcpCostUsd(runMs)
+
+  await c.env.DB
+    .prepare(
+      `INSERT INTO job_usage (job_id, user_id, project_id, model, input_tokens, output_tokens, cache_read, cache_write,
+                              turns, run_ms, llm_cost_usd, gcp_cost_usd, cost_usd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(job_id) DO UPDATE SET
+         model = excluded.model, input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
+         cache_read = excluded.cache_read, cache_write = excluded.cache_write, turns = excluded.turns,
+         run_ms = excluded.run_ms, llm_cost_usd = excluded.llm_cost_usd, gcp_cost_usd = excluded.gcp_cost_usd,
+         cost_usd = excluded.cost_usd`
+    )
+    .bind(
+      id, job.user_id, job.project_id, model,
+      usage.input, usage.output, usage.cacheRead, usage.cacheWrite,
+      turns, runMs, llm, gcp, llm + gcp
+    )
+    .run()
+
+  return c.json({ ok: true, llm_cost_usd: llm, gcp_cost_usd: gcp })
 })
 
 app.post('/jobs/:id/commit', async (c) => {

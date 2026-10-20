@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useT } from '../lib/i18n'
 
 /**
  * 平台环境角标:只有非 production 环境(目前是 staging)才渲染。
@@ -8,6 +9,7 @@ import { useEffect, useState } from 'react'
  */
 export default function EnvBadge() {
   const [env, setEnv] = useState<string | null>(null)
+  const t = useT()
 
   useEffect(() => {
     let alive = true
@@ -29,7 +31,7 @@ export default function EnvBadge() {
   return (
     <span
       className="shrink-0 rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-300"
-      title="这是测试环境:数据、产物与线上完全隔离"
+      title={t('env.stagingHint')}
     >
       {env.toUpperCase()}
     </span>
