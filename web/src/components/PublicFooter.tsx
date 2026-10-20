@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useT } from '../lib/i18n'
-import { SUPPORT_EMAIL } from '../lib/site'
+import { BUSINESS_NAME, LEGAL_ENTITY, SUPPORT_EMAIL } from '../lib/site'
 
 /**
  * 公共页脚:价格 + 三份法务文档 + 支持邮箱。
@@ -18,7 +18,10 @@ export default function PublicFooter() {
         <div>
           <p className="font-medium text-gray-300">Forge</p>
           <p className="mt-1 max-w-xs leading-relaxed">{t('footer.tagline')}</p>
-          <p className="mt-2">{t('footer.rights', { year })}</p>
+          <p className="mt-2 text-gray-400">
+            {t('footer.operator', { entity: LEGAL_ENTITY, business: BUSINESS_NAME })}
+          </p>
+          <p className="mt-1">{t('footer.rights', { year, entity: LEGAL_ENTITY })}</p>
         </div>
         <nav className="flex flex-wrap gap-x-5 gap-y-2 sm:justify-end">
           <Link to="/pricing" className="hover:text-gray-200">

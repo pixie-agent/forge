@@ -466,7 +466,8 @@ export const en: Record<DictKey, string> = {
   'footer.acceptableUse': 'Acceptable Use Policy',
   'footer.support': 'Support',
   'footer.tagline': 'Turn ideas into publishable websites with AI.',
-  'footer.rights': '© {year} Forge. All rights reserved.',
+  'footer.operator': 'Forge is operated by {entity} (business name: {business}).',
+  'footer.rights': '© {year} {entity}. All rights reserved.',
   'pricing.title': 'Pricing',
   'pricing.subtitle': 'Credits are consumed per generation. Buy a one-time credit pack or subscribe monthly. All prices are in USD.',
   'pricing.included': 'Get {credits} free credits when you sign up',
@@ -479,11 +480,12 @@ export const en: Record<DictKey, string> = {
   'login.consentSuffix': '.',
   'legal.lastUpdated': 'Last updated: October 20, 2026',
   'legal.backHome': 'Back to home',
-  'legal.contact': 'Questions about this page? Contact {email}. Website: {url}.',
+  'legal.contact': 'Questions about this page? Contact {entity} at {email}. Website: {url}.',
+  'legal.operator': 'Service operator: {entity} (business name: {business}, {country}). Contact: {email}.',
 
   // privacy policy
   'legal.privacy.intro':
-    'This Privacy Policy explains how Forge (“we”, “us”) collects, uses and shares personal information when you use {url} and related services (the “Service”). For privacy questions or requests, contact {email}.',
+    'This Privacy Policy explains how {entity} (“we”, “us”), operating Forge under the business name {business}, collects, uses and shares personal information when you use {url} and related services (the “Service”). For privacy questions or requests, contact {email}.',
   'legal.privacy.s1.title': 'Information We Collect',
   'legal.privacy.s1.body':
     'We collect:\n• Account information: your email address, password hash (or Google account identifier if you sign in with Google), and language/theme preferences.\n• Content you provide: prompts, chat messages, attachments, and the source code and websites generated from them.\n• Billing information: your credit balance, purchase and subscription records, and order identifiers. Payments are processed by Creem; we do not receive or store your full card number.\n• Usage and technical information: IP address, request timestamps, job usage, error logs and similar data used for security, abuse prevention and operation of the Service.\n• Local storage: a session cookie and browser preferences such as language, theme and panel width. We do not use advertising cookies.',
@@ -517,7 +519,7 @@ export const en: Record<DictKey, string> = {
 
   // terms of service
   'legal.terms.intro':
-    'These Terms of Service (the “Terms”) govern your access to and use of Forge at {url} (the “Service”). By creating an account or using the Service, you agree to these Terms, our Privacy Policy and our Acceptable Use Policy. If you do not agree, do not use the Service.',
+    'These Terms of Service (the “Terms”) govern your access to and use of Forge at {url} (the “Service”). Forge is operated by {entity} under the business name {business}. By creating an account or using the Service, you agree to these Terms, our Privacy Policy and our Acceptable Use Policy. If you do not agree, do not use the Service.',
   'legal.terms.s1.title': 'Eligibility',
   'legal.terms.s1.body':
     'You must be at least 16 years old and able to form a binding contract. If you are under 18, you must have permission from a parent or legal guardian.',
@@ -566,7 +568,7 @@ export const en: Record<DictKey, string> = {
 
   // acceptable use policy
   'legal.aup.intro':
-    'This Acceptable Use Policy (the “AUP”) explains what you may not do with Forge. It applies to prompts, uploaded files, generated code and websites, and published pages. It is part of our Terms of Service. Violations may result in removal, suspension or termination.',
+    'This Acceptable Use Policy (the “AUP”) explains what you may not do with Forge, which is operated by {entity} under the business name {business}. It applies to prompts, uploaded files, generated code and websites, and published pages. It is part of our Terms of Service. Violations may result in removal, suspension or termination.',
   'legal.aup.s1.title': 'Illegal and Harmful Content',
   'legal.aup.s1.body':
     'Do not create, generate, upload, publish or distribute content that:\n• violates any law or regulation;\n• promotes or facilitates violence, terrorism, self-harm or human trafficking;\n• is hateful, harassing, threatening, bullying or defamatory;\n• infringes intellectual property, privacy or publicity rights;\n• is deceptive, fraudulent or phishing, or impersonates a person or organization.',

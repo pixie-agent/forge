@@ -808,6 +808,7 @@ npm run db:migrate:billing:remote      # 生产
 - 前端页面 `web/src/pages/Billing.tsx`(`/billing`,顶栏积分胶囊是入口):余额卡 + 充值包 + 订阅 + 积分明细 / 订单表;`checkoutReady === false` 时禁用结账按钮并显示说明条(判断来自服务端配置);另有**收款主体披露**——MoR 下用户账单显示的是 Creem 而不是本站,不提前说清楚会增加无理由拒付。
 - 支付完成后 Creem 把用户带回 `/billing?checkout=success`,本页提示「积分通常几秒内到账」并重新拉一次余额(积分由 webhook 落账,与前端跳转是两条独立路径)。
 - **公开价格与法务页面(Creem 账户复审要求)**:`/pricing`、`/privacy`、`/terms`、`/acceptable-use` 都是**无需登录**的公开路由(SPA 兜底直接命中);首页 `Landing` 也直接展示充值包/订阅价格,审核员不注册账号即可看到。`PublicFooter` 同时出现在首页与注册页,链接三份文档并展示支持邮箱。支持邮箱唯一来源是 `web/src/lib/site.ts` 的 `SUPPORT_EMAIL`,**必须与 Creem 店铺 business details 里填写的邮箱完全一致**;AUP 中保留「色情/成人/NSFW 内容明确禁止」条款。
+- **运营主体披露(Creem 复审 2026-10-20)**:页脚与三份法务页必须明确写出运营主体,并与 Creem Business Details 完全一致——当前为 `Yunus Su`(业务名称 `1forgen`,Hong Kong SAR)。唯一来源是 `web/src/lib/site.ts` 的 `LEGAL_ENTITY` / `BUSINESS_NAME` / `OPERATOR_COUNTRY`。Creem 曾以「网站运营方与 onboarding 法定主体不一致」打回。
 
 ### 20.7 Creem 接入(阶段四)
 
