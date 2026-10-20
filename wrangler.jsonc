@@ -68,7 +68,7 @@
     // 所以走 vars 而不是写进代码(AGENTS.md §2)。**留空 = 结账返回「商品未配置」、前端显示「支付通道未开通」**,
     // 建好商品后填真值。webhook 端点登记:`https://app.1forgen.site/api/billing/webhook`
     "CREEM_API_BASE": "https://api.creem.io",
-    "CREEM_PRODUCTS": "{\"pack_20\":\"\",\"pack_60\":\"\",\"pack_200\":\"\",\"plan_plus\":\"\",\"plan_pro\":\"\"}"
+    "CREEM_PRODUCTS": "{\"pack_20\":\"prod_7PHqToX9MC6VFWlmUOO0G0\",\"pack_60\":\"prod_3UuebYQ5fExZvsc2dhzcab\",\"pack_200\":\"prod_1q1K6R0ZUEXwTqmhCLtn89\",\"plan_plus\":\"prod_Fo2vuiv4iVPtfIcZKfg1l\",\"plan_pro\":\"prod_5SVfzmWXCxdEhQBYbIDHxq\"}"
   },
   // 交付不依赖长连接:agent 在 Cloud Run 跑,通过 /internal 回调写进度与最终结果;
   // cron 每分钟按心跳巡检,执行体失联/超龄的任务判死解锁(见 docs/FORGE2.md)
