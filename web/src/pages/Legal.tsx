@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom'
 import PublicFooter from '../components/PublicFooter'
 import PublicHeader from '../components/PublicHeader'
 import { useT, type DictKey } from '../lib/i18n'
-import { SITE_URL, SUPPORT_EMAIL } from '../lib/site'
+import { BUSINESS_NAME, LEGAL_ENTITY, OPERATOR_COUNTRY, SITE_URL, SUPPORT_EMAIL } from '../lib/site'
 
 /**
  * 法务页面:隐私政策 / 服务条款 / 可接受使用政策。
@@ -73,7 +73,14 @@ const DOCS: Record<LegalDoc, { title: DictKey; intro: DictKey; sections: Section
 export default function Legal({ doc }: { doc: LegalDoc }) {
   const t = useT()
   const current = DOCS[doc]
-  const vars = { email: SUPPORT_EMAIL, url: SITE_URL, year: new Date().getFullYear() }
+  const vars = {
+    email: SUPPORT_EMAIL,
+    url: SITE_URL,
+    year: new Date().getFullYear(),
+    entity: LEGAL_ENTITY,
+    business: BUSINESS_NAME,
+    country: OPERATOR_COUNTRY,
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
@@ -84,6 +91,7 @@ export default function Legal({ doc }: { doc: LegalDoc }) {
         </Link>
         <h1 className="mt-4 text-2xl font-semibold">{t(current.title)}</h1>
         <p className="mt-1 text-xs text-gray-500">{t('legal.lastUpdated')}</p>
+        <p className="mt-2 text-xs text-gray-400">{t('legal.operator', vars)}</p>
         <p className="mt-6 whitespace-pre-line text-sm leading-relaxed text-gray-300">{t(current.intro, vars)}</p>
 
         {current.sections.map((section) => (

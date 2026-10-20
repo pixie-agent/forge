@@ -471,7 +471,8 @@ export const zh = {
   'footer.acceptableUse': '可接受使用政策',
   'footer.support': '支持邮箱',
   'footer.tagline': '用 AI 把想法锻造成可上线的网站。',
-  'footer.rights': '© {year} Forge。保留所有权利。',
+  'footer.operator': 'Forge 由 {entity}(业务名称:{business})运营。',
+  'footer.rights': '© {year} {entity}。保留所有权利。',
   'pricing.title': '价格',
   'pricing.subtitle': '按生成次数消耗积分:可以购买一次性充值包,也可以按月订阅。所有价格以美元结算。',
   'pricing.included': '免费注册即送 {credits} 积分',
@@ -484,11 +485,12 @@ export const zh = {
   'login.consentSuffix': '。',
   'legal.lastUpdated': '最后更新:2026 年 10 月 20 日',
   'legal.backHome': '返回首页',
-  'legal.contact': '如对本页面有任何疑问,请联系 {email};网站:{url}。',
+  'legal.contact': '如对本页面有任何疑问,请联系 {entity}({email});网站:{url}。',
+  'legal.operator': '服务运营主体:{entity}(业务名称:{business},{country})。联系:{email}。',
 
   // 隐私政策
   'legal.privacy.intro':
-    '本隐私政策说明 Forge(“我们”)在你使用 {url} 及相关服务(“本服务”)时如何收集、使用和共享个人信息。隐私相关问题或权利请求请联系 {email}。',
+    '本隐私政策说明 {entity}(“我们”,以 {business} 名义运营 Forge)在你使用 {url} 及相关服务(“本服务”)时如何收集、使用和共享个人信息。隐私相关问题或权利请求请联系 {email}。',
   'legal.privacy.s1.title': '我们收集的信息',
   'legal.privacy.s1.body':
     '我们收集以下信息:\n• 账户信息:邮箱地址、密码哈希(或使用 Google 登录时的 Google 账户标识),以及语言、主题等偏好。\n• 你提供的内容:提示词、对话消息、附件,以及由此生成的源码和网站。\n• 计费信息:积分余额、购买与订阅记录、订单标识。支付由 Creem 处理,我们不会收到或存储你的完整卡号。\n• 使用与技术信息:IP 地址、请求时间、任务用量、错误日志等,用于安全、防滥用和维持服务运行。\n• 本地存储:会话 Cookie,以及语言、主题、面板宽度等浏览器偏好。我们不使用广告 Cookie。',
@@ -522,7 +524,7 @@ export const zh = {
 
   // 服务条款
   'legal.terms.intro':
-    '本服务条款(“条款”)适用于你访问和使用位于 {url} 的 Forge(“本服务”)。创建账户或使用本服务,即表示你同意本条款以及我们的隐私政策和可接受使用政策。如不同意,请勿使用本服务。',
+    '本服务条款(“条款”)适用于你访问和使用位于 {url} 的 Forge(“本服务”)。Forge 由 {entity}(业务名称:{business})运营。创建账户或使用本服务,即表示你同意本条款以及我们的隐私政策和可接受使用政策。如不同意,请勿使用本服务。',
   'legal.terms.s1.title': '资格',
   'legal.terms.s1.body':
     '你须年满 16 周岁并能够签订有约束力的合同。未满 18 周岁的,须获得父母或法定监护人的同意。',
@@ -571,7 +573,7 @@ export const zh = {
 
   // 可接受使用政策
   'legal.aup.intro':
-    '本可接受使用政策(“AUP”)说明你不得使用 Forge 从事的行为。它适用于提示词、上传文件、生成的代码和网站,以及已发布页面。本政策是服务条款的一部分。违反本政策可能导致内容被移除、账户被暂停或终止。',
+    '本可接受使用政策(“AUP”)说明你不得在使用 Forge(由 {entity} 以 {business} 名义运营)时从事的行为。它适用于提示词、上传文件、生成的代码和网站,以及已发布页面。本政策是服务条款的一部分。违反本政策可能导致内容被移除、账户被暂停或终止。',
   'legal.aup.s1.title': '违法与有害内容',
   'legal.aup.s1.body':
     '不得创建、生成、上传、发布或传播以下内容:\n• 违反任何法律或法规;\n• 宣扬或协助暴力、恐怖主义、自残或人口贩运;\n• 仇恨、骚扰、威胁、欺凌或诽谤;\n• 侵犯知识产权、隐私权或肖像权;\n• 欺骗、欺诈、钓鱼,或冒充个人或组织。',
