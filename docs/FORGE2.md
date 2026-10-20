@@ -841,6 +841,7 @@ npm run db:migrate:billing:remote      # 生产
 
 - **webhook 端点**登记地址:`生产 https://app.1forgen.site/api/billing/webhook`、`staging https://app-staging.1forgen.site/api/billing/webhook`。
 - **staging 已配齐(2026-10-20)**:5 个 test 商品 + webhook 端点用 Creem CLI(`brew install creem` → `creem login --api-key creem_test_...`)建好,商品 id 已写进 `wrangler.jsonc` 的 `env.staging.vars.CREEM_PRODUCTS`;两个 secret 已 `wrangler secret put --env staging`。批量建商品的脚本是 `scripts/creem-seed-products.mjs`(幂等,带 `Idempotency-Key`;`npm run creem:seed:test` / `creem:seed:live`),live 上线时换 live key 重跑一遍即可。
+- **生产已配齐(2026-10-20)**:live 门店的 5 个商品已用同一脚本以 live key 创建,id 写进顶层 `vars.CREEM_PRODUCTS`;`CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET` 已写入生产 secrets;live webhook 端点 `wh_5AH5qwIzrTjr9Qu3Q17llC`(`https://app.1forgen.site/api/billing/webhook`,订阅全部事件)已登记。KYC 与提现账户由账户持有人在 Creem 后台完成。
 - 密钥**只写不可读**(换环境只能由持有原值的人重新输入,见 AGENTS.md §1)。
 - `CREEM_PRODUCTS` 留空 = 结账返回「商品未配置」、前端显示「支付通道未开通」;建好商品后填真值,无需重新部署代码(改了 vars 要重新 `deploy`/`deploy:staging`)。
 - **Cloudflare 侧注意**:机器人防护可能拦截 webhook(自动化的服务器间请求)。别用来源 IP 白名单鉴权(Creem 不提供固定出网 IP);若开了 Bot Fight Mode 需为该路由加例外(`docs.creem.io/code/webhooks` 有说明)。
