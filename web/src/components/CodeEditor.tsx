@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useT } from '../lib/i18n'
 import type { ArtifactManifest } from '../lib/types'
 
 interface Props {
@@ -173,6 +174,7 @@ function TreeView({
  *  - 仅有构建产物清单时:列出产物文件
  */
 export default function CodeEditor({ src, filesPreview, manifest, streaming, exportHref }: Props) {
+  const t = useT()
   const paths = useMemo(() => (src ? Object.keys(src).sort() : []), [src])
   const tree = useMemo(() => buildTree(paths), [paths])
   const [openFiles, setOpenFiles] = useState<string[]>([])
@@ -222,7 +224,7 @@ export default function CodeEditor({ src, filesPreview, manifest, streaming, exp
         <div className="flex shrink-0 items-center gap-2 border-b border-gray-800 px-3 py-2 font-mono text-xs text-gray-400">
           <span className="text-indigo-400">✎</span>
           <span className="truncate">{filesPreview.path}</span>
-          {streaming && <span className="ml-auto animate-pulse text-indigo-400">实时写入</span>}
+          {streaming && <span className="ml-auto animate-pulse text-indigo-400">{t('code.liveWriting')}</span>}
         </div>
         <CodeBlock content={filesPreview.content} />
       </div>
@@ -236,7 +238,7 @@ export default function CodeEditor({ src, filesPreview, manifest, streaming, exp
         {/* 侧栏:目录树 + 下载 */}
         <div className="flex h-44 w-full shrink-0 flex-col overflow-hidden rounded-xl border border-gray-800 bg-gray-900 md:h-auto md:w-60">
           <div className="flex shrink-0 items-center justify-between border-b border-gray-800 px-3 py-2">
-            <span className="text-xs font-medium text-gray-400">文件</span>
+            <span className="text-xs font-medium text-gray-400">{t('code.files')}</span>
             <span className="text-xs text-gray-600">{paths.length}</span>
           </div>
           <div className="min-h-0 flex-1 overflow-auto p-1">
@@ -246,9 +248,9 @@ export default function CodeEditor({ src, filesPreview, manifest, streaming, exp
             <a
               href={exportHref}
               className="flex shrink-0 items-center justify-center gap-1.5 border-t border-gray-800 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
-              title="下载该版本完整源码(zip),本地 npm install && npm run build 即可运行"
+              title={t('code.downloadTitle')}
             >
-              ↓ 下载项目
+              {t('code.download')}
             </a>
           )}
         </div>
@@ -269,7 +271,7 @@ export default function CodeEditor({ src, filesPreview, manifest, streaming, exp
                 <button
                   onClick={() => closeTab(p)}
                   className="text-gray-600 opacity-0 transition-opacity hover:text-gray-300 group-hover:opacity-100"
-                  title="关闭"
+                  title={t('common.close')}
                 >
                   ✕
                 </button>
@@ -277,7 +279,7 @@ export default function CodeEditor({ src, filesPreview, manifest, streaming, exp
             ))}
           </div>
           {activeFile ? <CodeBlock content={active ?? ''} /> : (
-            <div className="flex flex-1 items-center justify-center text-sm text-gray-600">从左侧选择一个文件查看</div>
+            <div className="flex flex-1 items-center justify-center text-sm text-gray-600">{t('code.pickFile')}</div>
           )}
         </div>
       </div>
@@ -289,9 +291,9 @@ export default function CodeEditor({ src, filesPreview, manifest, streaming, exp
     return (
       <div className="overflow-hidden rounded-xl border border-gray-700 bg-gray-950">
         <div className="flex items-center justify-between border-b border-gray-800 px-3 py-2 text-xs text-gray-400">
-          <span className="font-medium">构建产物</span>
+          <span className="font-medium">{t('code.artifacts')}</span>
           <span className="text-gray-600">
-            入口 {manifest.entry} · {manifest.files.length} 个文件 · {(total / 1024).toFixed(1)} KB
+            {t('code.artifactsMeta', { entry: manifest.entry, count: manifest.files.length, size: (total / 1024).toFixed(1) })}
           </span>
         </div>
         <ul className="divide-y divide-gray-800">
@@ -308,7 +310,7 @@ export default function CodeEditor({ src, filesPreview, manifest, streaming, exp
 
   return (
     <div className="flex h-full min-h-[400px] items-center justify-center text-sm text-gray-500">
-      生成开始后这里会实时显示 agent 写入的源码
+      {t('code.empty')}
     </div>
   )
 }

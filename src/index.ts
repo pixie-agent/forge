@@ -6,6 +6,7 @@ import { projectConnectorRoutes } from './routes/projectConnectors'
 import { connectionRoutes } from './routes/connections'
 import { generateRoutes } from './routes/generate'
 import { jobRoutes } from './routes/jobs'
+import { billingRoutes } from './routes/billing'
 import { internalRoutes } from './routes/internal'
 import { adminRoutes } from './routes/admin'
 import { serveRoutes } from './routes/serve'
@@ -22,6 +23,8 @@ app.route('/api/projects', projectRoutes)
 app.route('/api/projects', projectConnectorRoutes)
 app.route('/api/projects', generateRoutes)
 app.route('/api/jobs', jobRoutes)
+// 计费:价目表(公开)、账户摘要、发起结账(阶段三为骨架,结账返回 501;见 docs/FORGE2.md §20)
+app.route('/api/billing', billingRoutes)
 // 连接器 · 账号级(授权跳转与回调)
 app.route('/api/connections', connectionRoutes)
 // 管理后台(只读,独立口令鉴权):跨用户查看产物

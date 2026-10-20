@@ -5,7 +5,11 @@
  * 这里只是提前拦住,免得用户等一次 400 才知道超限)。两套上限:
  * - SEND_LIMITS:首次提交(generate / chat);
  * - STEER_LIMITS:生成过程中追加要求(steer),要整行塞进 D1 投递队列,所以更紧。
+ *
+ * 文案用非组件的 tStatic 取词(见 lib/i18n):这些函数不在 React 里,语言取模块级的当前语言。
  */
+
+import { tStatic } from './i18n'
 
 export interface AttachmentLimits {
   /** 单条消息附件个数上限 */
@@ -64,10 +68,11 @@ export function rejectReason(file: File, limits: AttachmentLimits = SEND_LIMITS)
   const ext = extOf(file.name)
   const isImage = IMAGE_EXT.includes(ext)
   const isText = TEXT_EXT.includes(ext)
-  if (!isImage && !isText) return `${file.name}:只支持图片(${IMAGE_EXT.join('/')})与文本文件(${TEXT_EXT.join('/')})`
+  if (!isImage && !isText)
+    return tStatic('attach.rejectType', { name: file.name, imageExt: IMAGE_EXT.join('/'), textExt: TEXT_EXT.join('/') })
   const limit = isImage ? limits.imageBytes : limits.textBytes
-  if (file.size > limit) return `${file.name}:超过 ${Math.round(limit / 1024)}KB 上限`
-  if (file.size === 0) return `${file.name}:是空文件`
+  if (file.size > limit) return tStatic('attach.rejectSize', { name: file.name, kb: Math.round(limit / 1024) })
+  if (file.size === 0) return tStatic('attach.rejectEmpty', { name: file.name })
   return null
 }
 
@@ -81,13 +86,13 @@ export function withPastedName(file: File): File {
   if (!mime) return file
   const ext = mime === 'jpeg' ? 'jpg' : mime.replace(/[^a-z0-9]/gi, '')
   if (!ext) return file
-  return new File([file], `粘贴图片-${Date.now()}.${ext}`, { type: file.type })
+  return new File([file], tStatic('attach.pastedFileName', { ts: Date.now() }) + `.${ext}`, { type: file.type })
 }
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onerror = () => reject(new Error(`${file.name}:读取失败`))
+    reader.onerror = () => reject(new Error(tStatic('attach.fileReadError', { name: file.name })))
     reader.onload = () => {
       const text = String(reader.result)
       const comma = text.indexOf(',')
@@ -126,7 +131,10 @@ export function totalBytes(list: PendingAttachment[]): number {
 /** 追加到用户消息文本里的附件清单(与服务端 attachmentMarkdown 同格式,刷新后一致) */
 export function attachmentMarker(attachments: readonly { name: string }[] | undefined): string {
   if (!attachments?.length) return ''
-  return `\n\n📎 附件 ${attachments.length} 个:${attachments.map((a) => a.name).join('、')}`
+  return tStatic('attach.marker', {
+    count: attachments.length,
+    names: attachments.map((a) => a.name).join(tStatic('chat.listSep')),
+  })
 }
 
 /** 释放本地缩略图 URL */

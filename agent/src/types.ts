@@ -62,6 +62,22 @@ export interface ArtifactManifest {
   files: { path: string; size: number }[]
 }
 
+/**
+ * 一次 job 的真实用量(pi 会话累计的 token + 轮次),收尾时上报给 Worker 的 /internal/jobs/:id/usage
+ * (见 src/lib/pricing.ts 的成本换算)。成功、失败、用户停止三种终态都要报 —— 它们同样烧 token 与实例时间,
+ * 漏记就算不出真实毛利。runMs 由调用方(agent/src/index.ts)按整个请求的耗时补上。
+ */
+export interface RunUsage {
+  model: string
+  /** 未命中缓存的输入 token */
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  /** assistant 消息条数,≈ 轮次 */
+  turns: number
+}
+
 /** POST /run 请求体 */
 export interface RunRequest {
   jobId: string

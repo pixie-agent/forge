@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import { useT } from '../lib/i18n'
+import RichText from './RichText'
 import { ConfigField, SecretField } from './ConnectorFields'
 import type { ConnectorConnection, ConnectorProviderProfile, SiteDataEnv } from '../lib/types'
 
@@ -28,6 +30,7 @@ interface Props {
  * 不会出现在 agent_log 里。所以用户即使把 `sk_live_...` 贴在这里,也不会到模型厂商那一侧。
  */
 export default function ConnectorCard({ projectId, provider, reusable, jobRunning, onSaved, onClose }: Props) {
+  const t = useT()
   const [env, setEnv] = useState<SiteDataEnv>('draft')
   const [secrets, setSecrets] = useState<Record<string, string>>({})
   const [form, setForm] = useState<Record<string, string>>({})
@@ -58,7 +61,7 @@ export default function ConnectorCard({ projectId, provider, reusable, jobRunnin
   const reuseList = reusable.length > 0 && (
     <div className="mt-2.5">
       <p className="mb-1 text-[11px] text-gray-400">
-        你的账号里已经保存过 {provider.name} 的凭证,点一下直接接到本项目(不重传密钥{isOauth ? '、不再跳授权页' : ''}):
+        {t('conn.card.reuseHint', { provider: provider.name, oauthNote: isOauth ? t('conn.card.reuseOauthNote') : '' })}
       </p>
       <div className="space-y-1">
         {reusable.map((c) => (
@@ -69,12 +72,14 @@ export default function ConnectorCard({ projectId, provider, reusable, jobRunnin
             className="flex w-full items-center justify-between gap-2 rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1.5 text-left hover:border-indigo-500 disabled:opacity-40"
           >
             <span className="min-w-0 truncate text-xs text-gray-200">🔑 {c.accountLabel}</span>
-            <span className="shrink-0 text-[10px] text-indigo-300">接入 ▸</span>
+            <span className="shrink-0 text-[10px] text-indigo-300">{t('conn.card.reuseAction')}</span>
           </button>
         ))}
       </div>
       {missingConfig.length > 0 && (
-        <p className="mt-1.5 text-[11px] text-amber-300">先填下面的「{missingConfig.map((f) => f.label).join('、')}」,再点接入</p>
+        <p className="mt-1.5 text-[11px] text-amber-300">
+          {t('conn.card.fillFirst', { fields: missingConfig.map((f) => f.label).join(t('chat.listSep')) })}
+        </p>
       )}
     </div>
   )
@@ -166,17 +171,18 @@ export default function ConnectorCard({ projectId, provider, reusable, jobRunnin
             <div className="flex items-center gap-1.5 text-sm font-medium text-emerald-200">
               <span>🔑</span>
               <span className="truncate">
-                {provider.name} 已接入{isApiKey ? ` · ${doneLabel}` : ''}
+                {t('conn.card.doneTitle', { provider: provider.name })}
+                {isApiKey ? ` · ${doneLabel}` : ''}
               </span>
             </div>
             <p className="mt-1 text-xs leading-relaxed text-emerald-200/70">
-              已绑到{env === 'draft' ? '草稿 / 测试环境' : '线上环境'}。凭证已加密保存,不会出现在对话、源码或产物里。
-              {provider.writable
-                ? '它带写能力,按规则默认不带上 —— 要用它的那一轮,请在对话栏把它的 chip 点亮。'
-                : '之后的生成会默认带上它。'}
+              {t('conn.card.doneBody', {
+                env: env === 'draft' ? t('env.draftLabel') : t('env.liveLabel'),
+                tail: provider.writable ? t('conn.card.doneTailWritable') : t('conn.card.doneTailReadonly'),
+              })}
             </p>
           </div>
-          <button onClick={onClose} aria-label="关闭" className="shrink-0 rounded px-1.5 text-emerald-300/70 hover:text-emerald-100">
+          <button onClick={onClose} aria-label={t('common.close')} className="shrink-0 rounded px-1.5 text-emerald-300/70 hover:text-emerald-100">
             ✕
           </button>
         </div>
@@ -189,21 +195,21 @@ export default function ConnectorCard({ projectId, provider, reusable, jobRunnin
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
-            <span className="text-sm font-medium text-indigo-100">接入 {provider.name}</span>
+            <span className="text-sm font-medium text-indigo-100">{t('conn.card.title', { provider: provider.name })}</span>
             <span className={`rounded px-1.5 py-0.5 text-[10px] ${provider.writable ? 'bg-amber-500/15 text-amber-300' : 'bg-gray-800 text-gray-400'}`}>
-              {provider.writable ? '可写' : '只读'}
+              {t(provider.writable ? 'conn.writable' : 'conn.readonly')}
             </span>
           </div>
           <p className="mt-1 text-xs text-gray-400">{provider.blurb}</p>
         </div>
-        <button onClick={onClose} aria-label="取消" className="shrink-0 rounded px-1.5 text-gray-500 hover:text-gray-300">
+        <button onClick={onClose} aria-label={t('common.cancel')} className="shrink-0 rounded px-1.5 text-gray-500 hover:text-gray-300">
           ✕
         </button>
       </div>
 
       {/* 绑到哪个环境:两个小胶囊,不做成下拉(默认草稿,避免拿测试凭证打真账) */}
       <div className="mt-2.5 flex items-center gap-1.5 text-[11px] text-gray-400">
-        <span>接入到</span>
+        <span>{t('conn.card.bindTo')}</span>
         {(['draft', 'live'] as const).map((e) => (
           <button
             key={e}
@@ -212,10 +218,10 @@ export default function ConnectorCard({ projectId, provider, reusable, jobRunnin
               env === e ? 'border-indigo-400/60 bg-indigo-500/15 text-indigo-200' : 'border-gray-700 text-gray-400 hover:text-gray-200'
             }`}
           >
-            {e === 'draft' ? '草稿 / 测试' : '线上'}
+            {e === 'draft' ? t('env.draftShort') : t('env.live')}
           </button>
         ))}
-        {env === 'live' && <span className="text-amber-300">访客打开公开页时就会生效</span>}
+        {env === 'live' && <span className="text-amber-300">{t('conn.card.liveNote')}</span>}
       </div>
 
       {isOauth ? (
@@ -223,22 +229,25 @@ export default function ConnectorCard({ projectId, provider, reusable, jobRunnin
           {reuseList}
           {configForm}
           <p className="mt-2 text-xs leading-relaxed text-gray-400">
-            {reusable.length > 0 ? '要换一个账号,则' : '这个连接器要'}授权你自己的 {provider.name} 账号:跳到对方页面点「允许」,回来会自动绑定。
+            {reusable.length > 0 ? t('conn.card.oauthLeadReuse') : t('conn.card.oauthLeadNew')}
+            {t('conn.card.oauthHint', { provider: provider.name })}
           </p>
           <button
             onClick={startOauth}
             disabled={provider.needsOauthClient || missingConfig.length > 0}
-            title={provider.needsOauthClient ? '平台未配置该连接器的 OAuth 客户端' : undefined}
+            title={provider.needsOauthClient ? t('conn.noOauthClient') : undefined}
             className={`mt-2 rounded-lg px-3 py-1.5 text-xs font-medium disabled:opacity-40 ${
               reusable.length > 0
                 ? 'border border-gray-700 text-gray-300 hover:bg-gray-800'
                 : 'bg-indigo-600 text-white hover:bg-indigo-500'
             }`}
           >
-            {reusable.length > 0 ? `改用其他 ${provider.name} 账号授权` : '前往授权'}
+            {reusable.length > 0 ? t('conn.card.reauthorize', { provider: provider.name }) : t('conn.card.goAuthorize')}
           </button>
           {missingConfig.length > 0 && (
-            <p className="mt-1.5 text-[11px] text-amber-300">先填上「{missingConfig.map((f) => f.label).join('、')}」再授权,一次接完</p>
+            <p className="mt-1.5 text-[11px] text-amber-300">
+              {t('conn.card.fillBeforeAuth', { fields: missingConfig.map((f) => f.label).join(t('chat.listSep')) })}
+            </p>
           )}
         </>
       ) : (
@@ -246,16 +255,16 @@ export default function ConnectorCard({ projectId, provider, reusable, jobRunnin
           {reuseList}
           {secretFields.length > 0 && (
             <div className="mt-2.5 space-y-2">
-              {reusable.length > 0 && <p className="text-[11px] text-gray-500">或粘贴一把新密钥:</p>}
+              {reusable.length > 0 && <p className="text-[11px] text-gray-500">{t('conn.card.orPasteKey')}</p>}
               {secretFields.map((f) => (
                 <SecretField key={f.key} field={f} value={secrets[f.key] ?? ''} onChange={(v) => setSecrets((s) => ({ ...s, [f.key]: v }))} />
               ))}
               <label className="block">
-                <span className="mb-1 block text-xs text-gray-300">名称(可选)</span>
+                <span className="mb-1 block text-xs text-gray-300">{t('conn.nameLabel')}</span>
                 <input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder={`如:我的 ${provider.name}(test / live)`}
+                  placeholder={t('conn.namePlaceholder', { provider: provider.name })}
                   className="w-full rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1.5 text-xs text-gray-100 outline-none focus:border-indigo-500"
                 />
               </label>
@@ -270,12 +279,16 @@ export default function ConnectorCard({ projectId, provider, reusable, jobRunnin
               disabled={busy || (isApiKey && missingRequired) || missingConfig.length > 0}
               className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
             >
-              {busy ? '保存中…' : isApiKey ? '保存并接入' : '绑定'}
+              {busy ? t('common.saving') : isApiKey ? t('conn.card.saveConnect') : t('conn.action.bind')}
             </button>
             <button onClick={onClose} className="rounded-lg border border-gray-700 px-2.5 py-1.5 text-xs text-gray-400 hover:bg-gray-800">
-              取消
+              {t('common.cancel')}
             </button>
-            {missingConfig.length > 0 && <span className="text-[11px] text-amber-300">还缺:{missingConfig.map((f) => f.label).join('、')}</span>}
+            {missingConfig.length > 0 && (
+              <span className="text-[11px] text-amber-300">
+                {t('conn.missing', { fields: missingConfig.map((f) => f.label).join(t('chat.listSep')) })}
+              </span>
+            )}
           </div>
         </>
       )}
@@ -283,11 +296,11 @@ export default function ConnectorCard({ projectId, provider, reusable, jobRunnin
       {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
       {jobRunning && (
         <p className="mt-2 text-[11px] leading-relaxed text-amber-300">
-          本次任务已经在跑,连接器在一开始就固定了 —— 这里保存的凭证从<b>下一次</b>生成开始生效。
+          <RichText text={t('conn.card.jobRunning')} />
         </p>
       )}
       <p className="mt-2 text-[11px] leading-relaxed text-gray-500">
-        密钥只用于生成时调用 {provider.name},加密存放、不会写进你的站点代码,也不会出现在对话记录里。
+        {t('conn.card.secretNote', { provider: provider.name })}
       </p>
     </div>
   )

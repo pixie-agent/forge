@@ -11,6 +11,7 @@ import {
   sessionCookie,
   verifyPassword,
 } from '../lib/auth'
+import { grantSignupCredits, SIGNUP_CREDITS } from '../lib/credits'
 
 const app = new Hono<AppEnv>()
 
@@ -29,14 +30,18 @@ app.post('/register', async (c) => {
   if (exists) return c.json({ error: '该邮箱已注册' }, 409)
 
   const id = crypto.randomUUID()
+  // 显式写 credits,不靠 schema 的列默认值:老库改不动列默认(SQLite),
+  // 靠 DEFAULT 会让老库上的新用户拿到旧额度(如 20),和账本流水对不上。见 src/lib/credits.ts
   await c.env.DB
-    .prepare('INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)')
-    .bind(id, email, await hashPassword(password))
+    .prepare('INSERT INTO users (id, email, password_hash, credits) VALUES (?, ?, ?, ?)')
+    .bind(id, email, await hashPassword(password), SIGNUP_CREDITS)
     .run()
+  // 补一条账本流水,让余额从第一天起就有来源可查
+  await grantSignupCredits(c.env.DB, id, SIGNUP_CREDITS).catch(() => {})
 
   const token = await createSession(c.env.DB, id)
   c.header('Set-Cookie', sessionCookie(token, isSecureRequest(c.req.url)))
-  return c.json({ user: { id, email, credits: 20 } })
+  return c.json({ user: { id, email, credits: SIGNUP_CREDITS } })
 })
 
 app.post('/login', async (c) => {
@@ -222,10 +227,12 @@ app.get('/google/callback', async (c) => {
       row = byEmail
     } else {
       const id = crypto.randomUUID()
-      await c.env.DB.prepare("INSERT INTO users (id, email, password_hash, google_sub) VALUES (?, ?, '', ?)")
-        .bind(id, email, sub)
+      // 同注册:显式写 credits,不靠 schema DEFAULT(老库的默认值改不动)
+      await c.env.DB.prepare("INSERT INTO users (id, email, password_hash, google_sub, credits) VALUES (?, ?, '', ?, ?)")
+        .bind(id, email, sub, SIGNUP_CREDITS)
         .run()
-      row = { id, email, credits: 20 }
+      await grantSignupCredits(c.env.DB, id, SIGNUP_CREDITS).catch(() => {})
+      row = { id, email, credits: SIGNUP_CREDITS }
     }
   }
 

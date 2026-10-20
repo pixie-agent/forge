@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import CodeEditor from './CodeEditor'
 import DataPanel from './DataPanel'
+import RichText from './RichText'
 import { formatShortTime as formatTime } from '../lib/format'
+import { useT } from '../lib/i18n'
 import type { ArtifactManifest, Project, VersionMeta } from '../lib/types'
 
 interface Props {
@@ -68,6 +70,7 @@ export default function PreviewPane({
   connectorCount = 0,
   mobileHidden,
 }: Props) {
+  const t = useT()
   const [tab, setTab] = useState<'preview' | 'code' | 'data'>('preview')
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const [showLog, setShowLog] = useState(false)
@@ -121,48 +124,48 @@ export default function PreviewPane({
     <section className={`${mobileHidden ? 'hidden md:flex' : 'flex'} min-w-0 flex-1 flex-col bg-gray-900`}>
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1.5 border-b border-gray-800 px-3 py-2 md:h-12 md:flex-nowrap md:py-0">
         <div className="flex shrink-0 gap-1">
-          {(['preview', 'code', 'data'] as const).map((t) => (
+          {(['preview', 'code', 'data'] as const).map((tabKey) => (
             <button
-              key={t}
-              onClick={() => setTab(t)}
+              key={tabKey}
+              onClick={() => setTab(tabKey)}
               className={`rounded-lg px-3 py-1.5 text-sm ${
-                tab === t ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:text-gray-200'
+                tab === tabKey ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:text-gray-200'
               }`}
             >
-              {t === 'preview' ? '预览' : t === 'code' ? '代码' : '数据'}
+              {tabKey === 'preview' ? t('nav.preview') : tabKey === 'code' ? t('nav.code') : t('nav.data')}
             </button>
           ))}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           {(versions.length > 1 || hasDraft) && (
             <div className="flex items-center gap-1.5">
-              <span className="hidden text-xs text-gray-500 sm:inline">查看版本</span>
+              <span className="hidden text-xs text-gray-500 sm:inline">{t('preview.viewVersion')}</span>
               <select
                 value={viewVersion}
                 onChange={(e) => onSelectVersion(Number(e.target.value))}
                 disabled={streaming || switchingVersion}
-                title="切换查看草稿或历史版本(仅切换查看,不改变线上)"
+                title={t('preview.versionTitle')}
                 className="rounded-lg border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-200 disabled:opacity-40"
               >
-                {hasDraft && <option value={0}>草稿 · 未生成版本</option>}
+                {hasDraft && <option value={0}>{t('preview.draftOption')}</option>}
                 {versions.map((v) => (
                   <option key={v.version_no} value={v.version_no}>
                     v{v.version_no} · {formatTime(v.created_at)}
-                    {v.version_no === publishedVersion ? ' (线上)' : ''}
+                    {v.version_no === publishedVersion ? t('preview.liveSuffix') : ''}
                   </option>
                 ))}
               </select>
-              {switchingVersion && <span className="animate-pulse text-xs text-indigo-400">加载中…</span>}
+              {switchingVersion && <span className="animate-pulse text-xs text-indigo-400">{t('common.loading')}</span>}
             </div>
           )}
           {viewingDraft && !streaming && (
             <button
               onClick={onCommit}
               disabled={committing}
-              title="把当前草稿保存为一个正式版本;之后可发布上线"
+              title={t('preview.commitTitle')}
               className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
             >
-              {committing ? '生成中…' : `生成新版本 v${nextVersion}`}
+              {committing ? t('preview.committing') : t('preview.commitVersion', { version: nextVersion })}
             </button>
           )}
           {tab === 'preview' && (
@@ -173,7 +176,7 @@ export default function PreviewPane({
                   onClick={() => setDevice(d)}
                   className={`rounded-md px-2 py-1 ${device === d ? 'bg-gray-700 text-gray-100' : 'text-gray-400'}`}
                 >
-                  {d === 'desktop' ? '桌面' : '移动'}
+                  {d === 'desktop' ? t('preview.device.desktop') : t('preview.device.mobile')}
                 </button>
               ))}
             </div>
@@ -189,22 +192,22 @@ export default function PreviewPane({
                 onClick={() => onPublish(target)}
                 title={
                   target === currentVersion
-                    ? '把当前工作版本发布上线(生成公开链接,任何人可访问)'
-                    : `把 v${target} 直接发布上线,切换线上版本;不改动当前工作版本`
+                    ? t('preview.publishTitle')
+                    : t('preview.publishSwitchTitle', { version: target })
                 }
                 className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
               >
-                {published ? `切换线上到 v${target}` : `发布 v${target}`}
+                {published ? t('preview.switchLive', { version: target }) : t('preview.publishVersion', { version: target })}
               </button>
             )
           })()}
           <button
             onClick={onOpenConnectors}
-            title="连接器:接入支付、统计、代码仓库等外部系统,让生成的站点真的用起来"
+            title={t('conn.openTitle')}
             className="flex items-center gap-1 rounded-lg border border-gray-700 px-2.5 py-1.5 text-xs text-gray-300 hover:border-indigo-500 hover:text-gray-100"
           >
             <span>🔌</span>
-            <span className="hidden sm:inline">连接器</span>
+            <span className="hidden sm:inline">{t('conn.title')}</span>
             {connectorCount > 0 && (
               <span className="rounded-full bg-indigo-500/20 px-1.5 text-[10px] text-indigo-300">{connectorCount}</span>
             )}
@@ -212,22 +215,20 @@ export default function PreviewPane({
           <div className="relative">
             <button
               onClick={() => setShowHelp((v) => !v)}
-              title="版本能力说明"
+              title={t('preview.helpTitle')}
               className="flex h-7 w-7 items-center justify-center rounded-full border border-gray-700 text-xs text-gray-300 hover:bg-gray-800"
             >
               ?
             </button>
             {showHelp && (
               <div className="absolute right-0 top-9 z-40 w-80 max-w-[calc(100vw-1.5rem)] rounded-xl border border-gray-700 bg-gray-900 p-3 text-xs leading-relaxed text-gray-400 shadow-xl">
-                <p className="mb-2 font-medium text-gray-100">版本与交付说明</p>
+                <p className="mb-2 font-medium text-gray-100">{t('preview.help.heading')}</p>
                 <ul className="list-disc space-y-1.5 pl-4">
-                  <li>「预览」标签里看到的是<b>测试环境</b>:即草稿内容,与线上公开页是两套环境、数据互不影响;页面左下角带「测试环境」角标,方便区分。</li>
-                  <li>生成与对话修改都写入「草稿」,可反复修改,<b>不影响线上、也不会自动产生版本</b>。</li>
-                  <li>满意后点「生成新版本 vN」把草稿保存为一个正式版本;正式版本永久保留、互不覆盖,聊天会继续在这个最新版本上改。</li>
-                  <li>上方「查看版本」下拉只是切换<b>查看</b>哪个版本(不改任何东西)。</li>
-                  <li><b>改线上只有一件事</b>:下拉选中要上线的版本 → 点「切换线上到 vN」。想上线最新版就选最新版,想回退就选旧版本,动作完全一样。</li>
-                  <li>交付:「代码」标签左侧栏的「↓ 下载项目」导出该版本完整源码(zip,含源码不含数据),可本地运行或另存。</li>
-                  <li>「下线」立即撤回公开链接(版本与数据都保留,可随时再发布)。</li>
+                  {(['preview.help.1', 'preview.help.2', 'preview.help.3', 'preview.help.4', 'preview.help.5', 'preview.help.6', 'preview.help.7'] as const).map((k) => (
+                    <li key={k}>
+                      <RichText text={t(k)} />
+                    </li>
+                  ))}
                 </ul>
               </div>
             )}
@@ -239,24 +240,24 @@ export default function PreviewPane({
       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-gray-800 bg-gray-950/50 px-3 py-1.5 text-xs">
         <span className="flex items-center gap-1.5 text-amber-300">
           <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-          <span className="font-medium">测试环境</span>
+          <span className="font-medium">{t('env.test')}</span>
           {previewUrl && (
             <>
               <a
                 href={previewUrl}
                 target="_blank"
                 rel="noreferrer"
-                title="新标签打开测试环境,可用真机/全屏体验"
+                title={t('preview.openTestTitle')}
                 className="rounded-md border border-amber-500/40 px-2 py-0.5 hover:bg-amber-500/10"
               >
-                打开
+                {t('common.open')}
               </a>
               <button
                 onClick={copyPreviewLink}
-                title="复制测试环境链接;打开者看到的是带「测试环境」角标的草稿,不是线上"
+                title={t('preview.copyTestTitle')}
                 className="rounded-md border border-amber-500/40 px-2 py-0.5 hover:bg-amber-500/10"
               >
-                {copiedPreview ? '已复制 ✓' : '复制'}
+                {copiedPreview ? t('common.copied') : t('common.copy')}
               </button>
             </>
           )}
@@ -267,52 +268,52 @@ export default function PreviewPane({
         {published ? (
           <span className="flex items-center gap-1.5 text-emerald-300">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            <span className="font-medium">线上 · v{project?.published_version}</span>
+            <span className="font-medium">{t('env.live')} · v{project?.published_version}</span>
             <a
               href={publicUrl}
               target="_blank"
               rel="noreferrer"
-              title={`打开线上公开页 ${publicUrl}(任何人可访问)`}
+              title={t('preview.openLiveTitle', { url: publicUrl })}
               className="rounded-md border border-emerald-500/40 px-2 py-0.5 hover:bg-emerald-500/10"
             >
-              打开 ↗
+              {t('preview.openExternal')}
             </a>
             <button
               onClick={copyLink}
               title={publicUrl}
               className="rounded-md border border-emerald-500/40 px-2 py-0.5 hover:bg-emerald-500/10"
             >
-              {copied ? '已复制 ✓' : '复制'}
+              {copied ? t('common.copied') : t('common.copy')}
             </button>
             <button
               onClick={onUnpublish}
-              title="下线后公开链接立即失效(版本与数据保留)"
+              title={t('preview.unpublishTitle')}
               className="rounded-md border border-amber-500/40 px-2 py-0.5 text-amber-300 hover:bg-amber-500/10"
             >
-              下线
+              {t('projects.unpublish')}
             </button>
           </span>
         ) : (
           <span className="flex items-center gap-1.5 text-gray-500">
             <span className="h-1.5 w-1.5 rounded-full bg-gray-600" />
-            线上 · 未发布
-            <span className="text-gray-600">生成版本后点「发布」即上线</span>
+            {t('preview.liveNotPublished')}
+            <span className="text-gray-600">{t('preview.publishHint')}</span>
           </span>
         )}
       </div>
 
       {viewingDraft && !streaming && (
         <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-indigo-500/20 bg-indigo-500/5 px-3 py-2 text-xs text-indigo-300">
-          <span>当前为草稿(尚未生成版本),生成与对话修改都写入这里,可反复修改。</span>
-          <span className="text-indigo-400/70">满意后点右上角「生成新版本 v{nextVersion}」保存为正式版本;正式版本才可发布上线。</span>
+          <span>{t('preview.draftBanner')}</span>
+          <span className="text-indigo-400/70">{t('preview.draftBanner2', { version: nextVersion })}</span>
         </div>
       )}
 
       {viewVersion > 0 && viewVersion !== latestVersion && !streaming && (
         <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
-          <span>正在查看历史版本 v{viewVersion},最新版本为 v{latestVersion}。</span>
+          <span>{t('preview.historyBanner', { view: viewVersion, latest: latestVersion })}</span>
           <span className="text-amber-400/70">
-            继续对话会在最新版本 v{latestVersion} 的草稿上修改;要把 v{viewVersion} 设为线上,点右上角「切换线上到 v{viewVersion}」。
+            {t('preview.historyBanner2', { view: viewVersion, latest: latestVersion })}
           </span>
         </div>
       )}
@@ -345,12 +346,12 @@ export default function PreviewPane({
                   <>
                     <span className="flex items-center gap-2">
                       <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-                      {progressText || '正在生成应用…'}
+                      {progressText || t('preview.generating')}
                     </span>
-                    <span className="text-xs text-gray-600">生成完成后自动构建产物;可离开页面,云端会继续完成</span>
+                    <span className="text-xs text-gray-600">{t('preview.generatingHint')}</span>
                   </>
                 ) : (
-                  '暂无预览,在左侧描述你的想法开始生成'
+                  t('preview.empty')
                 )}
               </div>
             )}
@@ -369,9 +370,9 @@ export default function PreviewPane({
             ) : (
               <span className="h-2 w-2 rounded-full bg-gray-600" />
             )}
-            <span className="font-medium">Agent 原始输出</span>
-            <span className="text-gray-600">{streaming ? '· 生成中' : '· 已结束'}</span>
-            <span className="ml-auto text-gray-600">{showLog ? '收起 ▾' : '展开查看工具调用/思考 ▸'}</span>
+            <span className="font-medium">{t('preview.agentOutput')}</span>
+            <span className="text-gray-600">{streaming ? t('preview.logRunning') : t('preview.logDone')}</span>
+            <span className="ml-auto text-gray-600">{showLog ? t('chat.collapse') : t('preview.logExpand')}</span>
           </button>
           {showLog && (
             <pre

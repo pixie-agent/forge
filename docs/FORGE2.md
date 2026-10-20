@@ -278,6 +278,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 - ~~生成产物迁 R2(仍存 D1 TEXT)~~ → 已转为**计划项**,见 §13(多文件产物的源码树与构建产物走 R2)。
 - Cloud Run 侧做 D1 直连或本地库:持久化一律回 CF。
 - OIDC 双向鉴权、VPC egress 白名单、`--min-instances>0` 常驻预热。
+- **积分计费**:海外预付(一次性充值包 + 按月订阅)。阶段一~四已落地 —— 用量计量、积分账本、冻结结算、多语言(中/英)、计费界面、**接 Creem(MoR)收款 + webhook 发积分**(见 §20)。
 
 ## 11. 当前部署状态(已跑通)
 
@@ -728,3 +729,124 @@ curl -s -X PUT "$BASE/blob" -d x                           # 405(列举只允许
 1. Google Cloud Console 在现有 OAuth 客户端追加回调 URI:`${PUBLIC_BASE_URL}/api/connections/ga4/callback`(staging 与生产各一次)。
 2. 启用 **Analytics Data API**(`analyticsdata.googleapis.com`),否则生成期读数为 403。
 3. GA4 首个 provider 的验收判据:生成的应用统计区块显示**真实 GA 数字**(不是模型编的),且页面上报用的 `G-XXXX` 来自绑定配置。
+
+## 20. 积分与计费:海外预付 + 多语言(2026-10-20)
+
+面向海外用户,**预付屯积分**:注册送一点试用额度,之后靠一次性充值包或按月订阅获得积分。收款走 **MoR(Merchant of Record)—— 已选定 [Creem](https://creem.io)**:平台不持有海外实体、不代收代缴税,Creem 作为记录商户对终端用户开票、收款,并承担税务合规;我们只负责在到账后发积分。
+
+### 20.1 口径
+
+- **单位是「积分」**(credit)。一次生成 = **1 积分**;`generate`(首次生成)与 `chat`(对话修改)同价。价格表就是 `src/lib/credits.ts` 的 `JOB_COST`,调价只改这一处,调用方无需改动。
+- **三个来源**:注册 / Google 首次登录赠送(`SIGNUP_CREDITS = 5`,即 5 次生成)、一次性充值包、按月订阅。赠送额度**显式写入** `users.credits`(见 §20.6),不依赖 `schema.sql` 的列默认值。
+- **失败不收费**:任务失败或用户点「停止」时,把发起时冻结的积分原额退还(前端文案、对话卡片口径都建立在这条承诺上)。
+- 为什么预付而不是按量月结:预付天然是**滥用闸门**(见 §20.2),也把现金流与坏账风险挡在平台之外。
+
+### 20.2 冻结-结算(核心机制,`src/lib/credits.ts`)
+
+- **发起任务时先把积分冻结掉**(`reserveCredits`:一条 `UPDATE ... WHERE credits >= ? RETURNING credits` 的原子条件扣减,并发安全),**成功落定(commit)不再扣分** —— 冻结那一笔就是这次的账。
+- **为什么不在成功时才扣**:冻结同时是**闸门**。否则用户可以拿 0 积分反复发起注定失败的任务,而每个失败任务照样烧掉 LLM 与 Cloud Run 的钱(全局并发闸门只有 Cloud Run 的 `--max-instances`,拦不住这个)。所以闸门只有一处 —— `launchJob` 里的冻结;`generate` / `chat` 路由里**不再做余额预检**(预检与冻结之间隔着一次建任务,两次判断反而给了绕过窗口)。
+- **余额以 `users.credits` 为准**,所有增减都落在一条条件 `UPDATE` 上;`credit_ledger` 是**只追加**的审计流水。极端情况下(扣减成功、写流水前进程消失)会缺一条流水,但余额永远是对的 —— 对账以余额为准、流水为证。
+- **幂等**:唯一索引 `idx_ledger_job_once` 保证同一任务最多一条 `job_hold` 与一条 `job_release`。`releaseJobCredits` 自己从账本查该退多少(没有冻结行、或已退过 → 返回 0),所以调用方只传 `jobId`。三条终态路径(`commitJob` / `markJobFailed` / `cancelJob`)中,后两条在**真的完成状态迁移**(`meta.changes` 为真)时才退还,正常路径下一个任务只会真正退一次。
+
+### 20.3 用量与成本计量
+
+- agent 收尾时(**成功、失败、用户停止三种终态都**)调用 `POST /internal/jobs/:id/usage`,上报 pi 会话累计的 token 与 `runMs`;Worker 侧 `src/lib/pricing.ts` 换算成 `llm_cost_usd` / `gcp_cost_usd`,按 `job_id` **upsert** 进 `job_usage`(幂等,回调重放无害)。
+- **刻意不做 status 守卫**:失败与被停掉的任务同样烧 token 与实例时间,漏记就算不出真实毛利 —— 这正是这次改造要解决的核心问题(在此之前平台完全不知道一次生成花了多少钱)。
+- **`runMs` 取整个请求的耗时**,不是 pi 那一段:Cloud Run 按实例存活时间计费,拷模板、建 pi 会话、平台侧构建都在烧钱。
+- 价格是**快照**,改要注明来源与日期(`pricing.ts` 注释里写了 DeepSeek 的取价档位与来源);**未知模型按 0 记**(宁可少算也不编),staging 的 GLM 未逐项核价故先按 0。已落库的历史成本不重算 —— 需要重算时以 `job_usage` 里的原始 token 为准(用量才是真相)。
+- 用量上报**纯统计**:写不进去只记日志,绝不改变任务终态(agent 侧 `reportUsage` fire-and-forget)。
+
+### 20.4 数据模型(`schema.migrate-billing.sql`,新库见 `schema.sql`)
+
+四张表:`job_usage`(每任务一行真实用量与成本)、`credit_ledger`(只追加账本)、`orders`(结算后的充值订单)、`subscriptions`(订阅状态)。
+已存在的库跑增量迁移,**不要**直接跑 `schema.sql`(会报 `no such column`)。staging / 生产各一次:
+
+```bash
+npm run db:migrate:billing:staging     # staging(前面加 yes |,wrangler 会问确认)
+npm run db:migrate:billing:remote      # 生产
+```
+
+`orders.provider_ref` 的唯一索引(`idx_orders_provider_ref`)是 **webhook 幂等的唯一依据**:支付平台重放通知是常态,靠数据库挡掉。
+
+### 20.5 多语言(中 / 英)
+
+- **前端**:自研极简 i18n(`web/src/lib/i18n/`),**不引第三方库**。两份同构字典 `dict.zh.ts` / `dict.en.ts`,**键名是唯一契约** —— 加一门语言 = 新增一份 `Record<DictKey, string>` 字典 + 在 `DICTS` / `LANG_OPTIONS` 各加一行,**组件一行都不用改**;`en` 用 `Record<DictKey, string>` 类型约束,漏译一个键就是编译错误。默认语言按浏览器(中文→中文,其余一律英文),`localStorage['forge-lang']` 记忆。`LangToggle` 是单键切换(显示对方语言简称)。
+- **服务端**:Worker **只返回中文原文**(它的用户就是中文运营/开发场景),前端在 `web/src/lib/i18n/serverMessages.ts` 把中文文案映射到词典键;映射不中时**原样透出中文** —— 宁可露出中文,也不要吞掉真实原因。之所以不是「服务端直接返回 code」,是因为那要改 50+ 处 return,收益只是少一张表;新接口想更干净可以直接在响应里带 `code`。
+- **Worker 侧另有一份** `src/lib/i18n.ts`:只为**直接写进 D1 的文案**服务(附件的 📎 清单标记、commit 的 assistant 消息)。它和前端那份**不共享模块** —— 两者是两个独立构建产物(共用的是 `web/dist`,不是源码)。
+- 环境差异只能来自运行时配置(见 §2 与 AGENTS.md),**禁用构建期变量**,所以语言只能在运行时选,不能按环境打两份包。
+- **覆盖面**:除 `/admin` 六个页面(刻意保持中文,面向中文运营)外的**全部用户可见文案**都已进词典 —— 首页 / 登录 / 项目列表 / 工作台(对话栏、预览区、连接器面板与对话内凭证卡片、数据面板、代码视图)/ 计费页 / 顶栏 / 主题与环境角标。判断标准是「渲染给用户的字」;代码注释、`console`、SQL 里的列名不进词典。
+- **带行内格式的词条**(`**加粗**`、`` `代码` ``)用 `web/src/components/RichText.tsx` 渲染 —— 它只处理这两种标记、不递归,把标记解析成 React 元素而**不是** `dangerouslySetInnerHTML`。纯文本词条直接 `t()` 就行,不必套这层;漏写标记只会丢样式、不会丢内容。列表连接符同理走词条(`chat.listSep`,中文「、」/ 英文「, 」),不要写死分隔符。
+
+### 20.6 界面与接口(阶段四:Creem 已接通)
+
+| 接口 | 鉴权 | 说明 |
+| --- | --- | --- |
+| `GET /api/billing/plans` | 公开 | 价目表(货币、单位价、充值包、订阅档)+ `checkoutReady`(支付通道是否已配置) |
+| `GET /api/billing/summary` | 需登录 | 本人余额 + 最近账本流水 + 订单记录 |
+| `POST /api/billing/checkout` | 需登录 | 发起结账:校验商品 → 调 Creem 建结账会话 → 返回 `{ url }`,前端跳转 |
+| `POST /api/billing/webhook` | **公开**(签名校验) | Creem 回调:落 `orders` + `credit_ledger`(`purchase`)并加积分 |
+
+- **价格的唯一来源是 `src/lib/plans.ts`**(结构化数字,不含任何自然语言);前端从 `/api/billing/plans` 拉,**不复制一份**。文案(档位卖点)在前端 i18n 里按 id 组装,加语言不必动服务端。
+#### 定价(2026-10-20 定稿,`src/lib/plans.ts` 是唯一来源)
+
+**1 积分 = 1 次生成/修改**(`JOB_COST` 全为 1),所以每个档位的积分数就是「能做多少次」。
+
+| 档位 | 价格 | 积分(= 生成次数) | 单价 |
+| --- | --- | --- | --- |
+| pack_20 | $9 | 20 | $0.450 / 次 |
+| pack_60 | $25 | 60 | $0.417 / 次 |
+| pack_200 | $79 | 200 | $0.395 / 次 |
+| Plus(月) | $19 | 50 / 月 | $0.380 / 次 |
+| Pro(月) | $49 | 150 / 月 | $0.327 / 次 |
+
+定价依据:单次生成的边际成本 ≈ **$0.06~0.15**(LLM token 按 `src/lib/pricing.ts` 的 DeepSeek 低谷档 + Cloud Run 实例时间),另加 MoR 手续费(Creem 3.9% + $0.40/笔)。**早期按 $0.09/次(100 积分 $9)定过价,那个档位是纯亏的** —— 一次生成的成本就能把整包利润吃光,所以把「每个包给多少积分」下调到与成本匹配,标价不变(用户看到的是「1 积分 = 1 次生成」,心智模型不变)。
+
+- 真实成本以 `job_usage.cost_usd` 的实测分位数校准(字段已就绪,待计量上线后回填)。
+- 注册赠送是**薅羊毛闸门**:`SIGNUP_CREDITS = 5` ≈ $0.3~0.75/假号(旧值 20 是 $1.2~3.0)。
+- **发多少积分一律以本地目录为准**:webhook 只信本地目录,不信上游传的数字;上游金额与本地不一致时只打一条 warn 日志。
+- 改价时**两边都要改**:`src/lib/plans.ts`(权威)+ Creem 后台商品(金额/描述要跟着改或重建商品),否则 webhook 对账口径会漂。
+- 前端页面 `web/src/pages/Billing.tsx`(`/billing`,顶栏积分胶囊是入口):余额卡 + 充值包 + 订阅 + 积分明细 / 订单表;`checkoutReady === false` 时禁用结账按钮并显示说明条(判断来自服务端配置);另有**收款主体披露**——MoR 下用户账单显示的是 Creem 而不是本站,不提前说清楚会增加无理由拒付。
+- 支付完成后 Creem 把用户带回 `/billing?checkout=success`,本页提示「积分通常几秒内到账」并重新拉一次余额(积分由 webhook 落账,与前端跳转是两条独立路径)。
+- **公开价格与法务页面(Creem 账户复审要求)**:`/pricing`、`/privacy`、`/terms`、`/acceptable-use` 都是**无需登录**的公开路由(SPA 兜底直接命中);首页 `Landing` 也直接展示充值包/订阅价格,审核员不注册账号即可看到。`PublicFooter` 同时出现在首页与注册页,链接三份文档并展示支持邮箱。支持邮箱唯一来源是 `web/src/lib/site.ts` 的 `SUPPORT_EMAIL`,**必须与 Creem 店铺 business details 里填写的邮箱完全一致**;AUP 中保留「色情/成人/NSFW 内容明确禁止」条款。
+
+### 20.7 Creem 接入(阶段四)
+
+**结账**:`POST {CREEM_API_BASE}/v1/checkouts`,`x-api-key: CREEM_API_KEY`,body = `{ product_id, request_id, success_url, customer: { email } }`;响应 `checkout_url` 即跳转地址(`src/lib/creem.ts` 的 `creemCreateCheckout`)。
+
+**幂等**:唯一屏障是 `orders` 的唯一索引 `idx_orders_provider_ref(provider, provider_ref)`。`settlePayment` 先 `INSERT ... ON CONFLICT DO NOTHING` 落单,**插入成功才加积分**;重放(支付平台重发是常态)直接返回、不重复加分。刻意**不用事件 id** 做幂等 —— Creem 的自动重试与人工重发语义不同,订单/交易 id 才是钱的标识。
+
+**事件处理**(`handleCreemEvent`,见 `src/lib/creem.ts` 文件头):
+
+| 事件 | 处理 |
+| --- | --- |
+| `checkout.completed` | **只处理一次性商品**(`product.billing_type === 'onetime'`)→ 按 Creem 订单 id 落单 + 发积分 |
+| `subscription.paid` | 订阅**每次成功扣款**(首期 + 续费)都发积分,按交易 id(`tran_...`)落单;只信这一条,避免首期被发两次 |
+| `subscription.active` / `canceled` / `scheduled_cancel` / `past_due` / `unpaid` / `expired` / `paused` / `update` / `trialing` | 只更新 `subscriptions` 状态,**不发积分、不回收已发积分** |
+| `refund.created` | 订单置 `refunded`;余额够则追回该单发的积分(记 `refund` 流水),不够就只记订单、不把余额打成负数 |
+| 其它 | 直接 200 忽略 |
+
+- **为什么订阅首期只认 `subscription.paid`**:首期会同时收到 `checkout.completed`(recurring)、`subscription.active` 与 `subscription.paid` 三条,且它们的对象 id 不同;若都发积分,同一笔钱会发三次。Creem 官方亦建议用 `subscription.paid` 激活权益。
+- **归因**:优先用创建结账时写入的 `metadata.forgeUserId`,兜底按买家邮箱匹配本地账号(用户在 Creem 门店页直接下单时只有邮箱可用)。
+- **签名**:`creem-signature` 头 = `HMAC-SHA256(原始请求体, CREEM_WEBHOOK_SECRET)` 的 hex。必须用**未解析的原始 body** 计算(解析后重新序列化会因空格/键序变化而校验失败),比较用定长比较。校验失败返回 401。处理抛错返回 500 → Creem 按退避重试(5 次:立即 / 30s / 5min / 30min / 6h,24h 内)。
+- **不落 pending 订单**:Creem 结账会话会过期,预落 pending 行只会在用户放弃支付后留下永远不结的脏数据;订单一律在 webhook 结算时落。
+
+**配置(环境差异全部走运行时,见 §2 / AGENTS.md)**:
+
+| 名称 | 形式 | 生产 | staging |
+| --- | --- | --- | --- |
+| `CREEM_API_KEY` | Worker secret | live key | test(sandbox)key |
+| `CREEM_WEBHOOK_SECRET` | Worker secret | live webhook secret | test webhook secret |
+| `CREEM_API_BASE` | `vars` | `https://api.creem.io` | `https://test-api.creem.io` |
+| `CREEM_PRODUCTS` | `vars`(JSON) | 本地目录 id → live 商品 id | → test 商品 id |
+
+- **webhook 端点**登记地址:`生产 https://app.1forgen.site/api/billing/webhook`、`staging https://app-staging.1forgen.site/api/billing/webhook`。
+- **staging 已配齐(2026-10-20)**:5 个 test 商品 + webhook 端点用 Creem CLI(`brew install creem` → `creem login --api-key creem_test_...`)建好,商品 id 已写进 `wrangler.jsonc` 的 `env.staging.vars.CREEM_PRODUCTS`;两个 secret 已 `wrangler secret put --env staging`。批量建商品的脚本是 `scripts/creem-seed-products.mjs`(幂等,带 `Idempotency-Key`;`npm run creem:seed:test` / `creem:seed:live`),live 上线时换 live key 重跑一遍即可。
+- 密钥**只写不可读**(换环境只能由持有原值的人重新输入,见 AGENTS.md §1)。
+- `CREEM_PRODUCTS` 留空 = 结账返回「商品未配置」、前端显示「支付通道未开通」;建好商品后填真值,无需重新部署代码(改了 vars 要重新 `deploy`/`deploy:staging`)。
+- **Cloudflare 侧注意**:机器人防护可能拦截 webhook(自动化的服务器间请求)。别用来源 IP 白名单鉴权(Creem 不提供固定出网 IP);若开了 Bot Fight Mode 需为该路由加例外(`docs.creem.io/code/webhooks` 有说明)。
+
+### 20.8 阶段规划(后续)
+
+- 待定稿:订阅到期与降级策略(当前取消不回收已发积分)、退款政策细节。
+- 用户需自备:Creem 账号与商品创建(平台方注册,与用户无关)、webhook 端点登记、`CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET` 写入。
+- 可选增强:计费页展示订阅状态(数据已在 `subscriptions` 表)、客户自助门户链接(Creem hosted customer portal)、发票下载入口。

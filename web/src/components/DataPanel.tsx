@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { formatFullTime } from '../lib/format'
+import { useT, type DictKey } from '../lib/i18n'
 import type { BlobObjectMeta, KvKeyMeta, SiteDataEnv, SqlObject, SqlResult } from '../lib/types'
 
 /**
@@ -13,25 +14,29 @@ import type { BlobObjectMeta, KvKeyMeta, SiteDataEnv, SqlObject, SqlResult } fro
  */
 type Kind = 'kv' | 'blob' | 'sql'
 
-const ENVS: { key: SiteDataEnv; label: string; hint: string }[] = [
-  { key: 'draft', label: '测试环境', hint: '编辑器预览里交互产生的数据,不影响线上' },
-  { key: 'live', label: '线上环境', hint: '发布后访客在公开页产生的数据' },
+/** 环境/类型标签只存词条键,渲染时才取文本(切语言时按钮文字跟着变) */
+const ENVS: { key: SiteDataEnv; labelKey: DictKey; hintKey: DictKey }[] = [
+  { key: 'draft', labelKey: 'env.test', hintKey: 'data.env.draftHint' },
+  { key: 'live', labelKey: 'env.liveLabel', hintKey: 'data.env.liveHint' },
 ]
-const KINDS: { key: Kind; label: string }[] = [
-  { key: 'kv', label: '键值' },
-  { key: 'blob', label: '对象' },
+const KINDS: { key: Kind; labelKey?: DictKey; label?: string }[] = [
+  { key: 'kv', labelKey: 'data.kind.kv' },
+  { key: 'blob', labelKey: 'data.kind.blob' },
   { key: 'sql', label: 'SQL' },
 ]
 
 export default function DataPanel({ projectId }: { projectId: string }) {
+  const t = useT()
   const [env, setEnv] = useState<SiteDataEnv>('live')
   const [kind, setKind] = useState<Kind>('kv')
   const [error, setError] = useState('')
-  const hint = ENVS.find((e) => e.key === env)?.hint ?? ''
+  const hintKey = ENVS.find((e) => e.key === env)?.hintKey
   const hintText =
     kind === 'sql'
-      ? `在「${env === 'draft' ? '测试' : '线上'}」环境的独立 SQLite 库上执行,与另一环境、其它项目互不影响`
-      : hint
+      ? t('data.sqlHint', { env: env === 'draft' ? t('env.testShort') : t('env.live') })
+      : hintKey
+        ? t(hintKey)
+        : ''
 
   return (
     <div className="mx-auto max-w-3xl p-0 md:p-4">
@@ -43,7 +48,7 @@ export default function DataPanel({ projectId }: { projectId: string }) {
               onClick={() => setEnv(e.key)}
               className={`rounded-md px-3 py-1.5 ${env === e.key ? 'bg-gray-700 text-gray-100' : 'text-gray-400 hover:text-gray-200'}`}
             >
-              {e.label}
+              {t(e.labelKey)}
             </button>
           ))}
         </div>
@@ -54,7 +59,7 @@ export default function DataPanel({ projectId }: { projectId: string }) {
               onClick={() => setKind(k.key)}
               className={`rounded-md px-3 py-1.5 ${kind === k.key ? 'bg-gray-700 text-gray-100' : 'text-gray-400 hover:text-gray-200'}`}
             >
-              {k.label}
+              {k.labelKey ? t(k.labelKey) : k.label}
             </button>
           ))}
         </div>
@@ -71,6 +76,7 @@ export default function DataPanel({ projectId }: { projectId: string }) {
 // ---------- 键值(KV) ----------
 
 function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataEnv; onError: (m: string) => void }) {
+  const t = useT()
   const [keys, setKeys] = useState<KvKeyMeta[]>([])
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<string | null>(null)
@@ -113,7 +119,7 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
     try {
       value = JSON.parse(text)
     } catch {
-      onError('值必须是合法 JSON(字符串需加引号)')
+      onError(t('data.jsonInvalid'))
       return
     }
     setSaving(true)
@@ -130,7 +136,7 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
   }
 
   async function remove(key: string) {
-    if (!confirm(`删除键「${key}」?`)) return
+    if (!confirm(t('data.confirmDeleteKey', { key }))) return
     try {
       await api(`/api/projects/${projectId}/kv/${encodeURIComponent(key)}?env=${env}`, { method: 'DELETE' })
       if (selected === key) {
@@ -151,7 +157,7 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
   function confirmCreate() {
     const key = newKey.trim()
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(key)) {
-      onError('键名只能包含字母、数字、点、下划线、连字符(1~64 位)')
+      onError(t('data.keyNameInvalid'))
       return
     }
     setCreating(false)
@@ -160,7 +166,7 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
     setSaved(false)
   }
 
-  if (loading) return <div className="text-sm text-gray-500">加载中…</div>
+  if (loading) return <div className="text-sm text-gray-500">{t('common.loading')}</div>
 
   return (
     <div className="flex flex-col gap-4 md:flex-row">
@@ -169,7 +175,7 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
           onClick={startCreate}
           className="mb-1 w-full rounded-lg border border-dashed border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:border-gray-600 hover:text-gray-200"
         >
-          + 新建键
+          {t('data.newKey')}
         </button>
         {creating && (
           <div className="space-y-1 rounded-lg border border-gray-700 p-2">
@@ -181,21 +187,21 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
                 if (e.key === 'Enter') confirmCreate()
                 if (e.key === 'Escape') setCreating(false)
               }}
-              placeholder="键名"
+              placeholder={t('data.keyName')}
               className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1 font-mono text-xs outline-none focus:border-indigo-500"
             />
             <div className="flex gap-1">
               <button onClick={confirmCreate} className="flex-1 rounded bg-indigo-600 px-2 py-1 text-xs text-white hover:bg-indigo-500">
-                确定
+                {t('common.confirm')}
               </button>
               <button onClick={() => setCreating(false)} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-400">
-                取消
+                {t('common.cancel')}
               </button>
             </div>
           </div>
         )}
         {keys.length === 0 ? (
-          <div className="px-3 py-2 text-xs text-gray-600">该环境下暂无键值</div>
+          <div className="px-3 py-2 text-xs text-gray-600">{t('data.noKeys')}</div>
         ) : (
           keys.map((k) => (
             <div
@@ -207,7 +213,7 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
               <button onClick={() => open(k.key)} className="min-w-0 flex-1 truncate text-left font-mono text-xs" title={k.key}>
                 {k.key}
               </button>
-              <button onClick={() => remove(k.key)} className="ml-1 shrink-0 text-red-400/60 opacity-0 hover:text-red-400 group-hover:opacity-100" title="删除">
+              <button onClick={() => remove(k.key)} className="ml-1 shrink-0 text-red-400/60 opacity-0 hover:text-red-400 group-hover:opacity-100" title={t('common.delete')}>
                 ✕
               </button>
             </div>
@@ -222,13 +228,13 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
                 {selected}
               </span>
               <div className="flex items-center gap-2">
-                {saved && <span className="text-xs text-emerald-400">已保存</span>}
+                {saved && <span className="text-xs text-emerald-400">{t('data.saved')}</span>}
                 <button
                   onClick={save}
                   disabled={saving}
                   className="rounded-lg bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
                 >
-                  {saving ? '保存中…' : '保存'}
+                  {saving ? t('common.saving') : t('common.save')}
                 </button>
               </div>
             </div>
@@ -236,13 +242,13 @@ function KvView({ projectId, env, onError }: { projectId: string; env: SiteDataE
               value={text}
               onChange={(e) => setText(e.target.value)}
               spellCheck={false}
-              placeholder='JSON 值,例如 {"count": 1} 或 "文本"'
+              placeholder={t('data.valuePlaceholder')}
               className="h-64 w-full resize-y rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs leading-5 text-gray-200 outline-none focus:border-indigo-500"
             />
-            <div className="mt-1 text-xs text-gray-600">值以 JSON 保存;要存纯文本请用引号包裹,如 "hello"</div>
+            <div className="mt-1 text-xs text-gray-600">{t('data.valueHint')}</div>
           </>
         ) : (
-          <div className="rounded-xl border border-dashed border-gray-700 p-6 text-center text-xs text-gray-500">选择左侧键查看/编辑值</div>
+          <div className="rounded-xl border border-dashed border-gray-700 p-6 text-center text-xs text-gray-500">{t('data.pickKey')}</div>
         )}
       </div>
     </div>
@@ -267,6 +273,7 @@ function formatBytes(n: number): string {
 }
 
 function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDataEnv; onError: (m: string) => void }) {
+  const t = useT()
   const [objects, setObjects] = useState<BlobObjectMeta[]>([])
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<string | null>(null)
@@ -303,7 +310,7 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
       setPreviewLoading(true)
       try {
         const res = await fetch(contentUrl(key))
-        setTextPreview(res.ok ? await res.text() : `读取失败(${res.status})`)
+        setTextPreview(res.ok ? await res.text() : t('data.readFailed', { status: res.status }))
       } catch (err) {
         setTextPreview((err as Error).message)
       } finally {
@@ -313,7 +320,7 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
   }
 
   async function remove(key: string) {
-    if (!confirm(`删除对象「${key}」?`)) return
+    if (!confirm(t('data.confirmDeleteObject', { key }))) return
     try {
       await api(`/api/projects/${projectId}/blob/content?env=${env}&key=${encodeURIComponent(key)}`, { method: 'DELETE' })
       if (selected === key) {
@@ -335,7 +342,7 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
         body: file,
       })
       if (!res.ok) {
-        let msg = `上传失败(${res.status})`
+        let msg = t('data.uploadFailed', { status: res.status })
         try {
           const data = (await res.json()) as { error?: string }
           if (data.error) msg = data.error
@@ -352,7 +359,7 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
     }
   }
 
-  if (loading) return <div className="text-sm text-gray-500">加载中…</div>
+  if (loading) return <div className="text-sm text-gray-500">{t('common.loading')}</div>
 
   const selectedMeta = objects.find((o) => o.key === selected)
 
@@ -364,7 +371,7 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
             uploading ? 'text-gray-600' : 'text-gray-400 hover:text-gray-200'
           }`}
         >
-          {uploading ? '上传中…' : '+ 上传对象'}
+          {uploading ? t('data.uploading') : t('data.upload')}
           <input
             type="file"
             className="hidden"
@@ -377,7 +384,7 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
           />
         </label>
         {objects.length === 0 ? (
-          <div className="px-3 py-2 text-xs text-gray-600">该环境下暂无对象</div>
+          <div className="px-3 py-2 text-xs text-gray-600">{t('data.noObjects')}</div>
         ) : (
           objects.map((o) => (
             <div
@@ -390,7 +397,7 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
                 <div className="truncate font-mono text-xs">{o.key}</div>
                 <div className="text-[10px] text-gray-600">{formatBytes(o.size)}</div>
               </button>
-              <button onClick={() => remove(o.key)} className="ml-1 shrink-0 text-red-400/60 opacity-0 hover:text-red-400 group-hover:opacity-100" title="删除">
+              <button onClick={() => remove(o.key)} className="ml-1 shrink-0 text-red-400/60 opacity-0 hover:text-red-400 group-hover:opacity-100" title={t('common.delete')}>
                 ✕
               </button>
             </div>
@@ -406,10 +413,10 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
               </span>
               <div className="flex shrink-0 items-center gap-2">
                 <a href={contentUrl(selected, true)} className="rounded-lg border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
-                  ↓ 下载
+                  {t('data.download')}
                 </a>
                 <button onClick={() => remove(selected)} className="rounded-lg border border-red-500/40 px-2 py-1 text-xs text-red-400 hover:bg-red-500/10">
-                  删除
+                  {t('common.delete')}
                 </button>
               </div>
             </div>
@@ -422,7 +429,7 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
               </div>
             ) : TEXT_EXT.has(extOf(selected)) ? (
               previewLoading ? (
-                <div className="text-xs text-gray-500">读取中…</div>
+                <div className="text-xs text-gray-500">{t('data.reading')}</div>
               ) : (
                 <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-xl border border-gray-800 bg-gray-950 p-3 font-mono text-xs leading-5 text-gray-300">
                   {textPreview}
@@ -430,12 +437,12 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
               )
             ) : (
               <div className="rounded-xl border border-dashed border-gray-700 p-6 text-center text-xs text-gray-500">
-                该类型不支持在线预览,请点「下载」查看
+                {t('data.noPreview')}
               </div>
             )}
           </>
         ) : (
-          <div className="rounded-xl border border-dashed border-gray-700 p-6 text-center text-xs text-gray-500">选择左侧对象查看/下载</div>
+          <div className="rounded-xl border border-dashed border-gray-700 p-6 text-center text-xs text-gray-500">{t('data.pickObject')}</div>
         )}
       </div>
     </div>
@@ -443,17 +450,6 @@ function BlobView({ projectId, env, onError }: { projectId: string; env: SiteDat
 }
 
 // ---------- SQL(项目级 SQLite 控制台) ----------
-
-const SQL_TEMPLATE = `-- 在这里写任意 SQLite:建表、建索引、查询都行
-CREATE TABLE IF NOT EXISTS notes (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  title      TEXT NOT NULL,
-  done       INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_notes_done ON notes(done);
-INSERT INTO notes (title) VALUES ('试试查询我');
-SELECT * FROM notes LIMIT 100;`
 
 function cellText(v: unknown): string {
   if (v === null || v === undefined) return 'NULL'
@@ -489,6 +485,7 @@ function TableGrid({
   table: string
   onChanged: () => void
 }) {
+  const t = useT()
   const [columns, setColumns] = useState<string[]>([])
   const [rows, setRows] = useState<Record<string, unknown>[]>([])
   const [total, setTotal] = useState(0)
@@ -591,7 +588,7 @@ function TableGrid({
   }
 
   async function deleteRow(rowid: string | number) {
-    if (busy || !window.confirm('确定删除这一行?')) return
+    if (busy || !window.confirm(t('data.confirmDeleteRow'))) return
     setBusy(true)
     setErr('')
     try {
@@ -611,14 +608,14 @@ function TableGrid({
     <div className="min-w-0 flex-1">
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <span className="font-mono text-xs text-gray-300">{table}</span>
-        <span className="text-xs text-gray-600">共 {total} 行</span>
+        <span className="text-xs text-gray-600">{t('data.rowCount', { count: total })}</span>
         <div className="ml-auto flex items-center gap-1.5">
           <button
             onClick={() => void load()}
             disabled={busy || loading}
             className="rounded-lg border border-gray-700 px-2.5 py-1 text-xs text-gray-400 hover:text-gray-200 disabled:opacity-40"
           >
-            刷新
+            {t('common.refresh')}
           </button>
           <button
             onClick={() => {
@@ -628,33 +625,33 @@ function TableGrid({
             disabled={busy || adding}
             className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
           >
-            新增行
+            {t('data.addRow')}
           </button>
         </div>
       </div>
-      {!withRowid && <div className="mb-2 text-xs text-amber-500/80">该表没有 rowid,只能浏览,不能就地编辑/删除</div>}
+      {!withRowid && <div className="mb-2 text-xs text-amber-500/80">{t('data.noRowid')}</div>}
       {err && <div className="mb-2 rounded-lg bg-red-500/10 px-3 py-2 font-mono text-xs text-red-400">{err}</div>}
 
       {loading ? (
-        <div className="px-1 py-3 text-xs text-gray-600">加载中…</div>
+        <div className="px-1 py-3 text-xs text-gray-600">{t('common.loading')}</div>
       ) : (
         <div className="max-h-[26rem] overflow-auto rounded-xl border border-gray-800">
           <table className="w-full border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-gray-900">
               <tr>
-                <th className="border-b border-gray-700 px-3 py-1.5 text-left text-[10px] font-medium text-gray-500">行</th>
+                <th className="border-b border-gray-700 px-3 py-1.5 text-left text-[10px] font-medium text-gray-500">{t('data.colRow')}</th>
                 {columns.map((col) => (
                   <th key={col} className="whitespace-nowrap border-b border-gray-700 px-3 py-1.5 text-left font-mono font-medium text-gray-300">
                     {col}
                   </th>
                 ))}
-                {withRowid && <th className="border-b border-gray-700 px-3 py-1.5 text-right font-medium text-gray-500">操作</th>}
+                {withRowid && <th className="border-b border-gray-700 px-3 py-1.5 text-right font-medium text-gray-500">{t('data.colActions')}</th>}
               </tr>
             </thead>
             <tbody>
               {adding && (
                 <tr className="bg-indigo-500/5">
-                  <td className="border-b border-gray-800 px-3 py-1 text-[10px] text-indigo-400">新</td>
+                  <td className="border-b border-gray-800 px-3 py-1 text-[10px] text-indigo-400">{t('data.newBadge')}</td>
                   {columns.map((col) => (
                     <td key={col} className="border-b border-gray-800 px-2 py-0.5">
                       <input
@@ -667,7 +664,7 @@ function TableGrid({
                   ))}
                   <td className="whitespace-nowrap border-b border-gray-800 px-3 py-0.5 text-right">
                     <button onClick={() => void submitInsert()} disabled={busy} className="text-xs text-emerald-400 hover:text-emerald-300 disabled:opacity-40">
-                      保存
+                      {t('common.save')}
                     </button>
                     <button
                       onClick={() => {
@@ -676,7 +673,7 @@ function TableGrid({
                       }}
                       className="ml-2 text-xs text-gray-500 hover:text-gray-300"
                     >
-                      取消
+                      {t('common.cancel')}
                     </button>
                   </td>
                 </tr>
@@ -684,7 +681,7 @@ function TableGrid({
               {rows.length === 0 && !adding && (
                 <tr>
                   <td colSpan={columns.length + 2} className="px-3 py-6 text-center text-xs text-gray-600">
-                    这张表还没有数据
+                    {t('data.tableEmpty')}
                   </td>
                 </tr>
               )}
@@ -742,7 +739,7 @@ function TableGrid({
                           disabled={busy}
                           className="text-xs text-red-400/80 hover:text-red-300 disabled:opacity-40"
                         >
-                          删除
+                          {t('common.delete')}
                         </button>
                       </td>
                     )}
@@ -761,7 +758,7 @@ function TableGrid({
             disabled={page <= 0 || busy}
             className="rounded-lg border border-gray-700 px-3 py-1 text-gray-400 disabled:opacity-30"
           >
-            上一页
+            {t('data.prevPage')}
           </button>
           <span className="text-gray-500">
             {page + 1} / {pages}
@@ -771,7 +768,7 @@ function TableGrid({
             disabled={page >= pages - 1 || busy}
             className="rounded-lg border border-gray-700 px-3 py-1 text-gray-400 disabled:opacity-30"
           >
-            下一页
+            {t('data.nextPage')}
           </button>
         </div>
       )}
@@ -780,11 +777,12 @@ function TableGrid({
 }
 
 function SqlView({ projectId, env }: { projectId: string; env: SiteDataEnv }) {
+  const t = useT()
   const [objects, setObjects] = useState<SqlObject[]>([])
   const [loadingSchema, setLoadingSchema] = useState(true)
   const [selected, setSelected] = useState<string | null>(null)
   const [mode, setMode] = useState<'table' | 'sql'>('sql')
-  const [sqlText, setSqlText] = useState(SQL_TEMPLATE)
+  const [sqlText, setSqlText] = useState(() => t('data.sqlTemplate'))
   const [result, setResult] = useState<SqlResult | null>(null)
   const [err, setErr] = useState('')
   const [running, setRunning] = useState(false)
@@ -832,7 +830,7 @@ function SqlView({ projectId, env }: { projectId: string; env: SiteDataEnv }) {
   function loadSelect(name: string) {
     setSqlText(`SELECT * FROM "${name}" LIMIT 100;`)
     setMode('sql')
-    setMsg(`已载入「${name}」的查询,点「运行」查看`)
+    setMsg(t('data.loaded', { name }))
   }
 
   const tables = objects.filter((o) => o.type === 'table')
@@ -842,15 +840,15 @@ function SqlView({ projectId, env }: { projectId: string; env: SiteDataEnv }) {
     <div className="flex flex-col gap-4 md:flex-row">
       <div className="max-h-56 w-full shrink-0 space-y-1 overflow-auto md:max-h-none md:w-48">
         <div className="mb-1 flex items-center justify-between px-1">
-          <span className="text-xs text-gray-500">库结构</span>
+          <span className="text-xs text-gray-500">{t('data.schema')}</span>
           <button onClick={loadSchema} className="text-xs text-gray-500 hover:text-gray-300">
-            刷新
+            {t('common.refresh')}
           </button>
         </div>
         {loadingSchema ? (
-          <div className="px-3 py-2 text-xs text-gray-600">加载中…</div>
+          <div className="px-3 py-2 text-xs text-gray-600">{t('common.loading')}</div>
         ) : objects.length === 0 ? (
-          <div className="px-3 py-2 text-xs text-gray-600">还没有表,直接写 SQL 建一个</div>
+          <div className="px-3 py-2 text-xs text-gray-600">{t('data.noTables')}</div>
         ) : (
           <>
             {tables.map((o) => (
@@ -869,7 +867,7 @@ function SqlView({ projectId, env }: { projectId: string; env: SiteDataEnv }) {
                 <span className="ml-2 shrink-0 rounded-full bg-gray-700 px-2 py-0.5 text-[10px] text-gray-300">{o.count ?? 0}</span>
                 <button
                   onClick={() => loadSelect(o.name)}
-                  title="在 SQL 编辑器中打开"
+                  title={t('data.openInSql')}
                   className="mx-1 shrink-0 rounded px-1 text-[10px] text-gray-600 hover:text-gray-300"
                 >
                   SQL
@@ -879,7 +877,7 @@ function SqlView({ projectId, env }: { projectId: string; env: SiteDataEnv }) {
             {others.map((o) => (
               <div key={`${o.type}-${o.name}`} className="flex items-center justify-between px-3 py-1 text-gray-600">
                 <span className="min-w-0 truncate font-mono text-[11px]">{o.name}</span>
-                <span className="ml-2 shrink-0 text-[10px]">{o.type === 'index' ? '索引' : o.type === 'view' ? '视图' : '触发器'}</span>
+                <span className="ml-2 shrink-0 text-[10px]">{o.type === 'index' ? t('data.index') : o.type === 'view' ? t('data.view') : t('data.trigger')}</span>
               </div>
             ))}
           </>
@@ -893,23 +891,23 @@ function SqlView({ projectId, env }: { projectId: string; env: SiteDataEnv }) {
               disabled={!selected}
               className={`rounded-md px-2.5 py-1 ${mode === 'table' ? 'bg-gray-700 text-gray-100' : 'text-gray-400 hover:text-gray-200'} disabled:opacity-40`}
             >
-              表数据
+              {t('data.tabTable')}
             </button>
             <button
               onClick={() => setMode('sql')}
               className={`rounded-md px-2.5 py-1 ${mode === 'sql' ? 'bg-gray-700 text-gray-100' : 'text-gray-400 hover:text-gray-200'}`}
             >
-              SQL 编辑器
+              {t('data.tabSql')}
             </button>
           </div>
-          <span className="text-xs text-gray-500">在「{env === 'draft' ? '测试' : '线上'}」环境的独立 SQLite 上执行</span>
+          <span className="text-xs text-gray-500">{t('data.sqlScope', { env: env === 'draft' ? t('env.testShort') : t('env.live') })}</span>
           {mode === 'sql' && (
             <button
               onClick={run}
               disabled={running || !sqlText.trim()}
               className="ml-auto shrink-0 rounded-lg bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
             >
-              {running ? '执行中…' : '运行 ⌘/Ctrl+↵'}
+              {running ? t('data.running') : t('data.run')}
             </button>
           )}
         </div>
@@ -917,7 +915,7 @@ function SqlView({ projectId, env }: { projectId: string; env: SiteDataEnv }) {
           selected ? (
             <TableGrid projectId={projectId} env={env} table={selected} onChanged={loadSchema} />
           ) : (
-            <div className="px-1 py-3 text-xs text-gray-600">从左侧选择一张表,直接查看和编辑它的数据</div>
+            <div className="px-1 py-3 text-xs text-gray-600">{t('data.pickTable')}</div>
           )
         ) : (
           <>
@@ -939,10 +937,15 @@ function SqlView({ projectId, env }: { projectId: string; env: SiteDataEnv }) {
         {result && (
           <div className="mt-3">
             <div className="mb-1 text-xs text-gray-600">
-              返回 {result.rows.length} 行 · 读 {result.rowsRead} · 写 {result.rowsWritten} · {result.durationMs}ms
+              {t('data.resultMeta', {
+                rows: result.rows.length,
+                read: result.rowsRead,
+                written: result.rowsWritten,
+                ms: result.durationMs,
+              })}
             </div>
             {result.columns.length === 0 ? (
-              <div className="rounded-xl border border-gray-800 bg-gray-950 p-3 text-xs text-emerald-400">执行成功(无返回行)</div>
+              <div className="rounded-xl border border-gray-800 bg-gray-950 p-3 text-xs text-emerald-400">{t('data.okNoRows')}</div>
             ) : (
               <div className="max-h-96 overflow-auto rounded-xl border border-gray-800">
                 <table className="w-full border-collapse text-xs">

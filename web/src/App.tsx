@@ -3,6 +3,9 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Projects from './pages/Projects'
+import Billing from './pages/Billing'
+import Pricing from './pages/Pricing'
+import Legal from './pages/Legal'
 import Workspace from './pages/Workspace'
 import AdminLogin from './pages/AdminLogin'
 import AdminProjects from './pages/AdminProjects'
@@ -10,6 +13,7 @@ import AdminProject from './pages/AdminProject'
 import AdminUsers from './pages/AdminUsers'
 import AdminUser from './pages/AdminUser'
 import { api } from './lib/api'
+import { useT } from './lib/i18n'
 import type { User } from './lib/types'
 
 interface AuthState {
@@ -53,6 +57,11 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Landing />} />
           <Route path="/login" element={<Login />} />
+          {/* 公开法务/价格页:Creem 账户复审要求无需登录即可访问 */}
+          <Route path="/pricing" element={<Pricing />} />
+          <Route path="/terms" element={<Legal doc="terms" />} />
+          <Route path="/privacy" element={<Legal doc="privacy" />} />
+          <Route path="/acceptable-use" element={<Legal doc="acceptable" />} />
           <Route
             path="/projects"
             element={
@@ -66,6 +75,14 @@ export default function App() {
             element={
               <Guard>
                 <Workspace />
+              </Guard>
+            }
+          />
+          <Route
+            path="/billing"
+            element={
+              <Guard>
+                <Billing />
               </Guard>
             }
           />
@@ -108,8 +125,9 @@ export default function App() {
 }
 
 function Guard({ children }: { children: ReactNode }) {
+  const t = useT()
   const { user, loading } = useAuth()
-  if (loading) return <div className="flex h-screen items-center justify-center text-sm text-gray-400">加载中…</div>
+  if (loading) return <div className="flex h-screen items-center justify-center text-sm text-gray-400">{t('common.loading')}</div>
   if (!user) return <Navigate to="/login" replace />
   return <>{children}</>
 }

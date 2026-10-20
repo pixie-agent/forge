@@ -1,6 +1,6 @@
 /** 与 Cloudflare Worker 内部接口的通信:进度/心跳上报,以及最终结果的 commit / fail 回调 */
 
-import type { Plan, RunResult, SteerMessage } from './types.js'
+import type { Plan, RunResult, RunUsage, SteerMessage } from './types.js'
 
 export interface ProgressUpdate {
   stage?: 'planning' | 'coding' | 'building'
@@ -185,4 +185,22 @@ export async function reportCommit(callbackBase: string, secret: string, jobId: 
 
 export async function reportFail(callbackBase: string, secret: string, jobId: string, error: string): Promise<void> {
   await post(callbackBase, secret, jobId, 'fail', { error }).catch(() => {})
+}
+
+/**
+ * 用量上报:token 与耗时的真实数字,Worker 侧换算成美元写进 job_usage(见 src/lib/pricing.ts)。
+ * 这是纯统计:重放无害(Worker 按 job_id upsert),失败也只记日志 —— 绝不能因为统计写不进去
+ * 而改变任务的终态。
+ */
+export async function reportUsage(
+  callbackBase: string,
+  secret: string,
+  jobId: string,
+  usage: RunUsage & { runMs: number },
+): Promise<void> {
+  await post(callbackBase, secret, jobId, 'usage', usage)
+    .then((res) => {
+      if (!res.ok) console.error(`[usage] http ${res.status}`)
+    })
+    .catch((err) => console.error(`[usage] ${err instanceof Error ? err.message : String(err)}`))
 }

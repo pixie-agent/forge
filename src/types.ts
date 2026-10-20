@@ -24,6 +24,15 @@ export type Env = {
    *  注意:Worker secret 全局、只写不可读 —— 它装不下 per-user 凭证,所以用户凭证加密后存 D1,
    *  这把密钥只用来加解密;换掉它 = 所有用户连接需重新授权。见 docs/CONNECTORS.md §4/§8 */
   CONNECTOR_KEK?: string
+  /** Creem(MoR)API key(Worker secret `CREEM_API_KEY`)。未设置则结账接口返回明确错误,不影响其他功能。
+   *  生产用 live key、staging 用 test key,各写各的。见 docs/FORGE2.md §20.7 */
+  CREEM_API_KEY?: string
+  /** Creem webhook 签名密钥(Worker secret `CREEM_WEBHOOK_SECRET`):校验 `creem-signature` 头 */
+  CREEM_WEBHOOK_SECRET?: string
+  /** Creem API 基址;生产 https://api.creem.io,staging 用 https://test-api.creem.io(不设则按生产) */
+  CREEM_API_BASE?: string
+  /** 本地目录 id → Creem 商品 ID 的 JSON 映射,如 {"pack_20":"prod_xxx"};两套门店的商品 ID 不同,故走 vars */
+  CREEM_PRODUCTS?: string
   /** 可选:派发到 Cloud Run 的 fetch 超时(毫秒) */
   AGENT_DISPATCH_TIMEOUT_MS?: string
   /** 可选:平台部署环境标记。只有 staging 的 vars 里设成 'staging',生产不设(按 production 处理);

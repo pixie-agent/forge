@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { api } from '../lib/api'
+import { useT, type DictKey } from '../lib/i18n'
+import RichText from './RichText'
 import { ConfigField, SecretField } from './ConnectorFields'
 import type { ConnectorConnection, ProjectConnectorProvider, ProjectConnectorsResponse, SiteDataEnv } from '../lib/types'
 
@@ -12,7 +14,7 @@ interface Props {
   onChanged: () => void | Promise<unknown>
 }
 
-const ENV_LABEL: Record<SiteDataEnv, string> = { draft: '草稿 / 测试环境', live: '线上环境' }
+const ENV_LABEL_KEY: Record<SiteDataEnv, DictKey> = { draft: 'env.draftLabel', live: 'env.liveLabel' }
 
 /**
  * 项目级「连接器」面板(见 docs/CONNECTORS.md §7「完整管理放项目级」)。
@@ -26,6 +28,7 @@ const ENV_LABEL: Record<SiteDataEnv, string> = { draft: '草稿 / 测试环境',
  *   - config → 只有输入框。
  */
 export default function ConnectorsPanel({ projectId, data, onClose, onChanged }: Props) {
+  const t = useT()
   const [env, setEnv] = useState<SiteDataEnv>('draft')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -58,10 +61,10 @@ export default function ConnectorsPanel({ projectId, data, onClose, onChanged }:
       >
         <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
           <div>
-            <h2 className="text-sm font-medium text-gray-100">连接器</h2>
-            <p className="mt-0.5 text-xs text-gray-500">接入外部系统,让 agent 生成时真的用起来(只读的绑定后默认生效;可写的默认不带上,要用时在对话栏点亮)</p>
+            <h2 className="text-sm font-medium text-gray-100">{t('conn.title')}</h2>
+            <p className="mt-0.5 text-xs text-gray-500">{t('conn.panelSubtitle')}</p>
           </div>
-          <button onClick={onClose} aria-label="关闭" className="rounded-lg px-2 py-1 text-gray-400 hover:bg-gray-800 hover:text-gray-200">
+          <button onClick={onClose} aria-label={t('common.close')} className="rounded-lg px-2 py-1 text-gray-400 hover:bg-gray-800 hover:text-gray-200">
             ✕
           </button>
         </div>
@@ -75,7 +78,7 @@ export default function ConnectorsPanel({ projectId, data, onClose, onChanged }:
                 env === e ? 'bg-gray-800 text-gray-100' : 'text-gray-400 hover:text-gray-200'
               }`}
             >
-              {ENV_LABEL[e]}
+              {t(ENV_LABEL_KEY[e])}
               {data && data[e].providers.some((p) => p.binding) && <span className="ml-1.5 text-emerald-400">●</span>}
             </button>
           ))}
@@ -83,10 +86,10 @@ export default function ConnectorsPanel({ projectId, data, onClose, onChanged }:
 
         <div className="max-h-[65vh] space-y-3 overflow-y-auto p-4">
           {!data ? (
-            <p className="py-6 text-center text-sm text-gray-500">加载中…</p>
+            <p className="py-6 text-center text-sm text-gray-500">{t('common.loading')}</p>
           ) : !enabled ? (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
-              连接器未启用{reason ? `:${reason}` : ''}。需在 Worker 上配置 <code className="font-mono">CONNECTOR_KEK</code> 后可用。
+              <RichText text={t('conn.disabled', { reason: reason ? `:${reason}` : '' })} />
             </div>
           ) : (
             current?.providers.map((p) => (
@@ -105,8 +108,7 @@ export default function ConnectorsPanel({ projectId, data, onClose, onChanged }:
         </div>
 
         <div className="border-t border-gray-800 px-4 py-3 text-[11px] leading-relaxed text-gray-500">
-          提醒:绑定到<b className="text-gray-400">线上环境</b>的连接会在访客打开公开页时生效,请确认那是你要用的账号(尤其是收款相关)。
-          你提供的密钥会加密存放,只在本项目生成时交给 agent 使用,不会写进站点产物;可随时在此解绑或撤销。
+          <RichText text={t('conn.panelFooter')} />
         </div>
       </div>
     </div>
@@ -130,6 +132,7 @@ function ProviderRow({
   busy: string
   onMutate: (key: string, fn: () => Promise<unknown>) => Promise<boolean>
 }) {
+  const t = useT()
   const binding = provider.binding
   const [form, setForm] = useState<Record<string, string>>(() => ({ ...(binding?.config ?? {}) }))
   const [secrets, setSecrets] = useState<Record<string, string>>({})
@@ -201,16 +204,24 @@ function ProviderRow({
           <div className="flex items-center gap-1.5">
             <span className="text-sm font-medium text-gray-100">{provider.name}</span>
             <span className={`rounded px-1.5 py-0.5 text-[10px] ${provider.writable ? 'bg-amber-500/15 text-amber-300' : 'bg-gray-800 text-gray-400'}`}>
-              {provider.writable ? '可写' : '只读'}
+              {t(provider.writable ? 'conn.writable' : 'conn.readonly')}
             </span>
             {isOauth && (
               <span className={`rounded px-1.5 py-0.5 text-[10px] ${connected ? 'bg-emerald-500/15 text-emerald-300' : 'bg-gray-800 text-gray-500'}`}>
-                {connected ? `已连接 · ${binding?.accountLabel ?? ''}` : binding?.connectionStatus === 'revoked' ? '授权已撤销' : '未授权'}
+                {connected
+                  ? t('conn.status.connected', { label: binding?.accountLabel ?? '' })
+                  : binding?.connectionStatus === 'revoked'
+                    ? t('conn.status.revoked')
+                    : t('conn.status.unauthorized')}
               </span>
             )}
             {isApiKey && (
               <span className={`rounded px-1.5 py-0.5 text-[10px] ${connected ? 'bg-emerald-500/15 text-emerald-300' : 'bg-gray-800 text-gray-500'}`}>
-                {connected ? `已保存密钥 · ${binding?.accountLabel ?? ''}` : binding ? '待上传密钥' : '未接入'}
+                {connected
+                  ? t('conn.status.keySaved', { label: binding?.accountLabel ?? '' })
+                  : binding
+                    ? t('conn.status.awaitKey')
+                    : t('conn.status.notConnected')}
               </span>
             )}
           </div>
@@ -221,34 +232,34 @@ function ProviderRow({
             <button
               onClick={connect}
               disabled={provider.needsOauthClient}
-              title={provider.needsOauthClient ? '平台未配置该连接器的 OAuth 客户端' : '跳转到外部授权页'}
+              title={provider.needsOauthClient ? t('conn.noOauthClient') : t('conn.oauthJump')}
               className="rounded-lg bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
             >
-              连接
+              {t('conn.action.connect')}
             </button>
           )}
           {isOauth && connected && (
-            <button onClick={connect} title="换一个账号重新授权" className="rounded-lg border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800">
-              换账号
+            <button onClick={connect} title={t('conn.action.reconnectTitle')} className="rounded-lg border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800">
+              {t('conn.action.reconnect')}
             </button>
           )}
           {isApiKey && connected && !editing && (
             <button
               onClick={() => setEditing(true)}
-              title="重新粘贴密钥(同一名称会覆盖原来的密钥,用于轮换)"
+              title={t('conn.action.reuploadTitle')}
               className="rounded-lg border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800"
             >
-              重新上传
+              {t('conn.action.reupload')}
             </button>
           )}
           {binding && (
             <button
               onClick={unbind}
               disabled={busyThis}
-              title="仅从本项目解绑;账号级连接保留,其他项目不受影响"
+              title={t('conn.action.unbindTitle')}
               className="rounded-lg border border-gray-700 px-2.5 py-1 text-xs text-gray-400 hover:border-red-500/50 hover:text-red-300 disabled:opacity-40"
             >
-              解绑
+              {t('conn.action.unbind')}
             </button>
           )}
         </div>
@@ -257,8 +268,7 @@ function ProviderRow({
       {isOauth && !connected && provider.redirectUri && (
         <div className="mt-2 rounded-lg border border-amber-500/25 bg-amber-500/5 px-2.5 py-2">
           <p className="text-[11px] leading-relaxed text-amber-200/90">
-            授权页报 <code className="font-mono">redirect_uri_mismatch</code> 时,说明下面这个地址没有登记到外部控制台
-            (必须是<b>同一个 OAuth 客户端</b>、类型为「Web 应用」,且一个字符都不能差):
+            <RichText text={t('conn.redirectWarn')} />
           </p>
           <div className="mt-1.5 flex items-center gap-2">
             <code className="min-w-0 flex-1 truncate rounded bg-gray-950 px-2 py-1 font-mono text-[11px] text-gray-300">
@@ -272,7 +282,7 @@ function ProviderRow({
               }}
               className="shrink-0 rounded-lg border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800"
             >
-              {copied ? '已复制 ✓' : '复制'}
+              {copied ? t('common.copied') : t('common.copy')}
             </button>
           </div>
         </div>
@@ -290,11 +300,11 @@ function ProviderRow({
             />
           ))}
           <label className="block">
-            <span className="mb-1 block text-xs text-gray-300">名称(可选)</span>
+            <span className="mb-1 block text-xs text-gray-300">{t('conn.nameLabel')}</span>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={`如:我的 ${provider.name}(test / live)`}
+              placeholder={t('conn.namePlaceholder', { provider: provider.name })}
               className="w-full rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1.5 text-xs text-gray-100 outline-none focus:border-indigo-500"
             />
           </label>
@@ -304,7 +314,7 @@ function ProviderRow({
               disabled={busyThis}
               className="rounded-lg bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
             >
-              {busyThis ? '保存中…' : connected ? '覆盖保存' : '保存并绑定'}
+              {busyThis ? t('common.saving') : connected ? t('conn.action.overwrite') : t('conn.action.saveBind')}
             </button>
             {editing && (
               <button
@@ -315,7 +325,7 @@ function ProviderRow({
                 }}
                 className="rounded-lg border border-gray-700 px-2.5 py-1 text-xs text-gray-400 hover:bg-gray-800"
               >
-                取消
+                {t('common.cancel')}
               </button>
             )}
             {canReuse && (
@@ -325,10 +335,10 @@ function ProviderRow({
                 onChange={(e) => {
                   if (e.target.value) reuse(e.target.value)
                 }}
-                title="复用已保存的密钥,不用重新粘贴"
+                title={t('conn.action.reuseTitle')}
                 className="rounded-lg border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 outline-none focus:border-indigo-500 disabled:opacity-40"
               >
-                <option value="">用已有的密钥…</option>
+                <option value="">{t('conn.action.reuseOption')}</option>
                 {reusable
                   .filter((c) => c.id !== binding?.connectionId)
                   .map((c) => (
@@ -359,22 +369,22 @@ function ProviderRow({
               disabled={busyThis}
               className="rounded-lg bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
             >
-              {busyThis ? '保存中…' : binding ? '保存配置' : '绑定'}
+              {busyThis ? t('common.saving') : binding ? t('conn.action.saveConfig') : t('conn.action.bind')}
             </button>
             {binding?.missing.length ? (
-              <span className="text-[11px] text-amber-300">还缺:{binding.missing.join('、')}</span>
+              <span className="text-[11px] text-amber-300">{t('conn.missing', { fields: binding.missing.join(t('chat.listSep')) })}</span>
             ) : binding ? (
-              <span className="text-[11px] text-emerald-400">已在本环境生效</span>
+              <span className="text-[11px] text-emerald-400">{t('conn.effective')}</span>
             ) : null}
           </div>
         </div>
       )}
 
       {isOauth && !connected && binding && (
-        <p className="mt-2 text-[11px] text-amber-300">已绑定但授权不可用,请点「连接」重新授权。</p>
+        <p className="mt-2 text-[11px] text-amber-300">{t('conn.oauthUnavailable')}</p>
       )}
       {isApiKey && !connected && binding && (
-        <p className="mt-2 text-[11px] text-amber-300">本项目在本环境还没绑定可用的密钥,请粘贴密钥并保存。</p>
+        <p className="mt-2 text-[11px] text-amber-300">{t('conn.keyMissing')}</p>
       )}
     </div>
   )

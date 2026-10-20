@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   -- Google OIDC 的 sub(唯一账号标识);邮箱/密码注册的用户为 NULL,首次用 Google 登录时回填
   google_sub    TEXT,
-  credits       INTEGER NOT NULL DEFAULT 20,
+  -- 注册赠送(= src/lib/credits.ts 的 SIGNUP_CREDITS,两处必须一致):1 积分 = 1 次生成
+  credits       INTEGER NOT NULL DEFAULT 5,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -88,6 +89,65 @@ CREATE TABLE IF NOT EXISTS job_messages (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 计费与用量(与 schema.migrate-billing.sql 同内容:新库跑本文件,已有库跑那个增量文件)。
+-- job_usage:每个任务的真实 token 用量与成本(agent 上报;成功/失败/取消都要记,它们都烧钱);
+-- credit_ledger:积分只追加账本,余额以 users.credits 为准;orders:充值订单(接 MoR 时启用)。
+CREATE TABLE IF NOT EXISTS job_usage (
+  job_id         TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL,
+  project_id     TEXT NOT NULL,
+  model          TEXT NOT NULL DEFAULT '',
+  input_tokens   INTEGER NOT NULL DEFAULT 0,
+  output_tokens  INTEGER NOT NULL DEFAULT 0,
+  cache_read     INTEGER NOT NULL DEFAULT 0,
+  cache_write    INTEGER NOT NULL DEFAULT 0,
+  turns          INTEGER NOT NULL DEFAULT 0,
+  run_ms         INTEGER NOT NULL DEFAULT 0,
+  llm_cost_usd   REAL NOT NULL DEFAULT 0,
+  gcp_cost_usd   REAL NOT NULL DEFAULT 0,
+  cost_usd       REAL NOT NULL DEFAULT 0,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS credit_ledger (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  delta         INTEGER NOT NULL,
+  reason        TEXT NOT NULL,                     -- signup | job_hold | job_release | purchase | refund | admin_grant | expire
+  ref_type      TEXT NOT NULL DEFAULT '',
+  ref_id        TEXT NOT NULL DEFAULT '',
+  balance_after INTEGER NOT NULL,
+  note          TEXT NOT NULL DEFAULT '',
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(id),
+  provider      TEXT NOT NULL,
+  provider_ref  TEXT NOT NULL,
+  amount_minor  INTEGER NOT NULL,
+  currency      TEXT NOT NULL DEFAULT 'USD',
+  credits       INTEGER NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'pending',   -- pending | paid | failed | refunded
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  paid_at       TEXT
+);
+
+-- 订阅档位状态(阶段四接 MoR 时启用):只记录状态,**不发积分** ——
+-- 积分只在 subscription.paid 时发(每次成功扣款一笔),这张表是给界面看「订阅还在不在」。
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id                 TEXT PRIMARY KEY,              -- MoR 侧订阅 id(sub_...)
+  user_id            TEXT NOT NULL REFERENCES users(id),
+  provider           TEXT NOT NULL DEFAULT 'creem',
+  product_id         TEXT NOT NULL DEFAULT '',      -- MoR 商品 id
+  catalog_id         TEXT NOT NULL DEFAULT '',      -- 本地目录 id(plan_plus / plan_pro)
+  status             TEXT NOT NULL DEFAULT '',      -- active | canceled | past_due | unpaid | expired | paused | ...
+  current_period_end TEXT,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- 连接器(见 docs/CONNECTORS.md §4):账号级连接 + 项目级绑定。
 -- 要授权的才算「连接」(auth: oauth);只让用户填个 ID 的(GA4 measurementId / Stripe 付款链接)
 -- 没有 connections 行,只是 project_connectors.config_json 里的一段配置。
@@ -140,3 +200,13 @@ CREATE INDEX IF NOT EXISTS idx_jobs_sweep   ON jobs(status, updated_at);
 
 CREATE INDEX IF NOT EXISTS idx_connections_user ON connections(user_id, provider);
 CREATE INDEX IF NOT EXISTS idx_project_connectors_project ON project_connectors(project_id, env);
+
+CREATE INDEX IF NOT EXISTS idx_job_usage_user ON job_usage(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ledger_user    ON credit_ledger(user_id, created_at);
+-- 同一任务最多各有一条冻结与一条退还(job_hold / job_release):重复回调不会重复记账
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_job_once
+  ON credit_ledger(ref_id, reason) WHERE ref_type = 'job';
+-- webhook 幂等的唯一依据:支付平台重放通知是常态
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_provider_ref ON orders(provider, provider_ref);
+CREATE INDEX IF NOT EXISTS idx_orders_user    ON orders(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);

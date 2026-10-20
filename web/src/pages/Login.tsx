@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../App'
 import EnvBadge from '../components/EnvBadge'
+import LangToggle from '../components/LangToggle'
+import PublicFooter from '../components/PublicFooter'
 import { api } from '../lib/api'
+import { SIGNUP_CREDITS } from '../lib/billing'
+import { useI18n } from '../lib/i18n'
 import type { User } from '../lib/types'
 
 export default function Login() {
   const [sp] = useSearchParams()
   const idea = sp.get('idea') ?? ''
-  const googleError = sp.get('google_error') ?? ''
+  // 服务端在 Google 回调失败时把原因放在 URL 里(中文原文),这里翻成当前语言
+  const googleError = useI18n().tServer(sp.get('google_error') ?? '')
   const [mode, setMode] = useState<'login' | 'register'>(idea ? 'register' : 'login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -17,6 +22,7 @@ export default function Login() {
   const [googleEnabled, setGoogleEnabled] = useState(false)
   const { user, setUser, loading } = useAuth()
   const nav = useNavigate()
+  const { t } = useI18n()
   // 登录态就绪后只跳转一次(Google 回调 / 已登录用户打开登录页都会走到这里)
   const redirected = useRef(false)
 
@@ -57,12 +63,16 @@ export default function Login() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-950 px-4 text-gray-100">
-      <div className="w-full max-w-sm rounded-2xl border border-gray-800 bg-gray-900 p-6">
+    <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
+      <div className="flex flex-1 items-center justify-center px-4">
+        <div className="w-full max-w-sm rounded-2xl border border-gray-800 bg-gray-900 p-6">
         <div className="mb-6 flex items-center gap-2 font-semibold">
           <span className="h-2.5 w-2.5 rounded-sm bg-gradient-to-br from-indigo-400 to-fuchsia-500" />
           Forge
           <EnvBadge />
+          <span className="ml-auto">
+            <LangToggle />
+          </span>
         </div>
 
         <div className="mb-4 flex rounded-lg border border-gray-700 p-0.5 text-sm">
@@ -72,12 +82,16 @@ export default function Login() {
               onClick={() => setMode(m)}
               className={`flex-1 rounded-md py-1.5 ${mode === m ? 'bg-gray-700 text-gray-100' : 'text-gray-400'}`}
             >
-              {m === 'login' ? '登录' : '注册'}
+              {t(m === 'login' ? 'login.login' : 'login.register')}
             </button>
           ))}
         </div>
 
-        {idea && <p className="mb-3 rounded-lg bg-indigo-500/10 px-3 py-2 text-xs text-indigo-300">登录后继续生成:{idea}</p>}
+        {idea && (
+          <p className="mb-3 rounded-lg bg-indigo-500/10 px-3 py-2 text-xs text-indigo-300">
+            {t('login.continueIdea', { idea })}
+          </p>
+        )}
 
         {googleError && <p className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{googleError}</p>}
 
@@ -88,11 +102,13 @@ export default function Login() {
               className="flex w-full items-center justify-center gap-2 rounded-xl border border-gray-700 bg-white py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
             >
               <GoogleMark />
-              使用 Google 登录
+              {t('login.withGoogle')}
             </a>
 
             <div className="my-4 flex items-center gap-3 text-xs text-gray-500">
-              <span className="h-px flex-1 bg-gray-800" />或<span className="h-px flex-1 bg-gray-800" />
+              <span className="h-px flex-1 bg-gray-800" />
+              {t('login.or')}
+              <span className="h-px flex-1 bg-gray-800" />
             </div>
           </>
         )}
@@ -101,7 +117,7 @@ export default function Login() {
           <input
             type="email"
             required
-            placeholder="邮箱"
+            placeholder={t('login.email')}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             className="w-full rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-sm outline-none focus:border-indigo-500"
@@ -110,7 +126,7 @@ export default function Login() {
             type="password"
             required
             minLength={6}
-            placeholder="密码(至少 6 位)"
+            placeholder={t('login.password')}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             className="w-full rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-sm outline-none focus:border-indigo-500"
@@ -121,12 +137,26 @@ export default function Login() {
             disabled={busy}
             className="w-full rounded-xl bg-indigo-600 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
           >
-            {busy ? '提交中…' : mode === 'login' ? '登录' : '注册(送 20 积分)'}
+            {busy ? t('login.submitting') : mode === 'login' ? t('login.login') : t('login.registerWithCredits', { credits: SIGNUP_CREDITS })}
           </button>
         </form>
 
-        <p className="mt-4 text-center text-xs text-gray-500">用 Google 登录,同一邮箱与密码登录视为同一账号</p>
+        <p className="mt-4 text-center text-xs leading-relaxed text-gray-500">
+          {t('login.consentPrefix')}{' '}
+          <Link to="/terms" className="text-indigo-300 hover:text-indigo-200">
+            {t('footer.terms')}
+          </Link>{' '}
+          {t('login.consentAnd')}{' '}
+          <Link to="/privacy" className="text-indigo-300 hover:text-indigo-200">
+            {t('footer.privacy')}
+          </Link>
+          {t('login.consentSuffix')}
+        </p>
+
+        <p className="mt-3 text-center text-xs text-gray-500">{t('login.mergeHint')}</p>
       </div>
+      </div>
+      <PublicFooter />
     </div>
   )
 }
