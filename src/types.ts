@@ -15,6 +15,11 @@ export type Env = {
   PUBLIC_BASE_URL: string
   /** 管理后台独立口令(`wrangler secret put ADMIN_PASSWORD`);未设置则后台不可用 */
   ADMIN_PASSWORD: string
+  /** Resend API key(Worker secret `RESEND_API_KEY`,免费档 3,000 封/月、100 封/天)。
+   *  未配置时注册仍会建号,但验证邮件发不出去 —— 接口返回 verificationSent:false,前端提供重发。 */
+  RESEND_API_KEY?: string
+  /** 验证邮件发件地址;必须在 Resend 后台完成域名验证(vars.EMAIL_FROM) */
+  EMAIL_FROM?: string
   /** Google OAuth 2.0 客户端 ID(Worker secret `GOOGLE_CLIENT_ID`);未设置则不提供 Google 登录 */
   GOOGLE_CLIENT_ID?: string
   /** Google OAuth 2.0 客户端密钥(Worker secret `GOOGLE_CLIENT_SECRET`);与上面成对配置 */
@@ -59,6 +64,8 @@ export interface UserRow {
   /** Google OIDC sub;邮箱/密码账号未绑定时为 null */
   google_sub: string | null
   credits: number
+  /** 1 = 邮箱已验证(注册时显式写 0,验证通过后置 1;Google 登录创建的账号直接为 1) */
+  email_verified: number
   created_at: string
 }
 

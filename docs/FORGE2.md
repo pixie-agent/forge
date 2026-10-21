@@ -170,10 +170,12 @@ npm run db:init:remote
 # 3) 逐个配置 secrets(vars 已在 wrangler.jsonc,不在 secrets 里)
 npx wrangler secret put AGENT_SECRET     # 与 Cloud Run 侧同名同值
 #    AGENT_URL / PUBLIC_BASE_URL 是明文地址,写在 wrangler.jsonc 的 vars 里
-# 4) 可选:启用 Google 登录(见下方说明)
+# 4) 注册验证邮件:Resend 后台验证发件域名后创建 API key(免费档 3,000 封/月)
+# npx wrangler secret put RESEND_API_KEY
+# 5) 可选:启用 Google 登录(见下方说明)
 # npx wrangler secret put GOOGLE_CLIENT_ID
 # npx wrangler secret put GOOGLE_CLIENT_SECRET
-# 5) 可选:启用连接器(见 §19;值只需随机 32 字节,换掉即所有连接需重新授权)
+# 6) 可选:启用连接器(见 §19;值只需随机 32 字节,换掉即所有连接需重新授权)
 # npx wrangler secret put CONNECTOR_KEK
 npm run deploy                            # 构建前端 + 部署 Worker(名:forge-v2)
 ```
@@ -182,6 +184,13 @@ npm run deploy                            # 构建前端 + 部署 Worker(名:for
 > Worker 名 `forge-v2` 为全新命名,不会覆盖线上 `forge`(v2 已不再注册 Workflow)。
 
 **Google 登录(可选,与邮箱/密码登录共存)**:在 Google Cloud Console →「API 和服务 → 凭据」创建「OAuth 客户端 ID(Web 应用)」,「已获授权的重定向 URI」填 `${PUBLIC_BASE_URL}/api/auth/google/callback`(本地为 `http://localhost:8787/api/auth/google/callback`),再把客户端 ID/密钥存为 Worker secrets:`npx wrangler secret put GOOGLE_CLIENT_ID`、`npx wrangler secret put GOOGLE_CLIENT_SECRET`——两者缺一即不启用,登录页只保留邮箱/密码。老库需执行一次 `schema.migrate-google.sql`(`npm run db:migrate:google:remote`)新增 `users.google_sub`;全新安装的 `schema.sql` 已含。流程:前端「使用 Google 登录」→ `GET /api/auth/google`(state 随机数存 HttpOnly cookie 防 CSRF,`idea` 随 state 透传)→ Google 授权页 → `GET /api/auth/google/callback` 用 code 换 `id_token`,按 `sub` 找账号;找不到再按邮箱命中**同一账号**并回填 `google_sub`(邮箱/密码账号与 Google 合并,历史数据与积分保留),都没有才新建(无密码,`password_hash` 存空串)。
+
+**邮箱验证(注册必过,2026-10-21)**:注册**不再发积分、不建会话**,只落 `users.email_verified = 0` 并发送一次性验证链接;点链接(`/verify?token=…`)验证成功后才置 1、发放 `SIGNUP_CREDITS` 并自动登录。验证邮件走 **Resend**(免费档 3,000 封/月、100 封/天,无需付费订阅;超出后按量付费),Worker 用 `fetch` 调 `https://api.resend.com/emails`,密钥是 Worker secret `RESEND_API_KEY`(两套环境各写一次),发件地址是 `vars.EMAIL_FROM=noreply@1forgen.site`。前提是在 Resend 后台 **验证发件域名 `1forgen.site`**(添加 DKIM/SPF 等 DNS 记录,Cloudflare DNS 下几分钟生效);未验证时 API 返回 403 `The domain is not verified`。老库执行 `npm run db:migrate:email:remote`(staging 用 `…:email:staging`),新增 `users.email_verified` 与 `email_verifications` 表。
+- token 只存 SHA-256(`src/lib/email.ts`),库泄露也拿不到可用链接;有效期 24h,重发即让旧链接失效。
+- 发信失败不阻断建号(`verificationSent=false`),前端显示待验证面板并允许立即重发(不受 60s 冷却限制)。
+- 限流:同账号 60s 冷却 + 24h 5 封;同 IP 1h 20 次(**注册与重发共用**)。
+- Google 登录返回的邮箱视为已验证:待验证账号走 Google 登录直接转正并补发注册积分,不重复发。
+- 生产/测试共用同一个发送域名与账号额度(不是环境差异);发件人显示名 staging 为 `Forge Staging`。
 
 ### 9.2 Google Cloud(新 Cloud Run 服务)
 
@@ -314,6 +323,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 | LLM 模型 | `deepseek-flash`(@ `api.deepseek.com/anthropic`,`anthropic-messages`) | `glm-5.3-flash`(@ `open.bigmodel.cn/api/paas/v4`,`openai-completions` + `PI_THINKING_FORMAT=zai`) |
 | 内部密钥 | Secret `agent-secret` | Secret `agent-secret-staging`(**另一把**) |
 | Cron | `* * * * *`(仅巡检本环境任务) | `* * * * *`(仅巡检本环境任务) |
+| 注册验证邮件 | Resend Secret `RESEND_API_KEY` + `noreply@1forgen.site`(免费 3,000 封/月) | 同一 Resend 账号,`--env staging` 单独写 secret |
 | 环境标识 | 不设 `ENVIRONMENT`(前端按 production,无角标) | `ENVIRONMENT=staging`(前端显示琥珀色 STAGING 角标) |
 
 > 多文件产物引入后需额外两步:**(1)** `npx wrangler kv namespace create forge-v2-appdata` 并把返回的 id 填进 `wrangler.jsonc` 的 `APPDATA.id`(当前是占位符,不填无法部署);**(2)** 对已存在的 v2 库执行一次 `schema.migrate-multifile.sql`(重建 `versions`/`jobs`,不保留旧单文件产物与任务历史)。全新安装直接 `schema.sql` 即可。之后 `npm run deploy` 部署 Worker;Cloud Run 侧因 Dockerfile 现在会预装 `template/` 依赖,需重新 `gcloud run deploy` 一次。
@@ -502,6 +512,7 @@ npx wrangler r2 bucket create forge-v2-artifacts-staging
 npx wrangler kv namespace create forge-v2-appdata-staging   # → 67e46b44ce224ff9a4ea2af583dead21
 npm run db:init:staging                          # 幂等初始化 schema
 npm run db:migrate:google:staging                # 如需 Google 登录(新增 users.google_sub)
+npm run db:migrate:email:staging                 # 邮箱验证(users.email_verified + email_verifications)
 npx wrangler secret put AGENT_SECRET --env staging
 npx wrangler secret put ADMIN_PASSWORD --env staging
 npm run deploy:staging                            # 构建前端 + 部署 Worker forge-v2-staging

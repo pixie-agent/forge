@@ -26,6 +26,7 @@
 | LLM 模型 | `deepseek-flash`(Anthropic 方言) | `glm-5.3-flash`(OpenAI 兼容 + `zai` 思考格式) |
 | 用户上传图片给模型看 | **关闭**(`PI_MODEL_INPUT_IMAGE` 未设) | 开启(`PI_MODEL_INPUT_IMAGE=true`) |
 | 计费收款(MoR) | Creem **live 门店**:Secret `CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET`;`vars.CREEM_API_BASE=https://api.creem.io`;`vars.CREEM_PRODUCTS` 填 live 商品 id | Creem **测试门店**:两个 secret 加 `--env staging` 单独写,值用 test 模式;`CREEM_API_BASE=https://test-api.creem.io`;`CREEM_PRODUCTS` 填 test 商品 id |
+| 注册验证邮件 | Resend Secret `RESEND_API_KEY` + `vars.EMAIL_FROM=noreply@1forgen.site`(域名需在 Resend 后台验证) | 同左(secret 不可继承,`--env staging` 单独写) |
 | 环境标识 | 不设 `ENVIRONMENT` | `ENVIRONMENT=staging` |
 
 ### 分支模型

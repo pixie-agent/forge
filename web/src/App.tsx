@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
+import VerifyEmail from './pages/VerifyEmail'
 import Projects from './pages/Projects'
 import Billing from './pages/Billing'
 import Pricing from './pages/Pricing'
@@ -57,6 +58,8 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Landing />} />
           <Route path="/login" element={<Login />} />
+          {/* 验证邮件落地页:必须公开(等待验证的用户还没有会话) */}
+          <Route path="/verify" element={<VerifyEmail />} />
           {/* 公开法务/价格页:Creem 账户复审要求无需登录即可访问 */}
           <Route path="/pricing" element={<Pricing />} />
           <Route path="/terms" element={<Legal doc="terms" />} />

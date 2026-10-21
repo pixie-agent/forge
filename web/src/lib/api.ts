@@ -9,16 +9,20 @@ export async function api<T>(path: string, opts: { method?: string; body?: unkno
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   })
   if (!res.ok) {
-    // 服务端只返回中文文案(lib/i18n/serverMessages.ts 负责映射);没映射到的原样透出,不吞原因
+    // 服务端只返回中文文案(lib/i18n/serverMessages.ts 负责映射);没映射到的原样透出,不吞原因。
+    // code 原样透出:调用方据此做分支(例如 email_unverified 显示重发面板),不必匹配文案。
     let message = tStatic('req.failed', { status: res.status })
+    let code: string | undefined
     try {
-      const data = (await res.json()) as { error?: string }
+      const data = (await res.json()) as { error?: string; code?: string }
       if (data.error) message = translateServer(data.error)
+      code = data.code
     } catch {
       // 保留默认消息
     }
-    const err = new Error(message) as Error & { status: number }
+    const err = new Error(message) as Error & { status: number; code?: string }
     err.status = res.status
+    if (code) err.code = code
     throw err
   }
   return (await res.json()) as T

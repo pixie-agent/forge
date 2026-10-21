@@ -42,6 +42,18 @@ const MESSAGES = {
       '已完成「{name}」初稿并写入草稿。满意后点「生成新版本」保存为正式版本,再发布上线。',
     'commit.chat': '已按「{prompt}」更新草稿。满意后点「生成新版本」保存为正式版本。',
     'cancel.message': '已停止本次任务(未扣除积分),中间结果未保留。修改要求后可重新发送。',
+    // ── 注册验证邮件(发送时刻没有前端,语言由注册请求的 lang 决定)──
+    'verify.subject': '验证你的 Forge 邮箱',
+    'verify.text':
+      '欢迎使用 Forge。请打开下面的链接验证邮箱(24 小时内有效):\n\n{link}\n\n如果不是你本人注册,请忽略这封邮件。',
+    'verify.html':
+      '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#111">' +
+      '<h2 style="margin:0 0 12px">验证你的 Forge 邮箱</h2>' +
+      '<p style="margin:0 0 16px;line-height:1.6">点击下面的按钮完成验证,链接 24 小时内有效:</p>' +
+      '<p style="margin:0 0 20px"><a href="{link}" style="display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:10px 20px;border-radius:8px">验证邮箱</a></p>' +
+      '<p style="margin:0;font-size:12px;color:#666;line-height:1.6">如果按钮无法点击,请复制这个链接到浏览器:<br><span style="word-break:break-all;color:#4f46e5">{link}</span></p>' +
+      '<p style="margin:16px 0 0;font-size:12px;color:#666">如果不是你本人注册,请忽略这封邮件。</p>' +
+      '</div>',
   },
   en: {
     listSep: ', ',
@@ -55,6 +67,17 @@ const MESSAGES = {
     'commit.chat': 'Draft updated for “{prompt}”. When you are happy with it, click “Save version” to keep it as a version.',
     'cancel.message':
       'This run was stopped (no credits charged) and the intermediate results were discarded. Edit your request and send it again.',
+    'verify.subject': 'Verify your Forge email',
+    'verify.text':
+      'Welcome to Forge. Open the link below to verify your email (valid for 24 hours):\n\n{link}\n\nIf you did not create this account, you can safely ignore this email.',
+    'verify.html':
+      '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#111">' +
+      '<h2 style="margin:0 0 12px">Verify your Forge email</h2>' +
+      '<p style="margin:0 0 16px;line-height:1.6">Click the button below to verify your email. The link is valid for 24 hours:</p>' +
+      '<p style="margin:0 0 20px"><a href="{link}" style="display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:10px 20px;border-radius:8px">Verify email</a></p>' +
+      '<p style="margin:0;font-size:12px;color:#666;line-height:1.6">If the button does not work, copy this link into your browser:<br><span style="word-break:break-all;color:#4f46e5">{link}</span></p>' +
+      '<p style="margin:16px 0 0;font-size:12px;color:#666">If you did not create this account, you can safely ignore this email.</p>' +
+      '</div>',
   },
 } as const
 

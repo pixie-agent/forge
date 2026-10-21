@@ -23,6 +23,8 @@
     "db:migrate:connectors:staging": "wrangler d1 execute DB --remote --env staging --file=schema.migrate-connectors.sql",
     "db:migrate:billing:remote": "wrangler d1 execute DB --remote --file=schema.migrate-billing.sql",
     "db:migrate:billing:staging": "wrangler d1 execute DB --remote --env staging --file=schema.migrate-billing.sql",
+    "db:migrate:email:remote": "wrangler d1 execute DB --remote --file=schema.migrate-email-verify.sql",
+    "db:migrate:email:staging": "wrangler d1 execute DB --remote --env staging --file=schema.migrate-email-verify.sql",
     "creem:seed:test": "node scripts/creem-seed-products.mjs",
     "creem:seed:live": "CREEM_ENV=live node scripts/creem-seed-products.mjs",
     "agent:deploy:prod": "gcloud run deploy forge-agent --source agent --region us-central1 --timeout 1800 --concurrency 1 --min-instances 0 --max-instances 5 --cpu 1 --memory 1Gi --allow-unauthenticated --set-env-vars LLM_BASE_URL=https://api.deepseek.com/anthropic,LLM_MODEL=deepseek-flash,PI_LLM_API=anthropic-messages,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,AGENT_MAX_RUN_MS=1500000,WORKSPACE_ROOT=/tmp/forge-agent --set-secrets LLM_API_KEY=llm-api-key:latest,AGENT_SECRET=agent-secret:latest",
