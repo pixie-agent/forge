@@ -17,13 +17,14 @@
 | 对外域名 | `app.1forgen.site`(Custom Domain,根域名留空) | `app-staging.1forgen.site`(同上) |
 | workers.dev | `forge-v2.needle.workers.dev`(保留,旧链接依赖它) | `forge-v2-staging.needle.workers.dev`(同上) |
 | wrangler 环境 | 顶层(不带 `--env`) | `env.staging` |
-| Cloud Run | `forge-agent` | `forge-agent-staging`(`--max-instances 1`) |
+| Cloud Run(VIP 通道) | `forge-agent` | `forge-agent-staging`(`--max-instances 1`) |
+| Cloud Run(免费通道) | `forge-agent-free`(GLM,`--timeout 3600 --concurrency 8 --no-cpu-throttling --max-instances 1`;任务并发由后台 free 配置的 `queue_concurrency` 下发,env `AGENT_QUEUE_CONCURRENCY` 只是回落值) | `forge-agent-free-staging`(同左) |
 | D1 | `forge-v2`(`6fd724ad-…`) | `forge-v2-staging`(`da94e0ba-…`) |
 | R2 | `forge-v2-artifacts` | `forge-v2-artifacts-staging` |
 | KV | `f6b66c90…` | `67e46b44…` |
 | 内部密钥 | Secret `agent-secret` | Secret `agent-secret-staging` |
-| LLM 密钥 | Secret `llm-api-key`(DeepSeek) | Secret `llm-api-key-staging`(GLM,另一把) |
-| LLM 模型 | `deepseek-flash`(Anthropic 方言) | `glm-5.3-flash`(OpenAI 兼容 + `zai` 思考格式) |
+| LLM 密钥 | Secret `llm-api-key`(DeepSeek,VIP 执行体);免费执行体另需 Secret `llm-api-key-free`(GLM) | Secret `llm-api-key-staging`(GLM,两个执行体共用) |
+| LLM 模型 | VIP `deepseek-flash`(Anthropic 方言);免费 `glm-5.3-flash`(OpenAI 兼容 + `zai`) | 两个通道暂都用 `glm-5.3-flash`(staging 没有 DeepSeek key) |
 | 用户上传图片给模型看 | **关闭**(`PI_MODEL_INPUT_IMAGE` 未设) | 开启(`PI_MODEL_INPUT_IMAGE=true`) |
 | 计费收款(MoR) | Creem **live 门店**:Secret `CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET`;`vars.CREEM_API_BASE=https://api.creem.io`;`vars.CREEM_PRODUCTS` 填 live 商品 id | Creem **测试门店**:两个 secret 加 `--env staging` 单独写,值用 test 模式;`CREEM_API_BASE=https://test-api.creem.io`;`CREEM_PRODUCTS` 填 test 商品 id |
 | 注册验证邮件 | Resend Secret `RESEND_API_KEY` + `vars.EMAIL_FROM=noreply@1forgen.site`(域名需在 Resend 后台验证) | 同左(secret 不可继承,`--env staging` 单独写) |
@@ -98,8 +99,10 @@ npm run typecheck               # 前后端类型检查
 npm run build                   # 构建 web/dist(生产与 staging 共用同一份产物)
 npm run deploy                  # 生产 Worker(守卫:必须 main 且工作区干净)
 npm run deploy:staging          # staging Worker(无守卫)
-npm run agent:deploy:prod       # 生产 Cloud Run agent
-npm run agent:deploy:staging    # staging Cloud Run agent
+npm run agent:deploy:prod       # 生产 Cloud Run agent(VIP 通道)
+npm run agent:deploy:staging    # staging Cloud Run agent(VIP 通道)
+npm run agent:deploy:free:prod     # 生产免费通道执行体(GLM + 进程内排队)
+npm run agent:deploy:free:staging  # staging 免费通道执行体
 npm run db:init:staging         # staging 库初始化(幂等)
 npm run db:migrate:google:staging
 ```

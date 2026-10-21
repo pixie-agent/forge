@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import type { Env } from '../types'
 import { commitJob, failJobWith } from '../lib/commit'
-import { gcpCostUsd, llmCostUsd } from '../lib/pricing'
+import { gcpCostUsd, llmCostUsd, type ModelPrice } from '../lib/pricing'
 
 /**
  * 内部回调接口:供 Cloud Run 的 agent service 上报执行进度与最终结果。用共享密钥(X-Agent-Secret)保护,
@@ -139,10 +139,19 @@ function toCount(v: unknown): number {
 app.post('/jobs/:id/usage', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json<UsageBody>().catch(() => ({}) as UsageBody)
+  // model_config_id 是增量迁移加的列:迁移没跑(或回滚到旧 schema)时不能把整个用量回调打挂,
+  // 否则连 token 用量都记不下来。查不到列就当作没有配置快照,成本回落到内置价格表。
   const job = await c.env.DB
-    .prepare('SELECT user_id, project_id FROM jobs WHERE id = ?')
+    .prepare('SELECT user_id, project_id, model_config_id FROM jobs WHERE id = ?')
     .bind(id)
-    .first<{ user_id: string; project_id: string }>()
+    .first<{ user_id: string; project_id: string; model_config_id: string }>()
+    .catch(async () => {
+      const row = await c.env.DB
+        .prepare('SELECT user_id, project_id FROM jobs WHERE id = ?')
+        .bind(id)
+        .first<{ user_id: string; project_id: string }>()
+      return row ? { ...row, model_config_id: '' } : null
+    })
   if (!job) return c.json({ error: '任务不存在' }, 404)
 
   const model = typeof body.model === 'string' ? body.model.slice(0, 80) : ''
@@ -154,29 +163,46 @@ app.post('/jobs/:id/usage', async (c) => {
   }
   const turns = toCount(body.turns)
   const runMs = toCount(body.runMs)
-  const llm = llmCostUsd(model, usage)
+  // 价格快照:用任务派发时记录的那条配置(改配置不重算历史);
+  // 没有配置(迁移前/后台未启用)时回落到内置价格表。
+  const modelConfigId = job.model_config_id ?? ''
+  const price = await configPrice(c.env.DB, modelConfigId)
+  const llm = llmCostUsd(model, usage, price)
   const gcp = gcpCostUsd(runMs)
 
   await c.env.DB
     .prepare(
       `INSERT INTO job_usage (job_id, user_id, project_id, model, input_tokens, output_tokens, cache_read, cache_write,
-                              turns, run_ms, llm_cost_usd, gcp_cost_usd, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              turns, run_ms, llm_cost_usd, gcp_cost_usd, cost_usd, model_config_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(job_id) DO UPDATE SET
          model = excluded.model, input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
          cache_read = excluded.cache_read, cache_write = excluded.cache_write, turns = excluded.turns,
          run_ms = excluded.run_ms, llm_cost_usd = excluded.llm_cost_usd, gcp_cost_usd = excluded.gcp_cost_usd,
-         cost_usd = excluded.cost_usd`
+         cost_usd = excluded.cost_usd, model_config_id = excluded.model_config_id`
     )
     .bind(
       id, job.user_id, job.project_id, model,
       usage.input, usage.output, usage.cacheRead, usage.cacheWrite,
-      turns, runMs, llm, gcp, llm + gcp
+      turns, runMs, llm, gcp, llm + gcp, modelConfigId
     )
     .run()
 
   return c.json({ ok: true, llm_cost_usd: llm, gcp_cost_usd: gcp })
 })
+
+/** 读取任务配置快照里的单价;配置不存在/迁移未执行时返回 null(由内置价格表兜底) */
+async function configPrice(db: D1Database, configId: string): Promise<ModelPrice | null> {
+  if (!configId) return null
+  try {
+    return await db
+      .prepare('SELECT input_price AS input, output_price AS output, cache_read_price AS cacheRead, cache_write_price AS cacheWrite FROM model_configs WHERE id = ?')
+      .bind(configId)
+      .first<ModelPrice>()
+  } catch {
+    return null
+  }
+}
 
 app.post('/jobs/:id/commit', async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>)

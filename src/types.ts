@@ -9,6 +9,8 @@ export type Env = {
   PROJECT_DB: DurableObjectNamespace
   /** Cloud Run agent service 的基址,如 https://forge-agent-xxx.run.app */
   AGENT_URL: string
+  /** 免费通道的独立执行体(便宜模型 + 1 并发进程内排队);不配则免费任务也走 AGENT_URL */
+  AGENT_URL_FREE?: string
   /** 与 agent 共享的内部密钥:Worker→Cloud Run 与 Cloud Run→Worker(/internal/*)双向校验 */
   AGENT_SECRET: string
   /** Worker 对外基址,下发给 agent 用于进度回调,如 https://forge-v2.xxx.workers.dev */

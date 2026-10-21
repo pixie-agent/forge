@@ -58,6 +58,11 @@
   // AGENT_URL:部署 agent/ 到 Cloud Run 后拿到的服务地址(本地开发在 .dev.vars 覆盖)
   "vars": {
     "AGENT_URL": "https://forge-agent-323709989821.us-central1.run.app",
+    // 免费通道的独立执行体(便宜模型 + 进程内 FIFO 排队,见 docs/FORGE2.md §21.5)。
+    // **上线前置**:先创建 Secret `llm-api-key-free` 并 `npm run agent:deploy:free:prod`;
+    // 服务不存在时免费任务会直接派发失败(不会自动回落 AGENT_URL)。
+    // 要临时回退成「免费也走 AGENT_URL」,删掉这一行即可。
+    "AGENT_URL_FREE": "https://forge-agent-free-323709989821.us-central1.run.app",
     // 对外规范域名(2026-10-19 切换):Google OAuth 回调 + 连接器回调 + agent 进度回调都以它为准。
     // 换这一行之前必须先在 Google 控制台的 OAuth 客户端里加好对应的「已获授权的重定向 URI」,
     // 否则登录直接 redirect_uri_mismatch(错误发生在 Google 侧,平台收不到回调)。
@@ -117,6 +122,7 @@
       "routes": [{ "pattern": "app-staging.1forgen.site", "custom_domain": true }],
       "vars": {
         "AGENT_URL": "https://forge-agent-staging-323709989821.us-central1.run.app",
+        "AGENT_URL_FREE": "https://forge-agent-free-staging-323709989821.us-central1.run.app",
         "PUBLIC_BASE_URL": "https://app-staging.1forgen.site",
         // 仅 staging 设置;生产不设 → 前端按 production 处理(不显示环境角标)
         "ENVIRONMENT": "staging",

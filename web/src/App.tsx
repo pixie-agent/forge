@@ -13,6 +13,7 @@ import AdminProjects from './pages/AdminProjects'
 import AdminProject from './pages/AdminProject'
 import AdminUsers from './pages/AdminUsers'
 import AdminUser from './pages/AdminUser'
+import AdminModels from './pages/AdminModels'
 import { api } from './lib/api'
 import { useT } from './lib/i18n'
 import type { User } from './lib/types'
@@ -118,6 +119,14 @@ export default function App() {
             element={
               <AdminGate>
                 <AdminUser />
+              </AdminGate>
+            }
+          />
+          <Route
+            path="/admin/models"
+            element={
+              <AdminGate>
+                <AdminModels />
               </AdminGate>
             }
           />

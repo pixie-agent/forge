@@ -78,6 +78,27 @@ export interface RunUsage {
   turns: number
 }
 
+/**
+ * 后台下发的模型覆盖(Worker 侧 src/lib/agent.ts 有对应副本)。
+ * 只含配置,不含密钥:llm.apiKey 仍来自 Cloud Run 的 LLM_API_KEY。
+ */
+export interface ModelOverride {
+  providerId?: string
+  modelId: string
+  baseUrl: string
+  api: 'openai-completions' | 'anthropic-messages'
+  thinkingLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  /** pi compat.thinkingFormat;缺省时沿用 env / pi 的 baseUrl 自动推断 */
+  thinkingFormat?: 'openai' | 'openrouter' | 'zai' | 'qwen' | 'qwen-chat-template'
+  /** pi Model.maxTokens */
+  maxTokens?: number
+  reasoning?: boolean
+  imageInput?: boolean
+  designReview?: 'off' | 'generate' | 'always'
+  maxRunMs?: number
+  polishMaxMs?: number
+}
+
 /** POST /run 请求体 */
 export interface RunRequest {
   jobId: string
@@ -89,6 +110,13 @@ export interface RunRequest {
   message?: string
   /** 补充要求(generate/chat 通用) */
   note?: string
+  /** 后台配置的模型覆盖;缺省时使用 Cloud Run env 的默认配置 */
+  model?: ModelOverride
+  /**
+   * 该通道同时执行的任务数(0 = 不限制);缺省时用 env 的 AGENT_QUEUE_CONCURRENCY。
+   * 只限制「任务并发」,不改变 Cloud Run --concurrency(单实例能接多少请求)。
+   */
+  queueConcurrency?: number
   /** chat:当前最新版本的源码树(Worker 从 D1 取出后带上),agent 在其上修改 */
   currentFiles?: FileMap
   /** chat:此前的对话历史(用户/助手交替),供 agent 理解上下文,实现连续对话 */

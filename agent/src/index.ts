@@ -10,7 +10,8 @@ import {
   startHeartbeat,
   startJobWatcher,
 } from './callback.js'
-import { loadConfig, type AgentConfig } from './config.js'
+import { applyModelOverride, loadConfig, type AgentConfig } from './config.js'
+import { FifoQueue } from './queue.js'
 import { runJob } from './runner.js'
 import type { AgentSession } from '@mariozechner/pi-coding-agent'
 import type { RunAttachment, RunRequest, RunUsage, SteerMessage } from './types.js'
@@ -21,6 +22,8 @@ const config = loadConfig()
  * 实时跟进 src/lib/attachments.ts 的 MAX_TOTAL_BYTES,留一倍余量。
  */
 const MAX_BODY_BYTES = 24 * 1024 * 1024
+
+const queue = new FifoQueue(config.queueConcurrency)
 
 function readJson(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -116,6 +119,10 @@ const server = createServer((req, res) => {
       return
     }
 
+    // 后台配置的模型覆盖(见 docs/FORGE2.md §21):每次请求独立生效,不改进程级 config,
+    // 也不碰密钥 —— baseUrl/modelId/思考档位/复查轮/运行上限都从这里合并,非法值回落 env。
+    const runConfig = applyModelOverride(config, body.model)
+
     // 附件只做形状过滤(大小/类型/数量上限已由 Worker 侧 src/lib/attachments.ts 判定):
     // 脏数据直接丢弃,不让整个 job 崩在半个字段上
     body.attachments = (Array.isArray(body.attachments) ? body.attachments : []).filter(
@@ -129,9 +136,17 @@ const server = createServer((req, res) => {
     )
     if (!body.attachments.length) delete body.attachments
 
+    // 任务并发:后台随请求下发,缺省回落 env。只限制「同时跑几个 job」,
+    // 不改变 Cloud Run --concurrency(那是单实例能接多少请求,由资源侧扩缩容)。
+    const queueLimit =
+      typeof body.queueConcurrency === 'number' && Number.isFinite(body.queueConcurrency)
+        ? Math.min(32, Math.max(0, Math.round(body.queueConcurrency)))
+        : config.queueConcurrency
+    queue.setLimit(queueLimit)
+
     const startedAt = Date.now()
     const log = (msg: string) => console.log(`[run] ${body.jobId.slice(0, 8)} ${msg} (+${Math.round((Date.now() - startedAt) / 1000)}s)`)
-    log(`start type=${body.type}`)
+    log(`accepted type=${body.type} model=${runConfig.modelId}${body.model ? ' (override)' : ''} queue=${queueLimit || 'off'}`)
 
     // 心跳 + 进度回调:Worker 以回调为准(响应只作日志)。长请求可能被 Cloudflare 掐断(524),
     // 但 Cloud Run 只要 handler 未返回就继续跑并保持 CPU,因此交付不依赖这次 HTTP 响应
@@ -155,7 +170,7 @@ const server = createServer((req, res) => {
       log(`usage in=${u.input} out=${u.output} cacheRead=${u.cacheRead} turns=${u.turns}`)
     }
     const deliverSteer = (session: AgentSession, msg: SteerMessage) => {
-      void steerSession(session, msg, config, log).catch((err) =>
+      void steerSession(session, msg, runConfig, log).catch((err) =>
         log(`steer failed: ${err instanceof Error ? err.message : String(err)}`),
       )
     }
@@ -173,10 +188,39 @@ const server = createServer((req, res) => {
         }
       },
     })
+    const report = createProgressReporter(body.callbackBase, config.agentSecret, body.jobId)
+    let holdsSlot = false
     try {
-      const report = createProgressReporter(body.callbackBase, config.agentSecret, body.jobId)
+      // 排队必须放在心跳/巡检启动之后:等待期间仍要写 updated_at,否则 Worker 巡检会把
+      // 还在排队的任务当成失联(180s)判死。取消也会在这里生效,不必等排到才响应。
+      if (queueLimit > 0) {
+        log(`queue check (running=${queue.running} waiting=${queue.waiting})`)
+        // 排队提示:写进 job.progress,前端生成面板直接展示(与常规阶段文案同一条链路)。
+        // 排到后 runner 的第一条进度会立刻覆盖,不需要额外清理。
+        let lastPosition = -1
+        const admission = await queue.acquire(abortController.signal, (position) => {
+          if (position === lastPosition) return
+          lastPosition = position
+          log(`queued position=${position} (running=${queue.running} waiting=${queue.waiting})`)
+          report({
+            progress: position > 0 ? `排队中,前面还有 ${position} 个任务,请稍候` : '排队中,马上开始,请稍候',
+          })
+        })
+        if (admission === 'cancelled') {
+          log('CANCELLED while queued')
+          send(res, 409, { error: '任务已被用户停止' })
+          return
+        }
+        if (admission === 'slot') {
+          holdsSlot = true
+          log(`slot acquired (running=${queue.running} waiting=${queue.waiting})`)
+        } else {
+          // 等待期间后台把并发调到 0:不排队,直接跑
+          log('queue disabled by config while waiting, running without a slot')
+        }
+      }
       const result = await runJob(
-        config,
+        runConfig,
         body,
         report,
         streamLog,
@@ -212,6 +256,7 @@ const server = createServer((req, res) => {
       await reportFail(body.callbackBase, config.agentSecret, body.jobId, message)
       send(res, 500, { error: message })
     } finally {
+      if (holdsSlot) queue.release()
       stopJobWatch()
       await streamLog.stop()
       stopHeartbeat()

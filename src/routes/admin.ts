@@ -1,7 +1,9 @@
 /**
- * 管理后台(只读):跨用户查看全部产物 —— 项目列表、每个项目的全部版本 HTML、对话记录、
+ * 管理后台:跨用户查看全部产物 —— 项目列表、每个项目的全部版本 HTML、对话记录、
  * 任务(含 agent 流式日志)、站点数据,以及公开链接。并可按用户聚合查看使用情况
  * (项目/版本/对话/任务数、积分、活跃度、产物体量)。
+ * 除「模型配置」外全部只读:模型配置是运行时数据(见 docs/FORGE2.md §21),
+ * 改配置不需要重新部署;其余接口不允许写用户数据。
  * 版本与「草稿(version_no = 0,工作副本)」都可预览:草稿不进版本列表,作为独立字段下发,
  * 列表页可直接预览尚未生成正式版本的项目。鉴权与普通用户体系隔离,见 lib/admin.ts(`ADMIN_PASSWORD` 口令 + 派生 cookie)。
  */
@@ -12,6 +14,8 @@ import { adminCookie, clearAdminCookie, isAdmin, requireAdmin, verifyAdminPasswo
 import { isSecureRequest } from '../lib/auth'
 import { DRAFT_VERSION_NO, signPreviewToken } from '../lib/artifacts'
 import { callProjectDb, projectSchema, runProjectSql, seedProjectDocs, type SeedRow } from '../lib/projectDb'
+import { parseModelConfigInput, type ModelConfigRow } from '../lib/modelConfig'
+import { hasPrice } from '../lib/pricing'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -127,6 +131,8 @@ app.use('/projects', requireAdmin)
 app.use('/projects/*', requireAdmin)
 app.use('/users', requireAdmin)
 app.use('/users/*', requireAdmin)
+app.use('/models', requireAdmin)
+app.use('/models/*', requireAdmin)
 
 /** 顶层统计:给列表页头部用(产物 + 用户 + 任务全局计数) */
 app.get('/stats', requireAdmin, async (c) => {
@@ -155,6 +161,209 @@ app.get('/stats', requireAdmin, async (c) => {
     stats: row ?? { projects: 0, users: 0, versions: 0, jobs: 0, jobs_succeeded: 0, jobs_failed: 0, jobs_7d: 0, active_users_7d: 0 },
   })
 })
+
+/**
+ * 模型配置 + 近 7 天用量(控制台最小版,见 docs/FORGE2.md §21)。
+ * 配置是数据(不是部署参数):表里 enabled = 1 的那条会被下一次任务使用;表为空时回落 Cloud Run env。
+ * 用量来自 job_usage(agent 每次任务收尾上报),按配置/模型聚合;无用量记录的任务单独计数,
+ * 避免「报表看起来正常,实际有一批任务根本没上报」。
+ */
+app.get('/models', async (c) => {
+  const [configsRes, byConfigRes, byModelRes, totalsRow, noUsageRow] = await Promise.all([
+    c.env.DB.prepare('SELECT * FROM model_configs ORDER BY enabled DESC, created_at DESC').all<Record<string, unknown>>(),
+    c.env.DB
+      .prepare(
+        `SELECT ju.model_config_id AS config_id,
+                COALESCE(MAX(ju.model), '') AS model,
+                COUNT(*) AS jobs,
+                COALESCE(SUM(CASE WHEN j.status = 'succeeded' THEN 1 ELSE 0 END), 0) AS succeeded,
+                COALESCE(SUM(CASE WHEN j.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+                COALESCE(SUM(CASE WHEN j.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled,
+                COALESCE(AVG(ju.run_ms), 0) AS avg_run_ms,
+                COALESCE(SUM(ju.input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(ju.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(ju.llm_cost_usd), 0) AS llm_cost_usd,
+                COALESCE(SUM(ju.gcp_cost_usd), 0) AS gcp_cost_usd,
+                COALESCE(SUM(ju.cost_usd), 0) AS cost_usd
+           FROM job_usage ju LEFT JOIN jobs j ON j.id = ju.job_id
+          WHERE ju.created_at >= datetime('now', '-7 days')
+          GROUP BY ju.model_config_id`
+      )
+      .all<UsageAgg>(),
+    c.env.DB
+      .prepare(
+        `SELECT ju.model AS model,
+                ju.model_config_id AS config_id,
+                COALESCE(MAX(j.channel), '') AS channel,
+                COUNT(*) AS jobs,
+                COALESCE(SUM(CASE WHEN j.status = 'succeeded' THEN 1 ELSE 0 END), 0) AS succeeded,
+                COALESCE(SUM(CASE WHEN j.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+                COALESCE(SUM(CASE WHEN j.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled,
+                COALESCE(AVG(ju.run_ms), 0) AS avg_run_ms,
+                COALESCE(SUM(ju.input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(ju.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(ju.llm_cost_usd), 0) AS llm_cost_usd,
+                COALESCE(SUM(ju.gcp_cost_usd), 0) AS gcp_cost_usd,
+                COALESCE(SUM(ju.cost_usd), 0) AS cost_usd
+           FROM job_usage ju LEFT JOIN jobs j ON j.id = ju.job_id
+          WHERE ju.created_at >= datetime('now', '-7 days')
+          GROUP BY ju.model, ju.model_config_id
+          ORDER BY cost_usd DESC`
+      )
+      .all<UsageAgg>(),
+    c.env.DB
+      .prepare(
+        `SELECT COUNT(*) AS jobs,
+                COALESCE(SUM(CASE WHEN j.status = 'succeeded' THEN 1 ELSE 0 END), 0) AS succeeded,
+                COALESCE(SUM(CASE WHEN j.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+                COALESCE(SUM(ju.cost_usd), 0) AS cost_usd,
+                COALESCE(SUM(ju.llm_cost_usd), 0) AS llm_cost_usd,
+                COALESCE(SUM(ju.gcp_cost_usd), 0) AS gcp_cost_usd,
+                COALESCE(AVG(ju.run_ms), 0) AS avg_run_ms
+           FROM job_usage ju LEFT JOIN jobs j ON j.id = ju.job_id
+          WHERE ju.created_at >= datetime('now', '-7 days')`
+      )
+      .first<Record<string, number>>(),
+    c.env.DB
+      .prepare(
+        `SELECT COUNT(*) AS n FROM jobs
+          WHERE created_at >= datetime('now', '-7 days')
+            AND status IN ('succeeded', 'failed', 'cancelled')
+            AND NOT EXISTS (SELECT 1 FROM job_usage ju WHERE ju.job_id = jobs.id)`
+      )
+      .first<{ n: number }>(),
+  ])
+
+  const statsByConfig = new Map(byConfigRes.results.map((r) => [r.config_id ?? '', withUnitCost(r)]))
+  const configRows = configsRes.results as unknown as ModelConfigRow[]
+  const configs: (ModelConfigRow & { priced: boolean; stats: UsageAgg | null })[] = configRows.map((row) => {
+    const price = {
+      input: Number(row.input_price ?? 0),
+      output: Number(row.output_price ?? 0),
+      cacheRead: Number(row.cache_read_price ?? 0),
+      cacheWrite: Number(row.cache_write_price ?? 0),
+    }
+    return {
+      ...row,
+      priced: hasPrice(String(row.model_id ?? ''), price),
+      stats: statsByConfig.get(String(row.id)) ?? null,
+    }
+  })
+  // 每个通道各自最多一条生效配置:后台按通道展示,避免「只有一个生效项」的旧假设
+  const activeByChannel: Record<string, string | null> = {}
+  for (const channel of ['vip', 'free', 'default']) {
+    const row = configs.find((r) => r.channel === channel && Number(r.enabled) === 1)
+    activeByChannel[channel] = row ? String(row.id) : null
+  }
+  return c.json({
+    configs,
+    active_by_channel: activeByChannel,
+    totals: withUnitCost((totalsRow ?? {}) as unknown as UsageAgg),
+    by_model: byModelRes.results.map(withUnitCost),
+    jobs_without_usage: noUsageRow?.n ?? 0,
+  })
+})
+
+/** 新增模型配置;enabled = true 时同事务内把旧配置停用(部分唯一索引保证每通道只有一条生效) */
+app.post('/models', async (c) => {
+  const parsed = parseModelConfigInput(await c.req.json().catch(() => ({})))
+  if (parsed.error || !parsed.value) return c.json({ error: parsed.error ?? '参数错误' }, 400)
+  const v = parsed.value
+  const id = crypto.randomUUID()
+  const insert = c.env.DB
+    .prepare(
+      `INSERT INTO model_configs (id, name, channel, provider_id, base_url, api_dialect, model_id, thinking_level,
+                                  thinking_format, max_tokens,
+                                  reasoning, image_input, design_review, max_run_ms, polish_max_ms, queue_concurrency,
+                                  input_price, output_price, cache_read_price, cache_write_price, enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      id, v.name, v.channel, v.provider_id, v.base_url, v.api_dialect, v.model_id, v.thinking_level,
+      v.thinking_format, v.max_tokens,
+      v.reasoning, v.image_input, v.design_review, v.max_run_ms, v.polish_max_ms, v.queue_concurrency,
+      v.input_price, v.output_price, v.cache_read_price, v.cache_write_price, v.enabled
+    )
+  if (v.enabled) {
+    await c.env.DB.batch([
+      c.env.DB
+        .prepare("UPDATE model_configs SET enabled = 0, updated_at = datetime('now') WHERE channel = ? AND enabled = 1")
+        .bind(v.channel),
+      insert,
+    ])
+  } else {
+    await insert.run()
+  }
+  return c.json({ ok: true, id })
+})
+
+/** 启用某条配置(同通道旧配置自动停用) */
+app.post('/models/:id/enable', async (c) => {
+  const id = c.req.param('id')
+  const target = await c.env.DB
+    .prepare('SELECT id, channel FROM model_configs WHERE id = ?')
+    .bind(id)
+    .first<{ id: string; channel: string }>()
+  if (!target) return c.json({ error: '配置不存在' }, 404)
+  await c.env.DB.batch([
+    c.env.DB
+      .prepare(
+        "UPDATE model_configs SET enabled = 0, updated_at = datetime('now') WHERE channel = ? AND enabled = 1 AND id <> ?"
+      )
+      .bind(target.channel, id),
+    c.env.DB.prepare("UPDATE model_configs SET enabled = 1, updated_at = datetime('now') WHERE id = ?").bind(id),
+  ])
+  return c.json({ ok: true })
+})
+
+/** 停用某条配置;停用后如果同通道没有生效行,任务回落 Cloud Run env 默认模型 */
+app.post('/models/:id/disable', async (c) => {
+  const res = await c.env.DB
+    .prepare("UPDATE model_configs SET enabled = 0, updated_at = datetime('now') WHERE id = ?")
+    .bind(c.req.param('id'))
+    .run()
+  if (!res.meta.changes) return c.json({ error: '配置不存在' }, 404)
+  return c.json({ ok: true })
+})
+
+/**
+ * 只改任务并发(0 = 不限)。这是一个运维旋钮,不影响历史成本快照,所以允许原地修改,
+ * 不必像模型/价格那样新增一行再启用。下一次派发即生效(值随请求下发给执行体)。
+ */
+app.post('/models/:id/concurrency', async (c) => {
+  const body = await c.req.json<{ queue_concurrency?: unknown }>().catch(() => ({}) as { queue_concurrency?: unknown })
+  const n = Number(body.queue_concurrency)
+  if (!Number.isFinite(n)) return c.json({ error: '并发数不合法' }, 400)
+  const value = Math.min(32, Math.max(0, Math.round(n)))
+  const res = await c.env.DB
+    .prepare("UPDATE model_configs SET queue_concurrency = ?, updated_at = datetime('now') WHERE id = ?")
+    .bind(value, c.req.param('id'))
+    .run()
+  if (!res.meta.changes) return c.json({ error: '配置不存在' }, 404)
+  return c.json({ ok: true, queue_concurrency: value })
+})
+
+interface UsageAgg {
+  config_id?: string
+  model?: string
+  jobs: number
+  succeeded: number
+  failed: number
+  cancelled: number
+  avg_run_ms: number
+  input_tokens: number
+  output_tokens: number
+  llm_cost_usd: number
+  gcp_cost_usd: number
+  cost_usd: number
+}
+
+/** 单次成功成本 = 区间总成本 / 成功任务数(失败任务不退上游的钱,必须摊进去) */
+function withUnitCost<T extends Partial<UsageAgg>>(row: T): T & { cost_per_success: number | null } {
+  const succeeded = Number(row.succeeded ?? 0)
+  const cost = Number(row.cost_usd ?? 0)
+  return { ...row, cost_per_success: succeeded > 0 ? cost / succeeded : null }
+}
 
 /** 产物列表:跨用户,带属主/版本数/消息数/数据条数,支持关键字与分页 */
 app.get('/projects', async (c) => {
