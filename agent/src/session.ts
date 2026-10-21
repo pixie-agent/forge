@@ -58,9 +58,14 @@ function modelsJson(config: AgentConfig): string {
 /**
  * 为一次 job 创建全新会话:agentDir 用临时目录(不读机器上 ~/.pi 的配置/技能/扩展),
  * 会话历史 in-memory,工具绑定到本次的隔离工作目录 → 执行完即随容器销毁。
+ *
+ * agentDir 必须放在**本次 job 的 workspace 内**:免费执行体允许同时跑多个任务,
+ * 若共用 `${WORKSPACE_ROOT}/.pi`,并发任务会同时改写同一个 models.json,
+ * 另一个任务读到的可能是写了一半的文件(线上踩过:Unexpected end of JSON input)。
+ * `.pi` 已在 runner 的 SKIP_DIRS 里,不会被当作源码交付。
  */
 export async function createForgeSession(config: AgentConfig, workspace: string): Promise<AgentSession> {
-  const agentDir = join(config.workspaceRoot, '.pi')
+  const agentDir = join(workspace, '.pi')
   await mkdir(agentDir, { recursive: true })
   const modelsPath = join(agentDir, 'models.json')
   await writeFile(modelsPath, modelsJson(config), 'utf8')
