@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS users (
   google_sub    TEXT,
   -- 注册赠送(= src/lib/credits.ts 的 SIGNUP_CREDITS,两处必须一致):1 积分 = 1 次生成
   credits       INTEGER NOT NULL DEFAULT 5,
+  -- 邮箱验证:1 = 已验证(新代码注册时显式写 0,验证链接消费后置 1)
+  email_verified INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -16,6 +18,23 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_id    TEXT NOT NULL REFERENCES users(id),
   expires_at TEXT NOT NULL
 );
+
+-- 一次性邮箱验证 token(只存 SHA-256;used_at 非空 = 已消费)
+CREATE TABLE IF NOT EXISTS email_verifications (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  ip         TEXT NOT NULL DEFAULT '',
+  idea       TEXT NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL,
+  used_at    TEXT,
+  -- 1 = 邮件已成功交给 Email Sending;0 = 投递失败(仍保留 token,重发可立即进行)
+  sent       INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_verifications_user ON email_verifications(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_email_verifications_ip   ON email_verifications(ip, created_at);
 
 CREATE TABLE IF NOT EXISTS projects (
   id              TEXT PRIMARY KEY,

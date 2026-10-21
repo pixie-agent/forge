@@ -68,6 +68,25 @@ export async function grantSignupCredits(db: D1Database, userId: string, amount:
 }
 
 /**
+ * 邮箱验证通过 / Google 首次把待验证账号转为已验证时发放注册积分。
+ * 与 grantSignupCredits 的区别:注册时余额是 0(不预发),这里必须真的把余额加上去。
+ * 幂等由调用方保证:验证 token 只能消费一次,且 users.email_verified 的 0→1 迁移只发生一次。
+ */
+export async function grantSignupCreditsOnVerify(
+  db: D1Database,
+  userId: string,
+  amount: number
+): Promise<number> {
+  const row = await db
+    .prepare('UPDATE users SET credits = credits + ? WHERE id = ? RETURNING credits')
+    .bind(amount, userId)
+    .first<{ credits: number }>()
+  if (!row) return 0
+  await insertLedger(db, { userId, delta: amount, reason: 'signup', balanceAfter: row.credits, note: '注册赠送' })
+  return row.credits
+}
+
+/**
  * 冻结:原子条件扣减,余额不足返回 false(调用方据此回 402)。
  * 扣减与记账分两条语句,所以流水是「尽力而为」的审计记录,余额才是权威(见文件头注释)。
  */
