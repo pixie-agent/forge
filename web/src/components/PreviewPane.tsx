@@ -309,6 +309,14 @@ export default function PreviewPane({
         </div>
       )}
 
+      {/* 生成中:已有预览 iframe 时也把进度(含免费通道的排队提示)显式挂在顶部,避免只看得到旧预览 */}
+      {streaming && progressText && previewUrl && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-indigo-500/20 bg-indigo-500/5 px-3 py-2 text-xs text-indigo-300">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+          <span>{progressText}</span>
+        </div>
+      )}
+
       {viewVersion > 0 && viewVersion !== latestVersion && !streaming && (
         <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
           <span>{t('preview.historyBanner', { view: viewVersion, latest: latestVersion })}</span>

@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   agent_log      TEXT,                      -- agent 的流式输出(thinking/正文/工具调用),服务端保留尾部
   error          TEXT,
   result_version INTEGER,
+  model_config_id TEXT NOT NULL DEFAULT '',  -- 派发时使用的后台模型配置快照(见 schema.migrate-model-config.sql)
+  channel        TEXT NOT NULL DEFAULT '',  -- '' | free | vip(见 schema.migrate-model-channel.sql)
   started_at     TEXT,
   updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))  -- 任务总龄的计时起点(cron 据此永久判死)
@@ -108,6 +110,36 @@ CREATE TABLE IF NOT EXISTS job_messages (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 模型配置(与 schema.migrate-model-config.sql 同内容):后台可增删启停的运行时配置,
+-- 每个 channel 最多一条 enabled = 1;表为空时 agent 回落 Cloud Run env 默认模型。
+CREATE TABLE IF NOT EXISTS model_configs (
+  id                 TEXT PRIMARY KEY,
+  name               TEXT NOT NULL,
+  channel            TEXT NOT NULL DEFAULT 'default',
+  provider_id        TEXT NOT NULL DEFAULT 'forge',
+  base_url           TEXT NOT NULL,
+  api_dialect        TEXT NOT NULL DEFAULT 'openai-completions',
+  model_id           TEXT NOT NULL,
+  thinking_level     TEXT NOT NULL DEFAULT 'medium',
+  thinking_format    TEXT NOT NULL DEFAULT '',   -- pi compat.thinkingFormat;空 = 按 baseUrl 自动推断
+  max_tokens         INTEGER NOT NULL DEFAULT 16384,
+  reasoning          INTEGER NOT NULL DEFAULT 1,
+  image_input        INTEGER NOT NULL DEFAULT 0,
+  design_review      TEXT NOT NULL DEFAULT 'generate',
+  max_run_ms         INTEGER NOT NULL DEFAULT 1500000,
+  polish_max_ms      INTEGER NOT NULL DEFAULT 300000,
+  queue_concurrency  INTEGER NOT NULL DEFAULT 0,   -- 任务并发(0=不限);仅 free 生效,与 Cloud Run 资源并发无关
+  input_price        REAL NOT NULL DEFAULT 0,
+  output_price       REAL NOT NULL DEFAULT 0,
+  cache_read_price   REAL NOT NULL DEFAULT 0,
+  cache_write_price  REAL NOT NULL DEFAULT 0,
+  enabled            INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_model_configs_active
+  ON model_configs(channel) WHERE enabled = 1;
+
 -- 计费与用量(与 schema.migrate-billing.sql 同内容:新库跑本文件,已有库跑那个增量文件)。
 -- job_usage:每个任务的真实 token 用量与成本(agent 上报;成功/失败/取消都要记,它们都烧钱);
 -- credit_ledger:积分只追加账本,余额以 users.credits 为准;orders:充值订单(接 MoR 时启用)。
@@ -116,6 +148,7 @@ CREATE TABLE IF NOT EXISTS job_usage (
   user_id        TEXT NOT NULL,
   project_id     TEXT NOT NULL,
   model          TEXT NOT NULL DEFAULT '',
+  model_config_id TEXT NOT NULL DEFAULT '',  -- 计价所用的后台配置快照(id 为空 = env 默认/旧数据)
   input_tokens   INTEGER NOT NULL DEFAULT 0,
   output_tokens  INTEGER NOT NULL DEFAULT 0,
   cache_read     INTEGER NOT NULL DEFAULT 0,
@@ -221,6 +254,8 @@ CREATE INDEX IF NOT EXISTS idx_connections_user ON connections(user_id, provider
 CREATE INDEX IF NOT EXISTS idx_project_connectors_project ON project_connectors(project_id, env);
 
 CREATE INDEX IF NOT EXISTS idx_job_usage_user ON job_usage(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_usage_created ON job_usage(created_at);
+CREATE INDEX IF NOT EXISTS idx_job_usage_config ON job_usage(model_config_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_user    ON credit_ledger(user_id, created_at);
 -- 同一任务最多各有一条冻结与一条退还(job_hold / job_release):重复回调不会重复记账
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_job_once

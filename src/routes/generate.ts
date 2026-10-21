@@ -9,6 +9,7 @@ import { resolveGrants } from '../lib/connectors/store'
 import { DRAFT_VERSION_NO } from '../lib/artifacts'
 import { type JobType, createJob } from '../lib/jobs'
 import { jobCost, releaseJobCredits, reserveCredits } from '../lib/credits'
+import { getModelConfigForUser, modelChannelForUser, modelOverrideOf } from '../lib/modelConfig'
 import { listSep, parseLang, srv, type Lang } from '../lib/i18n'
 import { cancelJob } from '../lib/commit'
 
@@ -115,7 +116,12 @@ async function launchJob(
   // 先解析连接器再建任务:失败也不留下一个空跑的任务;不可用的连接会被静默跳过(面板负责提示重连)
   const grants = await jobConnectorGrants(c, project, connectors ?? { disabled: [], enabled: [] })
 
-  const jobId = await createJob(c.env.DB, project.id, c.get('user').id, type, payload)
+  // 通道在创建任务前定下来:免费用户走免费执行体(便宜模型 + 进程内排队),
+  // 付过费的用户走 VIP 执行体。通道同时落到 jobs 上,巡检据此放宽免费任务的总龄上限。
+  const userId = c.get('user').id
+  const channel = await modelChannelForUser(c.env.DB, userId)
+
+  const jobId = await createJob(c.env.DB, project.id, userId, type, payload, channel)
   if (!jobId) return c.json({ error: '该项目已有生成任务在进行中,请稍候' }, 409)
 
   // 冻结积分:唯一一处积分闸门(原子条件扣减,并发安全)。不够就把刚建的任务删掉并 402 ——
@@ -124,6 +130,19 @@ async function launchJob(
   if (!(await reserveCredits(c.env.DB, c.get('user').id, jobId, cost))) {
     await c.env.DB.prepare(`DELETE FROM jobs WHERE id = ? AND status = 'pending'`).bind(jobId).run().catch(() => {})
     return c.json({ error: '积分不足,无法生成' }, 402)
+  }
+
+  // 该通道生效的模型配置(表为空/查询失败时为 null → agent 用 Cloud Run env 默认值)。
+  // 在冻结成功之后读取:没有积分请求不该额外查一次配置。
+  const { config: modelConfig } = await getModelConfigForUser(c.env.DB, userId, channel)
+  if (modelConfig) {
+    // 配置快照落到 job:用量回调按这个 id 取当时的价格,改配置不会重算历史成本。
+    // 迁移未执行时该列不存在,静默降级(生成不受影响,只是成本按模型名兜底计算)。
+    await c.env.DB
+      .prepare('UPDATE jobs SET model_config_id = ? WHERE id = ?')
+      .bind(modelConfig.id, jobId)
+      .run()
+      .catch((err) => console.warn(`[model-config] 写 job 配置快照失败:${err instanceof Error ? err.message : String(err)}`))
   }
 
   try {
@@ -155,7 +174,11 @@ async function launchJob(
       history,
       attachments: attachments?.length ? attachments : undefined,
       connectors: grants.length ? grants : undefined,
-    })
+      model: modelConfig ? modelOverrideOf(modelConfig) : undefined,
+      // 任务并发只对免费通道生效;VIP 执行体保持 0(不排队)。
+      // 与 Cloud Run 的 --concurrency 是两回事:那只决定单实例能接多少请求。
+      queueConcurrency: channel === 'free' ? modelConfig?.queue_concurrency : undefined,
+    }, channel === 'free' ? c.env.AGENT_URL_FREE : undefined)
   }
   // 不 await:agent 长跑期间连接可能被掐断(524);结果经 commit 回调交付
   c.executionCtx.waitUntil(dispatch().catch((err) => console.error(`[dispatch] ${jobId.slice(0, 8)} ${err instanceof Error ? err.message : String(err)}`)))

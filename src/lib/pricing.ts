@@ -6,7 +6,7 @@
  */
 
 /** 每 100 万 token 的美元单价 */
-interface ModelPrice {
+export interface ModelPrice {
   /** 未命中缓存的输入 */
   input: number
   output: number
@@ -40,19 +40,30 @@ export interface TokenUsage {
 }
 
 /**
- * LLM 成本。未知模型按 0 记 —— 宁可少算也不要编一个数出来:
- * 后台会按模型名把「未知价格」的行标出来,发现新模型就补进 MODEL_PRICES。
+ * 取单价:后台 model_configs 里配了价就用配置(允许非 DeepSeek 模型也能算成本),
+ * 否则回落到内置快照。两者都没有 → null(后台标记「未计价」,成本按 0 记)。
  */
-export function llmCostUsd(model: string, usage: TokenUsage): number {
-  const p = MODEL_PRICES[model]
+export function priceOf(model: string, override?: ModelPrice | null): ModelPrice | null {
+  if (override && (override.input > 0 || override.output > 0 || override.cacheRead > 0 || override.cacheWrite > 0)) {
+    return override
+  }
+  return MODEL_PRICES[model] ?? null
+}
+
+/**
+ * LLM 成本。未知模型按 0 记 —— 宁可少算也不要编一个数出来:
+ * 后台会按模型名把「未知价格」的行标出来,发现新模型就补进 MODEL_PRICES 或在后台配置价格。
+ */
+export function llmCostUsd(model: string, usage: TokenUsage, override?: ModelPrice | null): number {
+  const p = priceOf(model, override)
   if (!p) return 0
   const t = usage.input * p.input + usage.output * p.output + usage.cacheRead * p.cacheRead + usage.cacheWrite * p.cacheWrite
   return t / 1_000_000
 }
 
 /** 是否已登记该模型的单价(后台据此提示"成本下界"或"未计价") */
-export function hasPrice(model: string): boolean {
-  const p = MODEL_PRICES[model]
+export function hasPrice(model: string, override?: ModelPrice | null): boolean {
+  const p = priceOf(model, override)
   return !!p && (p.input > 0 || p.output > 0)
 }
 

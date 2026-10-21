@@ -12,6 +12,27 @@ export interface ArtifactManifestPayload {
   files: { path: string; size: number }[]
 }
 
+/**
+ * 本次任务的模型覆盖(来自后台 model_configs 的生效行,见 src/lib/modelConfig.ts)。
+ * 只传配置,不传密钥 —— agent 仍然从 Cloud Run env 读取 LLM_API_KEY。
+ */
+export interface AgentModelOverride {
+  providerId?: string
+  modelId: string
+  baseUrl: string
+  api: 'openai-completions' | 'anthropic-messages'
+  thinkingLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  /** pi compat.thinkingFormat;缺省时沿用 env / pi 的 baseUrl 自动推断 */
+  thinkingFormat?: 'openai' | 'openrouter' | 'zai' | 'qwen' | 'qwen-chat-template'
+  /** pi Model.maxTokens */
+  maxTokens?: number
+  reasoning?: boolean
+  imageInput?: boolean
+  designReview?: 'off' | 'generate' | 'always'
+  maxRunMs?: number
+  polishMaxMs?: number
+}
+
 /** POST {AGENT_URL}/run 请求体(与 agent/src/types.ts 的 RunRequest 对齐) */
 export interface AgentRunRequest {
   jobId: string
@@ -20,6 +41,13 @@ export interface AgentRunRequest {
   idea?: string
   message?: string
   note?: string
+  /** 后台配置的模型覆盖;缺省时 agent 使用 Cloud Run env 的默认模型 */
+  model?: AgentModelOverride
+  /**
+   * 该通道同时执行的任务数(0 = 不限制);缺省时 agent 用 Cloud Run env 的 AGENT_QUEUE_CONCURRENCY。
+   * 这是「任务并发」,不是 Cloud Run 的 --concurrency(那只是单实例能接多少请求)。
+   */
+  queueConcurrency?: number
   /** chat:当前最新版本的源码树(Worker 从 versions.src_json 取出带上) */
   currentFiles?: FileMap
   /** chat:此前的对话历史(用户/助手交替),供 agent 理解上下文,实现连续对话 */
@@ -47,11 +75,19 @@ export interface AgentRunResult {
   summary?: string
 }
 
-/** 派发到 Cloud Run。请求在 Cloud Run 侧一直持有到 agent 跑完(请求级计费,用完即缩容) */
-export async function dispatchAgent(env: Env, input: Omit<AgentRunRequest, 'callbackBase'>): Promise<AgentRunResult> {
+/**
+ * 派发到 Cloud Run。请求在 Cloud Run 侧一直持有到 agent 跑完(请求级计费,用完即缩容)。
+ * `agentUrl` 用来把免费通道送到独立执行体(便宜模型 + 进程内排队);不传则用默认 AGENT_URL。
+ */
+export async function dispatchAgent(
+  env: Env,
+  input: Omit<AgentRunRequest, 'callbackBase'>,
+  agentUrl?: string
+): Promise<AgentRunResult> {
   const body: AgentRunRequest = { ...input, callbackBase: env.PUBLIC_BASE_URL }
   const timeoutMs = Number(env.AGENT_DISPATCH_TIMEOUT_MS ?? 0)
-  const res = await fetch(`${env.AGENT_URL.replace(/\/+$/, '')}/run`, {
+  const target = (agentUrl || env.AGENT_URL).replace(/\/+$/, '')
+  const res = await fetch(`${target}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Agent-Secret': env.AGENT_SECRET },
     body: JSON.stringify(body),

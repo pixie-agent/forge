@@ -26,7 +26,7 @@ function modelsJson(config: AgentConfig): string {
     reasoning: config.modelReasoning,
     input: config.supportsImageInput ? ['text', 'image'] : ['text'],
     contextWindow: 200_000,
-    maxTokens: 16_384,
+    maxTokens: config.maxTokens,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   }
   const provider: Record<string, unknown> = {

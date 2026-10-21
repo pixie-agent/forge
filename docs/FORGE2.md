@@ -336,15 +336,16 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 **端到端验证(多文件)**:`generate`(极简番茄钟)→ Cloud Run agent 写多文件 React 源码 → 平台 `vite build` → commit 回调落版本(`src_json` 进 D1、`dist` 进 R2、`manifest` 生成)→ 预览 `GET /p/:token/` 200 → `publish` → `GET /s/:slug/` 200,入口注入 `window.__FORGE_API_BASE__="/s/:slug/api"`,Vite 哈希资源(`assets/*.js|css`)按长缓存命中,`/s/:slug/api/db/:collection` 200。全链路贯通。
 
-## 12. 管理后台(只读)
+## 12. 管理后台
 
 跨用户查看全部产物的后台,与普通用户体系**完全隔离**:口令来自 `ADMIN_PASSWORD` secret,`POST /api/admin/login` 校验后下发由口令派生的 HttpOnly cookie(`lib/admin.ts`,改口令即全体失效,无需会话表)。
 
-- 页面:`/admin`(产物列表:属主、状态、版本/对话/数据计数、公开链接 + **草稿预览**,支持关键字搜索与分页,含全站统计);`/admin/projects/:id`(详情:草稿 + 全部版本源码 + iframe 预览 + 公开链接、对话记录、任务与 **agent 流式日志**尾部、站点数据);`/admin/users`(用户使用情况列表,按邮箱搜索、分页);`/admin/users/:id`(单个用户详情)。「数据计数」= 该项目两个环境 SQLite 各表行数之和,实时统计(页大小上限 20 以控制子请求)。顶栏在「产物 / 用户」间切换,产物列表的属主邮箱、用户详情的项目行互链。
+- 页面:`/admin`(产物列表:属主、状态、版本/对话/数据计数、公开链接 + **草稿预览**,支持关键字搜索与分页,含全站统计);`/admin/projects/:id`(详情:草稿 + 全部版本源码 + iframe 预览 + 公开链接、对话记录、任务与 **agent 流式日志**尾部、站点数据);`/admin/users`(用户使用情况列表,按邮箱搜索、分页);`/admin/users/:id`(单个用户详情);`/admin/models`(模型配置与用量,见 §21)。「数据计数」= 该项目两个环境 SQLite 各表行数之和,实时统计(页大小上限 20 以控制子请求)。顶栏在「产物 / 用户」间切换,产物列表的属主邮箱、用户详情的项目行互链。
 - **草稿预览**:「草稿」是 `version_no = 0` 的工作副本,不进正式版本序列,但正是用户当下看到的样子。列表/详情/用户详情都会给它单独签发预览令牌(`draft.preview_token`),详情页默认就停在草稿上,列表页可一键 `↗` 打开。令牌是无状态 HMAC(绑定 `projectId + versionNo`),与 `/p/:token/` 的定位方式一致,所以后台预览不依赖用户 cookie;草稿在 `/p/` 下以 `env=draft` 提供数据接口,并带「测试环境 · 草稿预览」角标。管理侧只在**构建清单有产物**(`manifest.files` 非空)时才签发令牌,否则 `preview_token` 为 `null`,前端显示空状态而不是打开一个必然 404 的 iframe;`GET /projects/:id/versions/:no` 同样遵守这条(`no = 0` 即草稿,允许请求)。
 - 接口(除 login/logout/me 外全部 `requireAdmin` 只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`;`POST /api/admin/{login,logout,migrate-doc-data}`。数据行取自项目该环境的独立 SQLite 库(§15)。`stats` 除项目/用户/版本外,含任务总数、成功/失败数、近 7 天任务数与近 7 天活跃用户数。项目列表/用户详情每行附 `draft` 字段:产物文件数直接用 SQL 的 `json_array_length(json_extract(manifest_json,'$.files'))` 算(带 `json_valid` 兜底),不把整棵清单拉进 Worker。
 - **用户使用情况**(`/admin/users`、`/admin/users/:id`):每个注册用户一行,聚合「核心用量」(项目数、正式版本数、对话消息数、任务数(生成/对话、成功/失败))、「积分」(余额 credits;已消耗 ≈ 成功任务数,每次成功 commit 扣 1)、「活跃度」(注册时间、最近活跃 = 最后一次任务时间、近 7/30 天任务数)、「产物体量」(构建产物总字节 = 各正式版本 `bytes` 之和;数据行数按项目读两个环境的独立 SQLite 求和,仅在用户详情页按该用户的项目集计算以控制子请求)。聚合走 `users` 上的关联子查询,任务量以 `jobs` 表为准。
 - 接口(除 login/logout/me 外全部 `requireAdmin` 只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`;`POST /api/admin/{login,logout,migrate-doc-data}`。数据行取自项目该环境的独立 SQLite 库(§15)。`stats` 除项目/用户/版本外,含任务总数、成功/失败数、近 7 天任务数与近 7 天活跃用户数。
+- **模型配置与用量**(`/admin/models`):后台唯一可写区域,见 §21。`GET /api/admin/models` 返回配置列表 + 近 7 天按配置/模型聚合的用量;`POST /api/admin/models` 新增配置,`POST /api/admin/models/:id/enable|disable` 启用/停用。顶栏在「产物 / 用户 / 模型」间切换。
 - 配置:`npx wrangler secret put ADMIN_PASSWORD`(未设置则后台整体不可用)。
 
 ## 13. 产物形态与选型(多文件 / 全栈)
@@ -863,3 +864,95 @@ npm run db:migrate:billing:remote      # 生产
 - 待定稿:订阅到期与降级策略(当前取消不回收已发积分)、退款政策细节。
 - 用户需自备:Creem 账号与商品创建(平台方注册,与用户无关)、webhook 端点登记、`CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET` 写入。
 - 可选增强:计费页展示订阅状态(数据已在 `subscriptions` 表)、客户自助门户链接(Creem hosted customer portal)、发票下载入口。
+
+## 21. 模型配置与用量观测(2026-10-21)
+
+目标:把「用哪个模型、什么价格、跑多久、开不开复查轮」从**部署命令里的环境变量**变成后台可管理的运行时数据,并让每次任务的真实成本**可按模型/配置归因**。
+
+### 21.1 数据模型(`schema.migrate-model-config.sql`)
+
+`model_configs` 一行 = 一套可派发的模型配置:
+
+| 字段 | 说明 |
+| --- | --- |
+| `name` / `model_id` / `provider_id` | 后台展示名 / 上游模型 id / pi provider id |
+| `base_url` / `api_dialect` | 网关地址与方言(`openai-completions` / `anthropic-messages`) |
+| `thinking_level` / `reasoning` / `image_input` | 思考档位、是否推理模型、是否声明图片输入 |
+| `thinking_format` / `max_tokens` | pi 的 `compat.thinkingFormat`(空 = 按 baseUrl 自动推断)与 `Model.maxTokens`;思考预算从 `max_tokens` 里划,值太小会挤掉输出 |
+| `design_review` / `max_run_ms` / `polish_max_ms` | 复查轮开关与运行预算 |
+| `input_price` / `output_price` / `cache_read_price` / `cache_write_price` | USD / 1M tokens;全 0 时回落到 `src/lib/pricing.ts` 的内置价格 |
+| `channel` / `enabled` | `free` / `vip` / `default`(见 §21.5);每通道最多一条 `enabled = 1`(部分唯一索引) |
+
+- **配置行不可变**:改配置 = 新增一行再启用。`jobs.model_config_id` 在派发时落快照,`job_usage.model_config_id` 记录该任务用的配置与价格,历史成本不会因为后来调价而变。
+- **回落**:表为空、没有启用行、或查询失败(含未执行迁移)→ Worker 不向 agent 下发覆盖,agent 使用 Cloud Run env 默认模型。后台不是生成链路的单点。
+- **密钥边界**:表里没有 API key。agent 仍从 Cloud Run env 读 `LLM_API_KEY`,所以后台能切的是「同一网关 + 同一把 key 能访问的模型」;换供应商(新 base URL + 新 key)仍然要部署并写 secret。
+
+### 21.2 链路
+
+1. `launchJob`(`src/routes/generate.ts`)在积分冻结成功后读一次生效配置(`src/lib/modelConfig.ts:getActiveModelConfig`)。
+2. 配置 id 写入 `jobs.model_config_id`;配置内容作为 `model` 字段随 `POST {AGENT_URL}/run` 下发(`src/lib/agent.ts` 的 `AgentModelOverride`)。
+3. agent 侧 `applyModelOverride`(`agent/src/config.ts`)把覆盖合并到 env 默认配置上,非法值回落;`session.ts` 用它生成 `models.json`(含 `compat.thinkingFormat` 与 `maxTokens`)、`runner.ts` 用它控制 `maxRunMs` / 复查轮。
+4. 用量回调 `POST /internal/jobs/:id/usage` 按 `jobs.model_config_id` 取当时的价格(`src/routes/internal.ts`),换算后写入 `job_usage`(含 `model_config_id`)。
+
+### 21.3 后台
+
+- 页面 `/admin/models`(中文,刻意不接 i18n):近 7 天任务/成功率/总成本/单次成功成本/无用量记录;当前生效配置;全部配置列表(含未计价标记);新增表单;按模型用量。
+- 接口:`GET /api/admin/models`、`POST /api/admin/models`、`POST /api/admin/models/:id/enable`、`POST /api/admin/models/:id/disable`,全部 `requireAdmin`。
+- **单次成功成本** = 区间总成本 / 成功任务数。失败任务也烧 token 与实例时间(用户不付钱,平台付),必须摊进去;`jobs_without_usage` 单独计数,避免「报表正常但有一批任务没上报」。
+- 未计价:配置四项价格全 0 且模型不在内置价格表 → 后台标「未计价」,成本按 0 记(宁可少算也不编数)。
+
+### 21.4 上线步骤
+
+```bash
+npm run db:migrate:model:staging      # v1:model_configs + usage 快照列
+npm run db:migrate:model2:staging     # v2:thinking_format + max_tokens
+npm run db:migrate:channel:staging    # jobs.channel
+npm run db:seed:channels:staging      # 写入 staging 的 vip / free 默认配置(幂等)
+npm run typecheck && npm run build
+npm run deploy:staging
+# 验证:后台 /admin/models 看到两个通道各一条生效配置 → 分别发起任务 →
+#       看 job_usage.model_config_id / jobs.channel 是否按通道归因
+```
+
+生产:`npm run db:migrate:model:remote` → `model2` → `channel` → `db:seed:channels:remote`
+→ 合并到 `main` → `npm run deploy`(生产部署需用户明确放行)。
+
+### 21.5 通道分流:免费积分排队 / 充值积分 VIP(2026-10-21)
+
+目标:**免费用便宜模型 + 任务并发上限控成本,付过费的用户走原模型、不排队。**
+判定口径是「用户有没有过任意一条 `orders.status = 'paid'`」(一次性充值或订阅扣款都算),
+不追溯积分批次 —— 积分本身可互换,账本没有「哪一分是充值来的」。
+
+| | 免费通道(`free`) | VIP 通道(`vip`) |
+| --- | --- | --- |
+| 判定 | 没有 paid 订单 | 有过任意一条 paid 订单 |
+| 模型 | GLM-5.3-Flash(`openai-completions` + `zai`) | DeepSeek V4.1-Flash(`anthropic-messages`) |
+| 执行体 | 独立 Cloud Run:`forge-agent-free` / `-staging` | 原 `forge-agent` / `-staging` |
+| 并发 | 资源并发:Cloud Run `--concurrency 8 --no-cpu-throttling --max-instances 1`;任务并发:`model_configs.queue_concurrency`(默认 2,后台可改) | 保持原配置(不排队) |
+| 超时 | Cloud Run `--timeout 3600`;Worker 总龄阈值 3700s | Cloud Run `--timeout 1800`;Worker 总龄阈值 1900s |
+
+链路:
+
+1. `launchJob`(`src/routes/generate.ts`)派发前算通道并写 `jobs.channel`;免费任务派发到
+   `AGENT_URL_FREE`(`src/lib/agent.ts:dispatchAgent`),VIP 仍走 `AGENT_URL`。
+2. Worker 按通道取 `model_configs` 生效行(`getModelConfigForUser`),随请求下发模型覆盖与
+   `queueConcurrency`(仅 free 通道)。
+3. 免费执行体用请求里的 `queueConcurrency` 设置 `agent/src/index.ts` 的 `FifoQueue`;缺省回落
+   Cloud Run env 的 `AGENT_QUEUE_CONCURRENCY`。它限制的是**同时跑几个 job**,与 Cloud Run 的
+   `--concurrency`(单实例能接多少请求,资源侧扩缩容)是两回事。排队在心跳与取消巡检启动之后 ——
+   等待期间照常写 `updated_at`,不会被 180s 心跳阈值误判失联;用户在排队中取消会立即返回 409。
+   排队期间用 `progress` 回调持续上报「排队中,前面还有 N 个任务」(位置变化才重发,排到后
+   runner 的第一条阶段文案立即覆盖),前端生成面板直接展示 `job.progress`,免费用户能感知到自己在排队;
+   VIP 通道 `queueConcurrency = 0`,不会产生任何排队文案。
+   **后台改并发后,下一次派发就生效,不需要重新部署**(值随每次请求下发,调大时立即放行等待者)。
+   `--concurrency 8` 只是给「正在跑 + 排队」留出 8 个在途请求的位置;超过 8 个的突发会在平台层被拒,
+   任务由巡检判失败(要更深的队列应改成 Worker 侧排队)。
+4. `jobs.channel` 同时用于巡检:免费任务的总龄阈值放宽到 3700s(排队 + 3600s 执行)。
+   迁移未执行(列不存在)时巡检自动退回旧的单阈值查询,不影响生成。
+
+配置方法:`/admin/models` 新增配置时选通道;free 通道还要填「任务并发」(`queue_concurrency`,0 = 不限),
+每通道最多一条生效行,互不覆盖。已生效的 free 配置在卡片里可以直接改任务并发(运维旋钮,不影响历史成本),
+改完下一次派发生效。
+`db:seed:channels:*` 的两条默认配置是幂等种子(固定 id + `INSERT OR IGNORE`)。
+**密钥边界不变**:免费执行体必须有自己的 GLM key(`llm-api-key-free`),
+后台切不了密钥;生产上线免费通道前要先建好 secret 并部署 `npm run agent:deploy:free:prod`。
