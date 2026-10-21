@@ -947,6 +947,9 @@ npm run deploy:staging
    **后台改并发后,下一次派发就生效,不需要重新部署**(值随每次请求下发,调大时立即放行等待者)。
    `--concurrency 8` 只是给「正在跑 + 排队」留出 8 个在途请求的位置;超过 8 个的突发会在平台层被拒,
    任务由巡检判失败(要更深的队列应改成 Worker 侧排队)。
+   **并发任务的会话目录必须按 job 隔离**:`createForgeSession` 的 `agentDir` 放在各自 workspace 的
+   `.pi/` 下。曾经共用 `${WORKSPACE_ROOT}/.pi/models.json`,两个任务同时写/读会拿到半截 JSON
+   (`Unexpected end of JSON input`),线上在并发第 2 个任务上踩过;`.pi` 已在源码收集的跳过列表里。
 4. `jobs.channel` 同时用于巡检:免费任务的总龄阈值放宽到 3700s(排队 + 3600s 执行)。
    迁移未执行(列不存在)时巡检自动退回旧的单阈值查询,不影响生成。
 
