@@ -80,8 +80,8 @@ export default function Billing() {
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
       <TopBar />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-3 py-6 sm:px-4 sm:py-8">
-        <div className="mb-6 flex items-center justify-between">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-3 py-4 sm:px-4 sm:py-8">
+        <div className="mb-4 flex items-center justify-between sm:mb-6">
           <h1 className="text-xl font-semibold">{t('billing.title')}</h1>
           <Link to="/projects" className="text-sm text-gray-400 hover:text-gray-200">
             {t('projects.title')}
@@ -91,15 +91,15 @@ export default function Billing() {
         {summary === null || plans === null ? (
           <p className="text-sm text-gray-500">{t('common.loading')}</p>
         ) : (
-          <div className="space-y-8">
+          <div className="space-y-6 sm:space-y-8">
             {/* 余额 */}
-            <section className="rounded-2xl border border-gray-800 bg-gradient-to-br from-indigo-500/10 to-fuchsia-500/5 p-5">
-              <div className="flex items-end justify-between gap-4">
+            <section className="rounded-2xl border border-gray-800 bg-gradient-to-br from-indigo-500/10 to-fuchsia-500/5 p-4 sm:p-5">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
                 <div>
                   <p className="text-xs uppercase tracking-wide text-gray-400">{t('billing.balance')}</p>
                   <p className="mt-1 text-3xl font-semibold text-indigo-300">{summary.credits}</p>
                 </div>
-                <p className="max-w-md text-right text-xs text-gray-500">
+                <p className="text-xs leading-relaxed text-gray-500 sm:max-w-md sm:text-right">
                   {t('billing.balanceHint', { cost: plans.jobCost.generate ?? 1 })}
                 </p>
               </div>
@@ -166,30 +166,38 @@ export default function Billing() {
                 <p className="mt-3 text-sm text-gray-500">{t('billing.ledgerEmpty')}</p>
               ) : (
                 <div className="mt-3 overflow-x-auto rounded-xl border border-gray-800">
-                  <table className="w-full text-left text-sm">
+                  <table className="w-full text-left text-xs sm:text-sm">
                     <thead className="bg-gray-900 text-xs text-gray-500">
                       <tr>
-                        <th className="px-3 py-2 font-medium">{t('billing.colTime')}</th>
-                        <th className="px-3 py-2 font-medium">{t('billing.colReason')}</th>
-                        <th className="px-3 py-2 text-right font-medium">{t('billing.colDelta')}</th>
-                        <th className="px-3 py-2 text-right font-medium">{t('billing.colBalance')}</th>
-                        <th className="px-3 py-2 font-medium">{t('billing.colNote')}</th>
+                        <th className="px-2 py-2 font-medium sm:px-3">{t('billing.colTime')}</th>
+                        <th className="px-2 py-2 font-medium sm:px-3">{t('billing.colReason')}</th>
+                        <th className="px-2 py-2 text-right font-medium sm:px-3">{t('billing.colDelta')}</th>
+                        {/* 手机屏幕窄:余额与备注属于次要信息,收进桌面端 */}
+                        <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">{t('billing.colBalance')}</th>
+                        <th className="hidden px-3 py-2 font-medium sm:table-cell">{t('billing.colNote')}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {summary.ledger.map((e) => (
                         <tr key={e.id} className="border-t border-gray-800/70">
-                          <td className="whitespace-nowrap px-3 py-2 text-gray-400">{formatTime(e.createdAt)}</td>
-                          <td className="px-3 py-2 text-gray-300">{t(REASON_KEY[e.reason] ?? 'common.unknown')}</td>
+                          <td className="whitespace-nowrap px-2 py-2 text-gray-400 sm:px-3">{formatTime(e.createdAt)}</td>
+                          <td className="px-2 py-2 text-gray-300 sm:px-3">
+                            {t(REASON_KEY[e.reason] ?? 'common.unknown')}
+                            {/* 手机上备注并到类型下方,不额外占列 */}
+                            {e.note && <span className="mt-0.5 block text-[11px] text-gray-500 sm:hidden">{e.note}</span>}
+                          </td>
                           <td
-                            className={`px-3 py-2 text-right font-medium ${
+                            className={`px-2 py-2 text-right font-medium sm:px-3 ${
                               e.delta >= 0 ? 'text-emerald-400' : 'text-gray-300'
                             }`}
                           >
                             {e.delta >= 0 ? `+${e.delta}` : e.delta}
+                            <span className="mt-0.5 block text-[10px] font-normal text-gray-500 sm:hidden">
+                              {t('billing.colBalance')} {e.balanceAfter}
+                            </span>
                           </td>
-                          <td className="px-3 py-2 text-right text-gray-400">{e.balanceAfter}</td>
-                          <td className="px-3 py-2 text-gray-500">{e.note || '—'}</td>
+                          <td className="hidden px-3 py-2 text-right text-gray-400 sm:table-cell">{e.balanceAfter}</td>
+                          <td className="hidden px-3 py-2 text-gray-500 sm:table-cell">{e.note || '—'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -203,25 +211,25 @@ export default function Billing() {
               <section>
                 <h2 className="text-base font-medium">{t('billing.orders')}</h2>
                 <div className="mt-3 overflow-x-auto rounded-xl border border-gray-800">
-                  <table className="w-full text-left text-sm">
+                  <table className="w-full text-left text-xs sm:text-sm">
                     <thead className="bg-gray-900 text-xs text-gray-500">
                       <tr>
-                        <th className="px-3 py-2 font-medium">{t('billing.colTime')}</th>
-                        <th className="px-3 py-2 font-medium">{t('billing.colAmount')}</th>
-                        <th className="px-3 py-2 text-right font-medium">{t('billing.colCredits')}</th>
-                        <th className="px-3 py-2 font-medium">{t('billing.colStatus')}</th>
+                        <th className="px-2 py-2 font-medium sm:px-3">{t('billing.colTime')}</th>
+                        <th className="px-2 py-2 font-medium sm:px-3">{t('billing.colAmount')}</th>
+                        <th className="px-2 py-2 text-right font-medium sm:px-3">{t('billing.colCredits')}</th>
+                        <th className="px-2 py-2 font-medium sm:px-3">{t('billing.colStatus')}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {summary.orders.map((o) => (
                         <tr key={o.id} className="border-t border-gray-800/70">
-                          <td className="whitespace-nowrap px-3 py-2 text-gray-400">{formatTime(o.createdAt)}</td>
-                          <td className="px-3 py-2 text-gray-300">
+                          <td className="whitespace-nowrap px-2 py-2 text-gray-400 sm:px-3">{formatTime(o.createdAt)}</td>
+                          <td className="px-2 py-2 text-gray-300 sm:px-3">
                             {formatPrice(o.amountMinor, o.currency)}
-                            <span className="ml-2 text-xs text-gray-600">{o.provider}</span>
+                            <span className="ml-2 hidden text-xs text-gray-600 sm:inline">{o.provider}</span>
                           </td>
-                          <td className="px-3 py-2 text-right text-emerald-400">+{o.credits}</td>
-                          <td className="px-3 py-2 text-gray-300">{t(STATUS_KEY[o.status] ?? 'common.unknown')}</td>
+                          <td className="px-2 py-2 text-right text-emerald-400 sm:px-3">+{o.credits}</td>
+                          <td className="px-2 py-2 text-gray-300 sm:px-3">{t(STATUS_KEY[o.status] ?? 'common.unknown')}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -285,7 +293,7 @@ function PackCard({
 }) {
   const t = useT()
   return (
-    <div className="flex flex-col rounded-2xl border border-gray-800 bg-gray-900 p-5">
+    <div className="flex flex-col rounded-2xl border border-gray-800 bg-gray-900 p-4 sm:p-5">
       <div className="mb-3 flex items-center justify-between">
         <span className="text-sm text-gray-400">{t('billing.creditsAmount', { credits: pack.credits })}</span>
         <Badge badge={pack.badge} t={t} />
@@ -318,7 +326,7 @@ function PlanCard({
 }) {
   const t = useT()
   return (
-    <div className="flex flex-col rounded-2xl border border-gray-800 bg-gray-900 p-5">
+    <div className="flex flex-col rounded-2xl border border-gray-800 bg-gray-900 p-4 sm:p-5">
       <div className="mb-3 flex items-center justify-between">
         <span className="text-base font-medium text-gray-100">{plan.name}</span>
         <Badge badge={plan.badge} t={t} />

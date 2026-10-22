@@ -28,6 +28,7 @@ export const zh = {
   'common.search': '搜索',
   'common.language': '语言',
   'common.version': '版本',
+  'common.more': '更多操作',
 
   // ---------- 主题 / 环境角标 ----------
   'theme.toLight': '切换到亮色主题',
@@ -38,6 +39,7 @@ export const zh = {
   // ---------- 顶栏 ----------
   'topbar.credits': '积分',
   'topbar.logout': '退出',
+  'topbar.account': '账号',
 
   // ---------- 首页 ----------
   'landing.enterWorkspace': '进入工作台',
@@ -80,6 +82,23 @@ export const zh = {
   'verify.success': '验证成功,正在进入…',
   'verify.failedTitle': '验证失败',
   'verify.goLogin': '去登录页重新发送',
+
+  // ---------- 账号设置 ----------
+  'account.title': '账号设置',
+  'account.email': '邮箱',
+  'account.setTitle': '设置密码',
+  'account.changeTitle': '修改密码',
+  'account.googleHint': '你目前通过 Google 登录,尚未设置密码。设置后即可用邮箱 + 密码登录同一账号。',
+  'account.current': '当前密码',
+  'account.new': '新密码(至少 6 位)',
+  'account.confirm': '确认新密码',
+  'account.set': '设置密码',
+  'account.change': '修改密码',
+  'account.saved': '密码已更新,其他设备需要重新登录。',
+  'account.saveFailed': '修改密码失败',
+  'account.tooShort': '新密码至少 6 位',
+  'account.mismatch': '两次输入的新密码不一致',
+  'account.sessionHint': '修改密码后,该账号在其他设备上的登录会失效。',
 
   // ---------- 项目列表 ----------
   'projects.title': '我的项目',
@@ -165,6 +184,8 @@ export const zh = {
   'err.emailTaken': '该邮箱已注册',
   'err.invalidEmail': '邮箱格式不正确',
   'err.passwordTooShort': '密码至少 6 位',
+  'err.passwordTooLong': '密码过长',
+  'err.currentPasswordWrong': '当前密码不正确',
   'err.badCredentials': '邮箱或密码错误',
   'err.emailNotVerified': '邮箱未验证,请先查收验证邮件',
   'err.verifyLinkInvalid': '验证链接无效或已过期,请重新发送',
@@ -330,7 +351,9 @@ export const zh = {
   'preview.help.6': '交付:「代码」标签左侧栏的「↓ 下载项目」导出该版本完整源码(zip,含源码不含数据),可本地运行或另存。',
   'preview.help.7': '「下线」立即撤回公开链接(版本与数据都保留,可随时再发布)。',
   'preview.openTestTitle': '新标签打开测试环境,可用真机/全屏体验',
+  'preview.copyTest': '复制测试链接',
   'preview.copyTestTitle': '复制测试环境链接;打开者看到的是带「测试环境」角标的草稿,不是线上',
+  'preview.copyLive': '复制线上链接',
   'preview.openLiveTitle': '打开线上公开页 {url}(任何人可访问)',
   'preview.openExternal': '打开 ↗',
   'preview.unpublishTitle': '下线后公开链接立即失效(版本与数据保留)',

@@ -73,15 +73,17 @@ export async function getSessionUser(db: D1Database, request: Request): Promise<
   const token = readToken(request)
   if (!token) return null
   const row = await db
-    .prepare('SELECT u.id, u.email, u.credits, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?')
+    .prepare(
+      "SELECT u.id, u.email, u.credits, u.password_hash <> '' AS has_password, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?"
+    )
     .bind(token)
-    .first<{ id: string; email: string; credits: number; expires_at: string }>()
+    .first<{ id: string; email: string; credits: number; has_password: number; expires_at: string }>()
   if (!row) return null
   if (row.expires_at <= new Date().toISOString()) {
     await db.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run()
     return null
   }
-  return { id: row.id, email: row.email, credits: row.credits }
+  return { id: row.id, email: row.email, credits: row.credits, has_password: Boolean(row.has_password) }
 }
 
 export async function requireUser(c: Context<AppEnv>, next: Next) {

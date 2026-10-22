@@ -5,6 +5,7 @@ import Login from './pages/Login'
 import VerifyEmail from './pages/VerifyEmail'
 import Projects from './pages/Projects'
 import Billing from './pages/Billing'
+import Account from './pages/Account'
 import Pricing from './pages/Pricing'
 import Legal from './pages/Legal'
 import Workspace from './pages/Workspace'
@@ -88,6 +89,14 @@ export default function App() {
             element={
               <Guard>
                 <Billing />
+              </Guard>
+            }
+          />
+          <Route
+            path="/account"
+            element={
+              <Guard>
+                <Account />
               </Guard>
             }
           />

@@ -13,8 +13,8 @@ export default function PublicFooter() {
   const year = new Date().getFullYear()
 
   return (
-    <footer className="mt-16 border-t border-gray-800 bg-gray-950">
-      <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-8 text-xs text-gray-500 sm:flex-row sm:items-start sm:justify-between">
+    <footer className="mt-12 border-t border-gray-800 bg-gray-950 sm:mt-16">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-6 text-xs text-gray-500 sm:flex-row sm:items-start sm:justify-between sm:gap-5 sm:py-8">
         <div>
           <p className="font-medium text-gray-300">Forge</p>
           <p className="mt-1 max-w-xs leading-relaxed">{t('footer.tagline')}</p>

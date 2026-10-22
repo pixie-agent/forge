@@ -328,7 +328,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                 )
               )}
             </div>
-            {plan?.tagline && <div className="mb-2 text-xs text-gray-400">{plan.tagline}</div>}
+            {plan?.tagline && <div className="mb-2 hidden text-xs text-gray-400 sm:block">{plan.tagline}</div>}
 
             <ul className="space-y-1 text-xs">
               {steps.map((s, i) => {
@@ -403,7 +403,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                         <span className="truncate">
                           {ev.status === 'running' ? t('chat.toolRunning') : ''}
                           {toolVerb(ev.name)}
-                          {ev.arg ? <span className="text-gray-500"> {ev.arg}</span> : null}
+                          {ev.arg ? <span className="hidden text-gray-500 sm:inline"> {ev.arg}</span> : null}
                         </span>
                       </li>
                     ))}
@@ -411,7 +411,8 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                 )}
                 {changedFiles.length > 0 && (
                   <div className="mt-2 border-t border-indigo-500/20 pt-1.5 text-xs text-gray-500">
-                    {t('chat.changedFiles', { count: changedFiles.length })}<span className="text-gray-400">{changedFiles.slice(-4).join(t('chat.listSep'))}</span>
+                    {t('chat.changedFiles', { count: changedFiles.length })}
+                    <span className="hidden text-gray-400 sm:inline">{changedFiles.slice(-4).join(t('chat.listSep'))}</span>
                   </div>
                 )}
               </>
@@ -426,7 +427,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                       <span className={finishedOk ? 'text-emerald-400' : 'text-indigo-300'}>{finishedOk ? '✓' : '•'}</span>
                       <span className="text-gray-300">
                         <span className="font-medium">{s.title}</span>
-                        {s.summary ? <span className="text-gray-500"> · {s.summary}</span> : ''}
+                        {s.summary ? <span className="hidden text-gray-500 sm:inline"> · {s.summary}</span> : ''}
                       </span>
                     </li>
                   ))}
@@ -435,7 +436,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
             )}
 
             {plan && plan.palette.length > 0 && (
-              <div className="mt-2 flex gap-1">
+              <div className="mt-2 hidden gap-1 sm:flex">
                 {plan.palette.map((c, i) => (
                   <span key={i} className="h-3.5 w-3.5 rounded-full border border-white/20" style={{ background: c }} />
                 ))}
@@ -466,7 +467,7 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
         {credentialCard}
       </div>
 
-      <div className="border-t border-gray-800 p-3">
+      <div className="border-t border-gray-800 p-2.5 pb-safe sm:p-3">
         {/* 本轮可用的外部系统(连接器能力条):绑定即默认生效,这里只是临时开关 */}
         {connectorsBar}
         {/* 已选附件:图片给缩略图、文本给图标;逐个可移除 */}
