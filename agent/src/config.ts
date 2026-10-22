@@ -91,8 +91,8 @@ const API_DIALECTS = new Set(['openai-completions', 'anthropic-messages'])
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
 const THINKING_FORMATS = new Set(['openai', 'openrouter', 'zai', 'qwen', 'qwen-chat-template'])
 const DESIGN_REVIEWS = new Set(['off', 'generate', 'always'])
-/** Cloud Run --timeout 1800s,留 100s 余量 */
-const MAX_RUN_MS = 1_700_000
+/** Cloud Run --timeout 3600s,留 200s 给构建/收尾 */
+const MAX_RUN_MS = 3_400_000
 
 function clamp(v: unknown, fallback: number, min: number, max: number): number {
   const n = typeof v === 'number' ? v : Number(v)

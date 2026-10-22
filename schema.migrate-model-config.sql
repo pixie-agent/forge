@@ -4,7 +4,7 @@
 -- 并把每次任务实际使用的配置记到 job_usage,后台才能按模型/配置看成本。
 --
 -- 生效规则:同一 channel 下 enabled = 1 的那一行生效;表为空或读取失败时回落 Cloud Run env。
--- 配置行不可变(改配置 = 新增一行再启用),这样历史 job_usage 的 config_id 永远指向当时的配置。
+-- 配置行可在后台原地编辑;历史成本在用量上报时已落 job_usage,不会因后来改价而重算。
 CREATE TABLE IF NOT EXISTS model_configs (
   id                 TEXT PRIMARY KEY,
   name               TEXT NOT NULL,                       -- 后台展示名
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS model_configs (
   reasoning          INTEGER NOT NULL DEFAULT 1,
   image_input        INTEGER NOT NULL DEFAULT 0,
   design_review      TEXT NOT NULL DEFAULT 'generate',
-  max_run_ms         INTEGER NOT NULL DEFAULT 1500000,    -- 必须 < Cloud Run --timeout 1800s
+  max_run_ms         INTEGER NOT NULL DEFAULT 1500000,    -- 必须 < Cloud Run --timeout 3600s
   polish_max_ms      INTEGER NOT NULL DEFAULT 300000,
   input_price        REAL NOT NULL DEFAULT 0,             -- USD / 1M tokens
   output_price       REAL NOT NULL DEFAULT 0,

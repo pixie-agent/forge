@@ -74,7 +74,7 @@ const EMPTY_FORM = {
   thinking_format: '',
   max_tokens: '16384',
   design_review: 'generate',
-  max_run_ms: '1500000',
+  max_run_ms: '3000000',
   polish_max_ms: '300000',
   queue_concurrency: '2',
   input_price: '0',
@@ -106,6 +106,7 @@ export default function AdminModels() {
   const [busy, setBusy] = useState('')
   const [form, setForm] = useState({ ...EMPTY_FORM })
   const [showForm, setShowForm] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -123,6 +124,55 @@ export default function AdminModels() {
     void load()
   }, [load])
 
+  function scrollToForm() {
+    requestAnimationFrame(() =>
+      document.getElementById('model-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    )
+  }
+
+  function openCreate() {
+    setEditingId(null)
+    setForm({ ...EMPTY_FORM })
+    setShowForm(true)
+    scrollToForm()
+  }
+
+  function closeForm() {
+    setEditingId(null)
+    setForm({ ...EMPTY_FORM })
+    setShowForm(false)
+  }
+
+  /** 把已有配置回填到表单;保存时原地更新这一行 */
+  function startEdit(row: ConfigRow) {
+    setEditingId(row.id)
+    setForm({
+      name: row.name,
+      channel: row.channel,
+      model_id: row.model_id,
+      base_url: row.base_url,
+      provider_id: row.provider_id,
+      api_dialect: row.api_dialect,
+      thinking_level: row.thinking_level,
+      thinking_format: row.thinking_format,
+      max_tokens: String(row.max_tokens),
+      design_review: row.design_review,
+      max_run_ms: String(row.max_run_ms),
+      polish_max_ms: String(row.polish_max_ms),
+      queue_concurrency: String(row.queue_concurrency ?? 0),
+      input_price: String(row.input_price),
+      output_price: String(row.output_price),
+      cache_read_price: String(row.cache_read_price),
+      cache_write_price: String(row.cache_write_price),
+      reasoning: row.reasoning === 1,
+      image_input: row.image_input === 1,
+      enabled: row.enabled === 1,
+    })
+    setShowForm(true)
+    setError('')
+    scrollToForm()
+  }
+
   async function act(path: string, label: string) {
     setBusy(label)
     setError('')
@@ -138,11 +188,11 @@ export default function AdminModels() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
-    setBusy('create')
+    setBusy('save')
     setError('')
     try {
-      await api('/api/admin/models', {
-        method: 'POST',
+      await api(editingId ? `/api/admin/models/${editingId}` : '/api/admin/models', {
+        method: editingId ? 'PUT' : 'POST',
         body: {
           ...form,
           max_run_ms: Number(form.max_run_ms),
@@ -154,8 +204,7 @@ export default function AdminModels() {
           cache_write_price: Number(form.cache_write_price),
         },
       })
-      setForm({ ...EMPTY_FORM })
-      setShowForm(false)
+      closeForm()
       await load()
     } catch (err) {
       setError((err as Error).message)
@@ -186,7 +235,7 @@ export default function AdminModels() {
               刷新
             </button>
             <button
-              onClick={() => setShowForm((v) => !v)}
+              onClick={() => (showForm ? closeForm() : openCreate())}
               className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
             >
               {showForm ? '收起表单' : '新增配置'}
@@ -224,13 +273,22 @@ export default function AdminModels() {
                       <div className="mb-1 flex items-center justify-between gap-2">
                         <span className="text-xs font-medium text-gray-300">{channelLabel(ch)}</span>
                         {row && (
-                          <button
-                            disabled={!!busy}
-                            onClick={() => void act(`/api/admin/models/${row.id}/disable`, 'disable')}
-                            className="rounded-lg border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:border-red-500/50 hover:text-red-400 disabled:opacity-50"
-                          >
-                            停用
-                          </button>
+                          <div className="flex gap-1.5">
+                            <button
+                              disabled={!!busy}
+                              onClick={() => startEdit(row)}
+                              className="rounded-lg border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:border-indigo-500/60 hover:text-indigo-300 disabled:opacity-50"
+                            >
+                              编辑
+                            </button>
+                            <button
+                              disabled={!!busy}
+                              onClick={() => void act(`/api/admin/models/${row.id}/disable`, 'disable')}
+                              className="rounded-lg border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:border-red-500/50 hover:text-red-400 disabled:opacity-50"
+                            >
+                              停用
+                            </button>
+                          </div>
                         )}
                       </div>
                       {row ? (
@@ -265,8 +323,19 @@ export default function AdminModels() {
             </section>
 
             {showForm && (
-              <form onSubmit={submit} className="mb-4 rounded-2xl border border-indigo-500/30 bg-gray-900/40 p-4">
-                <h2 className="mb-3 text-sm font-semibold text-gray-200">新增模型配置</h2>
+              <form
+                id="model-form"
+                onSubmit={submit}
+                className="mb-4 rounded-2xl border border-indigo-500/30 bg-gray-900/40 p-4"
+              >
+                <h2 className="mb-1 text-sm font-semibold text-gray-200">
+                  {editingId ? '编辑模型配置' : '新增模型配置'}
+                </h2>
+                <p className="mb-3 text-[11px] text-gray-500">
+                  {editingId
+                    ? '保存后原地更新这条配置,对下一个任务生效;历史任务的成本已落库,不会重算。'
+                    : '保存后生成一条新配置;勾选「立即启用」会停用同通道的旧配置。'}
+                </p>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   <div>
                     <label className={labelClass}>名称 *</label>
@@ -376,12 +445,17 @@ export default function AdminModels() {
                     </select>
                   </div>
                   <div>
-                    <label className={labelClass}>运行上限(ms,必须 &lt; 1800000)</label>
+                    <label className={labelClass}>运行上限(ms,最大 3400000 = 3400s,需 &lt; Cloud Run 3600s)</label>
                     <input
+                      type="number"
+                      min={60000}
+                      max={3400000}
+                      step={1000}
                       className={inputClass}
                       value={form.max_run_ms}
                       onChange={(e) => setForm({ ...form, max_run_ms: e.target.value })}
                     />
+                    <p className="mt-1 text-[11px] text-gray-600">单位毫秒;1500s = 1500000,3400s = 3400000。</p>
                   </div>
                   <div>
                     <label className={labelClass}>复查轮预算(ms)</label>
@@ -447,12 +521,24 @@ export default function AdminModels() {
                     />
                     保存后立即启用
                   </label>
-                  <button
-                    disabled={!!busy}
-                    className="ml-auto rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-                  >
-                    {busy === 'create' ? '保存中…' : '保存'}
-                  </button>
+                  <div className="ml-auto flex items-center gap-2">
+                    {editingId && (
+                      <button
+                        type="button"
+                        onClick={closeForm}
+                        disabled={!!busy}
+                        className="rounded-xl border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:border-gray-500 disabled:opacity-50"
+                      >
+                        取消
+                      </button>
+                    )}
+                    <button
+                      disabled={!!busy}
+                      className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >
+                      {busy === 'save' ? '保存中…' : editingId ? '保存修改' : '保存'}
+                    </button>
+                  </div>
                 </div>
               </form>
             )}
@@ -535,15 +621,24 @@ export default function AdminModels() {
                             )}
                           </td>
                           <td className="px-3 py-2">
-                            {row.enabled !== 1 && (
+                            <div className="flex flex-wrap gap-1.5">
                               <button
                                 disabled={!!busy}
-                                onClick={() => void act(`/api/admin/models/${row.id}/enable`, row.id)}
+                                onClick={() => startEdit(row)}
                                 className="rounded-lg border border-gray-700 px-2.5 py-1 text-gray-300 hover:border-indigo-500/60 hover:text-indigo-300 disabled:opacity-50"
                               >
-                                {busy === row.id ? '启用中…' : '启用'}
+                                编辑
                               </button>
-                            )}
+                              {row.enabled !== 1 && (
+                                <button
+                                  disabled={!!busy}
+                                  onClick={() => void act(`/api/admin/models/${row.id}/enable`, row.id)}
+                                  className="rounded-lg border border-gray-700 px-2.5 py-1 text-gray-300 hover:border-emerald-500/60 hover:text-emerald-300 disabled:opacity-50"
+                                >
+                                  {busy === row.id ? '启用中…' : '启用'}
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}

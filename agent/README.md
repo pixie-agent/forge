@@ -26,7 +26,7 @@ curl -s localhost:8080/health
 gcloud run deploy forge-agent \
   --source agent \
   --region asia-northeast1 \
-  --timeout 1800 --concurrency 1 \
+  --timeout 3600 --concurrency 1 \
   --min-instances 0 --max-instances 5 \
   --cpu 1 --memory 1Gi \
   --set-env-vars LLM_BASE_URL=...,LLM_MODEL=...,PI_PROVIDER_ID=forge \
@@ -36,7 +36,7 @@ gcloud run deploy forge-agent \
 要点:
 
 - `--concurrency 1`:一实例一请求,隔离彻底、用完即销毁(也最适合请求级计费)。
-- `--timeout 1800`:与 Worker 侧 Workflow 的 dispatch step 超时对齐(≥ 单次生成耗时)。
+- `--timeout 3600`:Cloud Run 单请求上限(60 分钟);后台 `max_run_ms` 最大配到 3400s,留构建余量。
 - `--min-instances 0`:空闲缩到 0,不常驻。
 - 出网只用于调 LLM 网关与回调(小体积 JSON),流量成本可忽略;主要成本是请求时长。
 

@@ -309,6 +309,55 @@ app.post('/models', async (c) => {
   return c.json({ ok: true, id })
 })
 
+/**
+ * 编辑已有配置(原地更新)。历史成本不会重算:job_usage 在用量回调时已经把
+ * 单价换算结果落库,改配置只影响之后派发的任务。
+ * enabled = true 时同事务内停用同通道的其它生效行(部分唯一索引要求每通道最多一条)。
+ */
+app.put('/models/:id', async (c) => {
+  const id = c.req.param('id')
+  const exists = await c.env.DB
+    .prepare('SELECT id FROM model_configs WHERE id = ?')
+    .bind(id)
+    .first<{ id: string }>()
+  if (!exists) return c.json({ error: '配置不存在' }, 404)
+
+  const parsed = parseModelConfigInput(await c.req.json().catch(() => ({})))
+  if (parsed.error || !parsed.value) return c.json({ error: parsed.error ?? '参数错误' }, 400)
+  const v = parsed.value
+  const update = c.env.DB
+    .prepare(
+      `UPDATE model_configs SET
+         name = ?, channel = ?, provider_id = ?, base_url = ?, api_dialect = ?, model_id = ?,
+         thinking_level = ?, thinking_format = ?, max_tokens = ?, reasoning = ?, image_input = ?,
+         design_review = ?, max_run_ms = ?, polish_max_ms = ?, queue_concurrency = ?,
+         input_price = ?, output_price = ?, cache_read_price = ?, cache_write_price = ?,
+         enabled = ?, updated_at = datetime('now')
+       WHERE id = ?`
+    )
+    .bind(
+      v.name, v.channel, v.provider_id, v.base_url, v.api_dialect, v.model_id,
+      v.thinking_level, v.thinking_format, v.max_tokens, v.reasoning, v.image_input,
+      v.design_review, v.max_run_ms, v.polish_max_ms, v.queue_concurrency,
+      v.input_price, v.output_price, v.cache_read_price, v.cache_write_price,
+      v.enabled, id
+    )
+
+  if (v.enabled) {
+    await c.env.DB.batch([
+      c.env.DB
+        .prepare(
+          "UPDATE model_configs SET enabled = 0, updated_at = datetime('now') WHERE channel = ? AND enabled = 1 AND id <> ?"
+        )
+        .bind(v.channel, id),
+      update,
+    ])
+  } else {
+    await update.run()
+  }
+  return c.json({ ok: true, id })
+})
+
 /** 启用某条配置(同通道旧配置自动停用) */
 app.post('/models/:id/enable', async (c) => {
   const id = c.req.param('id')
@@ -339,8 +388,8 @@ app.post('/models/:id/disable', async (c) => {
 })
 
 /**
- * 只改任务并发(0 = 不限)。这是一个运维旋钮,不影响历史成本快照,所以允许原地修改,
- * 不必像模型/价格那样新增一行再启用。下一次派发即生效(值随请求下发给执行体)。
+ * 只改任务并发(0 = 不限)。这是列表里的快捷旋钮,不涉及模型/价格快照;
+ * 下一次派发即生效(值随请求下发给执行体)。
  */
 app.post('/models/:id/concurrency', async (c) => {
   const body = await c.req.json<{ queue_concurrency?: unknown }>().catch(() => ({}) as { queue_concurrency?: unknown })

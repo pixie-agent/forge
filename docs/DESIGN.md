@@ -140,7 +140,7 @@ npx wrangler secret put ADMIN_PASSWORD       # 未设置则管理后台整体不
 
 # ── Google Cloud Run(agent)───────────────────────────────
 gcloud run deploy forge-agent --source agent --region us-central1 \
-  --timeout 1800 --concurrency 1 --min-instances 0 --max-instances 5 \
+  --timeout 3600 --concurrency 1 --min-instances 0 --max-instances 5 \
   --cpu 1 --memory 1Gi \
   --set-env-vars LLM_BASE_URL=https://api.deepseek.com/anthropic,LLM_MODEL=deepseek-flash,PI_LLM_API=anthropic-messages,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,AGENT_MAX_RUN_MS=1500000,WORKSPACE_ROOT=/tmp/forge-agent \
   --set-secrets LLM_API_KEY=llm-api-key:latest,AGENT_SECRET=agent-secret:latest

@@ -48,7 +48,7 @@
 Cloud Run 请求级计费(便宜、用完即缩)要求**请求在跑时 CPU 才分配**,所以对 Cloud Run 的那次 HTTP 请求要一直握住到 agent 跑完。曾用 Workflow 的 step 来握(见 git 历史),但 step 超时上限覆盖不了长生成,还多一层编排状态。关键观察:**Cloudflare 对 Worker 的出站请求会超时掐断(524),但掐断不影响 Cloud Run 继续跑**——Cloud Run 只要 handler 未返回就持续执行并保持 CPU。于是:
 
 - Worker 侧:`generate`/`chat` 在 `waitUntil` 中发起 `POST /run`,**不等待、不阻塞**对浏览器的响应;连接被掐断也无所谓。
-- Cloud Run 侧:一次 `/run` 请求 = 一个 job 的完整生命周期,`--timeout=1800`、`--concurrency=1`(一请求一实例语义)。
+- Cloud Run 侧:一次 `/run` 请求 = 一个 job 的完整生命周期,`--timeout=3600`、`--concurrency=1`(一请求一实例语义)。
 - 交付以 **commit / fail 回调**为准(不依赖 HTTP 响应体);派发失败或实例异常由 cron 心跳巡检兜底判死。
 
 ## 4. 进度协议
@@ -217,7 +217,7 @@ printf '%s' "$AGENT_SECRET" | gcloud secrets create agent-secret --data-file=-
 # 生产实际使用的 env(2026-10-17 实测):
 gcloud run deploy forge-agent \
   --source agent --region $REGION \
-  --timeout 1800 --concurrency 1 --min-instances 0 --max-instances 5 \
+  --timeout 3600 --concurrency 1 --min-instances 0 --max-instances 5 \
   --cpu 1 --memory 1Gi \
   --set-env-vars LLM_BASE_URL=https://api.deepseek.com/anthropic,LLM_MODEL=deepseek-flash,PI_LLM_API=anthropic-messages,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,AGENT_MAX_RUN_MS=1500000,WORKSPACE_ROOT=/tmp/forge-agent \
   --set-secrets LLM_API_KEY=llm-api-key:latest,AGENT_SECRET=agent-secret:latest
@@ -225,7 +225,7 @@ gcloud run deploy forge-agent \
 
 > 换用 OpenAI 兼容网关时,把 `PI_LLM_API` 改回 `openai-completions`,并按需加 `PI_SUPPORTS_DEVELOPER_ROLE=false` / `PI_THINKING_FORMAT=zai|qwen` 等(见 §5)。
 > **图片输入要显式开**:`PI_MODEL_INPUT_IMAGE=true` 才会声明模型支持图片、把用户上传的图内联给模型(见 §5.1)。staging(GLM,OpenAI 兼容)的 `agent:deploy:staging` 已加;**生产(DeepSeek Anthropic 方言)故意没加**——要开之前先用一张图实测该端点接受 image 块,否则会整轮 400。
-> `AGENT_MAX_RUN_MS` 必须 **小于** Cloud Run `--timeout`(两者都按毫秒/秒口径核对):默认 1500s,`--timeout 1800`。设太小会让正常的多文件生成被自身超时掐死(staging 初版设 300s 即踩过:一个真实 generate 需要 ~6.5 分钟)。
+> `AGENT_MAX_RUN_MS` 必须 **小于** Cloud Run `--timeout`(两者都按毫秒/秒口径核对):env 默认 1500s,后台 `model_configs.max_run_ms` 可配到 3400s,VIP 的 `--timeout 3600`。注意 `max_run_ms` 只约束模型主循环,构建与复查轮在其后发生,所以后台校验刻意留了 200s 余量,不要把它配到贴着 3600s。设太小会让正常的多文件生成被自身超时掐死(staging 初版设 300s 即踩过:一个真实 generate 需要 ~6.5 分钟)。
 > 生成质量相关的两个开关(`AGENT_DESIGN_REVIEW=generate`、`AGENT_POLISH_MAX_MS=300000`)不必写进 `--set-env-vars`:代码里有同样的默认值,部署脚本不声明也不影响行为(见 §5、§17.4)。
 
 部署完把服务 URL 填回 `wrangler.jsonc` 的 `AGENT_URL`,把 Worker 的对外域填进 `PUBLIC_BASE_URL`,再 `npm run deploy` 一次。
@@ -301,7 +301,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 | GCP 项目 | `sixth-impulse-286413`(项目号 `323709989821`) |
 | 运行时 SA | 默认计算 SA `323709989821-compute@developer.gserviceaccount.com` |
 | 镜像 | `us-central1-docker.pkg.dev/sixth-impulse-286413/cloud-run-source-deploy/forge-agent` |
-| 规格 | 1 vCPU / 1GiB,`--timeout=1800 --concurrency=1 --min-instances=0` |
+| 规格 | 1 vCPU / 1GiB,`--timeout=3600 --concurrency=1 --min-instances=0` |
 | Secrets | `llm-api-key` → `LLM_API_KEY`;`agent-secret` → `AGENT_SECRET`(Secret Manager,经 `--set-secrets` 注入) |
 | Worker Secrets | `AGENT_SECRET`;可选 `ADMIN_PASSWORD`(后台口令)、`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`(Google 登录,缺一即不启用) |
 | R2 | `forge-v2-artifacts`(绑定 `ARTIFACTS`):构建产物 `p/{projectId}/v/{versionNo}/*` 与生成应用上传对象 |
@@ -531,7 +531,7 @@ npm run deploy:staging                            # 构建前端 + 部署 Worker
 
 - **LLM 密钥独立(2026-10-18 起)**:staging 改用 GLM,密钥另存 Secret `llm-api-key-staging`;生产仍用 `llm-api-key`(DeepSeek)。两把密钥对应不同厂商,**不能共用**——早期「复用同一把」的做法已作废;隔离除了服务边界,现在还多了一道密钥边界。
 - **内部密钥另建**:Secret `agent-secret-staging`,与生产的 `agent-secret` 不同值 → 生产 Worker 的预览令牌(HMAC over `AGENT_SECRET`)在 staging 校验必然失败,反之亦然,天然挡住跨环境令牌。
-- **成本上限钉死**:`--max-instances 1`,同一时刻最多一个 job;`AGENT_MAX_RUN_MS` 与生产一致(1500s,必须 < `--timeout 1800`)——**不要把 staging 的运行上限调得比生产小**,否则正常的多文件生成会被自身超时掐死(初版设 300s 即踩过,失败信息「Agent 执行超时(上限 300s)」),失去验证价值。真正的滥用闸门是 `--max-instances 1`,不是把超时切短。
+- **成本上限钉死**:`--max-instances 1`,同一时刻最多一个 job;运行预算与生产一致(后台可配到 3400s,必须 < `--timeout 3600`)——**不要把 staging 的运行上限调得比生产小**,否则正常的多文件生成会被自身超时掐死(初版设 300s 即踩过,失败信息「Agent 执行超时(上限 300s)」),失去验证价值。真正的滥用闸门是 `--max-instances 1`,不是把超时切短。
 - 部署脚本:`npm run agent:deploy:staging` / `npm run agent:deploy:prod`(参数唯一来源)。
 
 ### 16.4 环境角标(前端如何区分)
@@ -640,7 +640,7 @@ src/App.jsx                       示例应用(留言墙)= 模板自身的冒烟
 3. **复查产物构建失败 → 回滚**:`restoreFromMap(workspace, baseline)` 覆盖回初稿(并删掉复查轮新增的多余文件)再构建一次——输入已通过过,必然通过。
 4. **交付说明仍取第一轮**:复查轮的收尾话术("我改了什么")不适合当交付说明,`RunResult.summary` 优先用第一轮的正文。
 5. **不动 stage 白名单**:复查轮只改 `progress` 文案,见 §4。
-6. **时长**:复查轮预算 = `min(AGENT_POLISH_MAX_MS, 总预算剩余)`,剩余 <30s 自动跳过;总上限仍是 `AGENT_MAX_RUN_MS=1500s`(< Cloud Run `--timeout 1800`),云 Run 红线不变。
+6. **时长**:复查轮预算 = `min(AGENT_POLISH_MAX_MS, 总预算剩余)`,剩余 <30s 自动跳过;总上限是后台 `max_run_ms`(默认 1500s、可配到 3400s,< Cloud Run `--timeout 3600`),云 Run 红线不变。
 
 ### 17.5 staging 验证清单
 
@@ -885,7 +885,7 @@ npm run db:migrate:billing:remote      # 生产
 | `input_price` / `output_price` / `cache_read_price` / `cache_write_price` | USD / 1M tokens;全 0 时回落到 `src/lib/pricing.ts` 的内置价格 |
 | `channel` / `enabled` | `free` / `vip` / `default`(见 §21.5);每通道最多一条 `enabled = 1`(部分唯一索引) |
 
-- **配置行不可变**:改配置 = 新增一行再启用。`jobs.model_config_id` 在派发时落快照,`job_usage.model_config_id` 记录该任务用的配置与价格,历史成本不会因为后来调价而变。
+- **配置可原地编辑**:后台直接改已有行(模型/网关/预算/价格等),保存后对下一个任务生效。`job_usage` 在用量上报时已把成本换算结果落库,所以改价或改预算不会重算历史账;`jobs.model_config_id` 仍保留派发时的配置 id 用于归因。
 - **回落**:表为空、没有启用行、或查询失败(含未执行迁移)→ Worker 不向 agent 下发覆盖,agent 使用 Cloud Run env 默认模型。后台不是生成链路的单点。
 - **密钥边界**:表里没有 API key。agent 仍从 Cloud Run env 读 `LLM_API_KEY`,所以后台能切的是「同一网关 + 同一把 key 能访问的模型」;换供应商(新 base URL + 新 key)仍然要部署并写 secret。
 
@@ -898,8 +898,8 @@ npm run db:migrate:billing:remote      # 生产
 
 ### 21.3 后台
 
-- 页面 `/admin/models`(中文,刻意不接 i18n):近 7 天任务/成功率/总成本/单次成功成本/无用量记录;当前生效配置;全部配置列表(含未计价标记);新增表单;按模型用量。
-- 接口:`GET /api/admin/models`、`POST /api/admin/models`、`POST /api/admin/models/:id/enable`、`POST /api/admin/models/:id/disable`,全部 `requireAdmin`。
+- 页面 `/admin/models`(中文,刻意不接 i18n):近 7 天任务/成功率/总成本/单次成功成本/无用量记录;当前生效配置;全部配置列表(含未计价标记);新增/编辑表单;按模型用量。
+- 接口:`GET /api/admin/models`、`POST /api/admin/models`、`PUT /api/admin/models/:id`(原地编辑)、`POST /api/admin/models/:id/enable`、`POST /api/admin/models/:id/disable`,全部 `requireAdmin`。
 - **单次成功成本** = 区间总成本 / 成功任务数。失败任务也烧 token 与实例时间(用户不付钱,平台付),必须摊进去;`jobs_without_usage` 单独计数,避免「报表正常但有一批任务没上报」。
 - 未计价:配置四项价格全 0 且模型不在内置价格表 → 后台标「未计价」,成本按 0 记(宁可少算也不编数)。
 
@@ -931,7 +931,7 @@ npm run deploy:staging
 | 模型 | GLM-5.3-Flash(`openai-completions` + `zai`) | DeepSeek V4.1-Flash(`anthropic-messages`) |
 | 执行体 | 独立 Cloud Run:`forge-agent-free` / `-staging` | 原 `forge-agent` / `-staging` |
 | 并发 | 资源并发:Cloud Run `--concurrency 8 --no-cpu-throttling --max-instances 1`;任务并发:`model_configs.queue_concurrency`(默认 2,后台可改) | 保持原配置(不排队) |
-| 超时 | Cloud Run `--timeout 3600`;Worker 总龄阈值 3700s | Cloud Run `--timeout 1800`;Worker 总龄阈值 1900s |
+| 超时 | Cloud Run `--timeout 3600`;Worker 总龄阈值 3700s | Cloud Run `--timeout 3600`;Worker 总龄阈值 3700s |
 
 链路:
 
