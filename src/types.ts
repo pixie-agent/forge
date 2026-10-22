@@ -46,6 +46,9 @@ export type Env = {
    *  前端据此显示环境角标,避免在错误的域名上做测试。生产与 staging 共用同一份 web/dist,
    *  所以环境名只能这样运行时下发,不能用构建期变量 */
   ENVIRONMENT?: string
+  /** Cloudflare Web Analytics beacon token(vars,非密)。只在生产配置;staging 留空 → 不加载 beacon。
+   *  平台是 SPA,必须走手动 snippet 才能带 `spa:true` 统计前端路由切换;自动注入只记首次加载。 */
+  WEB_ANALYTICS_TOKEN?: string
 }
 
 export interface SessionUser {

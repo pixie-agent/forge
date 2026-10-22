@@ -328,6 +328,8 @@ app.get('/config', (c) => {
     google: Boolean(c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET),
     // 平台部署环境:仅 staging 设了 ENVIRONMENT,生产回落 production(前端据此决定是否显示角标)
     environment: c.env.ENVIRONMENT ?? 'production',
+    // Cloudflare Web Analytics beacon token:只在生产 vars 配置;staging 为空 → 前端不加载 beacon
+    web_analytics_token: c.env.WEB_ANALYTICS_TOKEN ?? '',
   })
 })
 
