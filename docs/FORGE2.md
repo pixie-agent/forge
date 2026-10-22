@@ -957,5 +957,7 @@ npm run deploy:staging
 每通道最多一条生效行,互不覆盖。已生效的 free 配置在卡片里可以直接改任务并发(运维旋钮,不影响历史成本),
 改完下一次派发生效。
 `db:seed:channels:*` 的两条默认配置是幂等种子(固定 id + `INSERT OR IGNORE`)。
+免费通道默认 `thinking_level = low`(2026-10-22 从 medium 下调,压规划阶段的时延与成本);
+改档位同样走「新增一行并启用」,历史 `job_usage.model_config_id` 仍指向旧行,成本可复现。
 **密钥边界不变**:免费执行体必须有自己的 GLM key(`llm-api-key-free`),
 后台切不了密钥;生产上线免费通道前要先建好 secret 并部署 `npm run agent:deploy:free:prod`。
