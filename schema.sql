@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS users (
   credits       INTEGER NOT NULL DEFAULT 5,
   -- 邮箱验证:1 = 已验证(新代码注册时显式写 0,验证链接消费后置 1)
   email_verified INTEGER NOT NULL DEFAULT 1,
+  -- 最近活跃时间(UTC);登录后只看不生成也能算进 DAU/流失,见 schema.migrate-analytics.sql
+  last_active_at TEXT,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -47,6 +49,8 @@ CREATE TABLE IF NOT EXISTS projects (
   -- 线上版本:发布页(/s/:slug)服务的版本;生成只更新 current_version(预览/编辑基线),
   -- 用户点「发布此版本」才把 published_version 指过去 → 线上不会因一次生成被动更新。
   published_version INTEGER NOT NULL DEFAULT 0,
+  -- 发布时刻(UTC):published_version 只记结果、不记时间,大盘的每日发布数用它
+  published_at    TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -235,6 +239,25 @@ CREATE TABLE IF NOT EXISTS site_data (
   data        TEXT NOT NULL,
   client_ip   TEXT NOT NULL DEFAULT '',
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 用户大盘埋点(与 schema.migrate-analytics.sql 同内容;已有库跑那个增量文件,新库跑本文件)。
+--   user_daily_active:按天去重的活跃表,DAU/WAU/MAU 与留存从它算,避免扫全量 session;
+--   user_events:关键行为流水(注册验证/建项目/建任务/发布/结账/支付/订阅),不是全量请求日志。
+-- day 是 UTC+8 的 'YYYY-MM-DD',由 Worker 侧生成。
+CREATE TABLE IF NOT EXISTS user_daily_active (
+  user_id       TEXT NOT NULL,
+  day           TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS user_events (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  props      TEXT NOT NULL DEFAULT '{}',    -- JSON,便于扩字段而不用改表
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_user    ON projects(user_id);
