@@ -16,6 +16,7 @@ import { DRAFT_VERSION_NO, signPreviewToken } from '../lib/artifacts'
 import { callProjectDb, projectSchema, runProjectSql, seedProjectDocs, type SeedRow } from '../lib/projectDb'
 import { parseModelConfigInput, type ModelConfigRow } from '../lib/modelConfig'
 import { hasPrice } from '../lib/pricing'
+import { buildDashboard } from '../lib/dashboard'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -91,7 +92,7 @@ const USER_USAGE_COLUMNS = `
   (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id AND j.created_at >= datetime('now','-30 days')) AS jobs_30d,
   (SELECT COALESCE(SUM(v.bytes),0) FROM versions v JOIN projects p ON p.id = v.project_id
      WHERE p.user_id = u.id AND v.version_no > 0) AS bytes_total,
-  COALESCE((SELECT MAX(j.created_at) FROM jobs j WHERE j.user_id = u.id), u.created_at) AS last_active_at`
+  COALESCE(u.last_active_at, (SELECT MAX(j.created_at) FROM jobs j WHERE j.user_id = u.id), u.created_at) AS last_active_at`
 
 /** 项目在两个环境(draft/live)下的数据行数之和:逐环境读该项目的独立 SQLite,库未创建按 0 */
 async function countProjectData(env: Env, projectId: string): Promise<number> {
@@ -160,6 +161,17 @@ app.get('/stats', requireAdmin, async (c) => {
   return c.json({
     stats: row ?? { projects: 0, users: 0, versions: 0, jobs: 0, jobs_succeeded: 0, jobs_failed: 0, jobs_7d: 0, active_users_7d: 0 },
   })
+})
+
+/**
+ * 用户大盘(见 docs/FORGE2.md §22):一次返回总览、趋势、漏斗、激活、留存、商业化与质量成本。
+ * 时间口径固定 UTC+8;days 只影响「趋势/质量」窗口,累计类指标(注册、付费转化、留存 cohort)不受影响。
+ * end=0 统计今天,end=1 统计昨天(T-1);日级指标与滚动窗口都以该日为终点。
+ */
+app.get('/dashboard', requireAdmin, async (c) => {
+  const days = Number(c.req.query('days') ?? 30)
+  const end = Number(c.req.query('end') ?? 0)
+  return c.json({ dashboard: await buildDashboard(c.env, days, end) })
 })
 
 /**

@@ -1,5 +1,6 @@
 import type { Context, Next } from 'hono'
 import type { AppEnv, SessionUser } from '../types'
+import { activityCookie, activityDay, logEvent, readActivityCookie, touchActivity } from './events'
 
 const ITERATIONS = 100_000
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000

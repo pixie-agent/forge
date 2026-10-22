@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../types'
 import { requireUser } from '../lib/auth'
 import { JOB_COST } from '../lib/credits'
+import { logEvent } from '../lib/events'
 import { CREDIT_PACKS, SUBSCRIPTION_PLANS, CURRENCY, findPack, findPlan } from '../lib/plans'
 import {
   creemCheckoutReady,
@@ -120,6 +121,7 @@ app.post('/checkout', async (c) => {
       email: user.email,
       successUrl: `${base}/billing?checkout=success`,
     })
+    await logEvent(c.env.DB, user.id, 'checkout_start', { kind, id })
     return c.json({ url: checkoutUrl })
   } catch (err) {
     console.error('创建 Creem 结账失败', err)

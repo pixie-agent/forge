@@ -14,6 +14,7 @@ import {
 import { grantSignupCredits, grantSignupCreditsOnVerify, SIGNUP_CREDITS } from '../lib/credits'
 import { hashToken, newVerificationToken, sendVerificationEmail, verificationUrl } from '../lib/email'
 import { parseLang, type Lang } from '../lib/i18n'
+import { activityCookie, activityDay, logEvent, readActivityCookie, touchActivity } from '../lib/events'
 
 const app = new Hono<AppEnv>()
 
@@ -367,6 +368,7 @@ async function markGoogleVerified(db: D1Database, row: GoogleUser): Promise<Goog
     .first()
   if (!claimed) return { ...row, email_verified: 1 }
   const credits = await grantSignupCreditsOnVerify(db, row.id, SIGNUP_CREDITS)
+  await logEvent(db, row.id, 'register_verified', { via: 'google' })
   return { ...row, email_verified: 1, credits: credits || row.credits }
 }
 

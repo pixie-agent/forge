@@ -5,6 +5,7 @@ import { clearJobMessages, insertMessage } from './jobHelpers'
 import { releaseJobCredits } from './credits'
 import { langOfPayload, srv } from './i18n'
 import { clearArtifacts, DRAFT_VERSION_NO, putArtifacts } from './artifacts'
+import { logEvent } from './events'
 import type { AgentRunResult, FileMap } from './agent'
 
 interface JobRow {
@@ -107,14 +108,18 @@ export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunR
  * 真的完成迁移时退还该任务的冻结积分(失败不收费;计时/失联判死走同一条路径)。
  */
 export async function markJobFailed(env: Env, jobId: string, error: string): Promise<boolean> {
-  const res = await env.DB
-    .prepare(`UPDATE jobs SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ? AND status IN ('pending','running')`)
+  const row = await env.DB
+    .prepare(
+      `UPDATE jobs SET status = 'failed', error = ?, updated_at = datetime('now')
+       WHERE id = ? AND status IN ('pending','running') RETURNING user_id`
+    )
     .bind(error.slice(0, 300), jobId)
-    .run()
+    .first<{ user_id: string }>()
     .catch(() => null)
-  if (!res?.meta.changes) return false
+  if (!row) return false
   await clearJobMessages(env.DB, jobId)
   await releaseJobCredits(env.DB, jobId, '任务未完成,已退还积分').catch(() => 0)
+  await logEvent(env.DB, row.user_id, 'job_end', { jobId, status: 'failed' })
   return true
 }
 

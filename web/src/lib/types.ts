@@ -424,3 +424,139 @@ export interface BillingSummary {
   ledger: LedgerEntry[]
   orders: BillingOrder[]
 }
+
+// ---------- 管理后台 · 用户大盘(见 docs/FORGE2.md §22) ----------
+
+export interface AdminDashboardSeriesPoint {
+  day: string
+  new_users: number
+  active_users: number
+  active_job_users: number
+  jobs: number
+  succeeded: number
+  failed: number
+  revenue_minor: number
+  paid_users: number
+  publishes: number
+  checkout_starts: number
+}
+
+export interface AdminDashboardOverview {
+  users_total: number
+  users_verified: number
+  new_users_today: number
+  new_users_7d: number
+  projects_total: number
+  projects_published: number
+  jobs_total: number
+  jobs_succeeded: number
+  jobs_failed: number
+  jobs_cancelled: number
+  jobs_today: number
+  jobs_7d: number
+  dau: number
+  wau: number
+  mau: number
+  dau_jobs: number
+  wau_jobs: number
+  mau_jobs: number
+  stickiness: number | null
+  paid_users_total: number
+  conversion_rate: number | null
+  revenue_total_minor: number
+  revenue_30d_minor: number
+  active_subscriptions: number
+  mrr_minor: number
+  cost_30d_usd: number
+  cost_per_success_30d_usd: number | null
+}
+
+export interface AdminDashboardFunnel {
+  registered: number
+  verified: number
+  has_project: number
+  has_job: number
+  has_succeeded: number
+  has_version: number
+  has_published: number
+  has_paid: number
+}
+
+export interface AdminDashboardActivation {
+  users: number
+  activated: number
+  activated_24h: number
+  activated_7d: number
+  median_ttv_hours: number | null
+  p90_ttv_hours: number | null
+}
+
+export interface AdminDashboardRetentionRow {
+  cohort: string
+  size: number
+  d1: number | null
+  d3: number | null
+  d7: number | null
+  d14: number | null
+  d30: number | null
+}
+
+export interface AdminDashboardMonetization {
+  paying_users: number
+  paid_users_30d: number
+  conversion_rate: number | null
+  paying_penetration_30d: number | null
+  revenue_30d_minor: number
+  revenue_total_minor: number
+  arppu_minor: number | null
+  arpu_30d_minor: number | null
+  refunded_orders: number
+  refund_rate: number | null
+  first_purchase_median_days: number | null
+  active_subscriptions: number
+  mrr_minor: number
+  subscription_plans: { catalog_id: string; name: string; count: number; mrr_minor: number }[]
+  consumed_credits_30d: number
+  purchased_credits_30d: number
+  users_with_usage: number
+  zero_balance_users: number
+  exhausted_users: number
+  exhausted_paid_users: number
+  revenue_per_credit_minor: number | null
+  consumed_revenue_30d_minor: number
+  cash_margin_30d_usd: number
+  consumed_margin_30d_usd: number
+}
+
+export interface AdminDashboardQuality {
+  jobs: number
+  succeeded: number
+  failed: number
+  cancelled: number
+  success_rate: number | null
+  avg_run_ms: number
+  p50_run_ms: number | null
+  p90_run_ms: number | null
+  avg_queue_ms: number
+  p50_queue_ms: number | null
+  p90_queue_ms: number | null
+  by_type: { type: string; channel: string; jobs: number; succeeded: number; failed: number; cancelled: number }[]
+  top_errors: { error: string; count: number }[]
+  tokens: { input: number; output: number; cache_read: number; cache_write: number }
+  cost: { llm_usd: number; gcp_usd: number; total_usd: number; per_success_usd: number | null }
+}
+
+export interface AdminDashboard {
+  generated_at: string
+  days: number
+  /** 统计日偏移:0=今天,1=昨天(T-1) */
+  end: number
+  timezone: 'UTC+8'
+  overview: AdminDashboardOverview
+  series: AdminDashboardSeriesPoint[]
+  funnel: AdminDashboardFunnel
+  activation: AdminDashboardActivation
+  retention: AdminDashboardRetentionRow[]
+  monetization: AdminDashboardMonetization
+  quality: AdminDashboardQuality
+}

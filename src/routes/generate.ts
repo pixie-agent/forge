@@ -12,6 +12,7 @@ import { jobCost, releaseJobCredits, reserveCredits } from '../lib/credits'
 import { getModelConfigForUser, modelChannelForUser, modelOverrideOf } from '../lib/modelConfig'
 import { listSep, parseLang, srv, type Lang } from '../lib/i18n'
 import { cancelJob } from '../lib/commit'
+import { logEvent } from '../lib/events'
 
 const app = new Hono<AppEnv>()
 app.use('*', requireUser)
@@ -123,6 +124,7 @@ async function launchJob(
 
   const jobId = await createJob(c.env.DB, project.id, userId, type, payload, channel)
   if (!jobId) return c.json({ error: '该项目已有生成任务在进行中,请稍候' }, 409)
+  c.executionCtx.waitUntil(logEvent(c.env.DB, userId, 'job_create', { jobId, type, channel }))
 
   // 冻结积分:唯一一处积分闸门(原子条件扣减,并发安全)。不够就把刚建的任务删掉并 402 ——
   // 冻结刻意排在落用户消息之前,这样失败时没有任何需要回收的副作用。

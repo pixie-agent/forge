@@ -7,6 +7,7 @@ import { BLOB_KEY_RE, blobKey, blobPrefix, deleteProjectAppData, KV_KEY_RE, kvKe
 import { projectSchema, runProjectSql } from '../lib/projectDb'
 import { deleteProjectBindings } from '../lib/connectors/store'
 import { ACTIVE_STATUS_SQL } from '../lib/jobHelpers'
+import { logEvent } from '../lib/events'
 import { createZip } from '../lib/zip'
 
 const app = new Hono<AppEnv>()
@@ -239,9 +240,14 @@ app.post('/:id/publish', async (c) => {
     .first()
   if (!exists) return c.json({ error: '要发布的版本不存在' }, 404)
   await c.env.DB
-    .prepare("UPDATE projects SET status = 'published', published_version = ?, updated_at = datetime('now') WHERE id = ?")
+    .prepare(
+      `UPDATE projects SET status = 'published', published_version = ?,
+         published_at = COALESCE(published_at, datetime('now')), updated_at = datetime('now')
+       WHERE id = ?`
+    )
     .bind(version, project.id)
     .run()
+  await logEvent(c.env.DB, c.get('user').id, 'publish', { projectId: project.id, version })
   const url = new URL(`/s/${project.slug}`, c.req.url).toString()
   return c.json({ slug: project.slug, url, published_version: version })
 })

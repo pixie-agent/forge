@@ -28,6 +28,7 @@
  * 靠「插入成功才发积分」挡掉,而不是靠事件 id(Creem 的重试与手动重发语义不同)。
  */
 import type { Env } from '../types'
+import { logEvent } from './events'
 import { CURRENCY, CREDIT_PACKS, SUBSCRIPTION_PLANS } from './plans'
 
 export const CREEM_PROVIDER = 'creem'
