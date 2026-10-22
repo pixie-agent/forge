@@ -55,6 +55,8 @@ export interface SessionUser {
   id: string
   email: string
   credits: number
+  /** 是否已设置邮箱密码;纯 Google 账号为 false(可借此在账号页判断「设置」还是「修改」) */
+  has_password: boolean
 }
 
 export type AppEnv = {

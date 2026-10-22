@@ -2,6 +2,8 @@ export interface User {
   id: string
   email: string
   credits: number
+  /** 是否已设置邮箱密码;false = 纯 Google 账号,可在这里设置初始密码 */
+  has_password: boolean
 }
 
 export interface Project {

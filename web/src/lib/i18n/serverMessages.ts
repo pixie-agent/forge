@@ -25,6 +25,8 @@ export const SERVER_MESSAGES: Record<string, DictKey> = {
   '该邮箱已注册': 'err.emailTaken',
   '邮箱格式不正确': 'err.invalidEmail',
   '密码至少 6 位': 'err.passwordTooShort',
+  '密码过长': 'err.passwordTooLong',
+  '当前密码不正确': 'err.currentPasswordWrong',
   '邮箱或密码错误': 'err.badCredentials',
   '邮箱未验证,请先查收验证邮件': 'err.emailNotVerified',
   '验证链接无效或已过期,请重新发送': 'err.verifyLinkInvalid',

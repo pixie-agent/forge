@@ -63,8 +63,8 @@ export default function Projects() {
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
       <TopBar />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-3 py-6 sm:px-4 sm:py-8">
-        <div className="mb-6 flex items-center justify-between">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-3 py-4 sm:px-4 sm:py-8">
+        <div className="mb-4 flex items-center justify-between sm:mb-6">
           <h1 className="text-xl font-semibold">{t('projects.title')}</h1>
           <button
             onClick={() => nav('/')}
@@ -77,13 +77,13 @@ export default function Projects() {
         {items === null ? (
           <p className="text-sm text-gray-500">{t('common.loading')}</p>
         ) : items.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-gray-800 py-20 text-center text-sm text-gray-500">
+          <div className="rounded-2xl border border-dashed border-gray-800 py-14 text-center text-sm text-gray-500 sm:py-20">
             {t('projects.empty')}
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3">
             {items.map((p) => (
-              <div key={p.id} className="flex flex-col rounded-2xl border border-gray-800 bg-gray-900 p-4">
+              <div key={p.id} className="flex flex-col rounded-2xl border border-gray-800 bg-gray-900 p-3.5 sm:p-4">
                 <div className="mb-2 flex items-start justify-between gap-2">
                   <h2 className="line-clamp-1 font-medium">{p.name || t('projects.untitled')}</h2>
                   <span
@@ -94,10 +94,11 @@ export default function Projects() {
                     {p.status === 'published' ? t('projects.published') : t('projects.draft')}
                   </span>
                 </div>
-                <p className="mb-4 line-clamp-2 min-h-8 flex-1 text-sm text-gray-500">
+                {/* 没有描述时不占一行(手机上尤其明显);桌面端仍保留占位以对齐卡片高度 */}
+                <p className={`mb-3 flex-1 text-sm text-gray-500 sm:mb-4 ${p.description ? 'line-clamp-2' : 'hidden min-h-8 sm:block'}`}>
                   {p.description || t('projects.noDescription')}
                 </p>
-                <div className="mb-3 flex items-center justify-between text-xs text-gray-600">
+                <div className="mb-2.5 flex items-center justify-between text-xs text-gray-600 sm:mb-3">
                   <span>
                     {p.current_version > 0
                       ? `v${p.current_version}`

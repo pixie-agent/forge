@@ -8,6 +8,7 @@ import {
   hashPassword,
   isSecureRequest,
   newToken,
+  requireUser,
   sessionCookie,
   verifyPassword,
 } from '../lib/auth'
@@ -33,6 +34,7 @@ type AuthBody = { email?: string; password?: string }
 type RegisterBody = AuthBody & { idea?: string; lang?: string }
 type ResendBody = AuthBody & { lang?: string }
 type VerifyBody = { token?: string }
+type PasswordBody = { currentPassword?: string; newPassword?: string }
 
 function clientIp(c: Context<AppEnv>): string {
   return c.req.header('CF-Connecting-IP') ?? ''
@@ -248,6 +250,44 @@ app.post('/logout', async (c) => {
   const m = /(?:^|;\s*)session=([^;]+)/.exec(c.req.header('Cookie') ?? '')
   if (m) await c.env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(m[1]).run()
   c.header('Set-Cookie', clearSessionCookie(isSecureRequest(c.req.url)))
+  return c.json({ ok: true })
+})
+
+/**
+ * 修改 / 设置密码(需登录)。
+ * - 已有密码的账号必须提供 currentPassword,防止会话被盗后直接改密。
+ * - 纯 Google 账号(password_hash 为空串)没有当前密码,允许直接设置;设置后即可用邮箱 + 密码登录。
+ * - 改密成功即吊销该用户全部旧会话(其他设备强制重新登录),并给当前会话换发新 cookie。
+ * 注意:没有「忘记密码」流程,未登录时不提供重置入口。
+ */
+app.post('/password', requireUser, async (c) => {
+  const body = await c.req.json<PasswordBody>().catch(() => ({}) as PasswordBody)
+  const newPassword = String(body.newPassword ?? '')
+  const currentPassword = String(body.currentPassword ?? '')
+  if (newPassword.length < 6) return c.json({ error: '密码至少 6 位' }, 400)
+  // PBKDF2 迭代 10 万次,超长输入没有意义,顺手挡掉
+  if (newPassword.length > 128) return c.json({ error: '密码过长' }, 400)
+
+  const user = c.get('user')
+  const row = await c.env.DB
+    .prepare('SELECT password_hash FROM users WHERE id = ?')
+    .bind(user.id)
+    .first<{ password_hash: string }>()
+  if (!row) return c.json({ error: '用户不存在' }, 404)
+
+  if (row.password_hash && !(await verifyPassword(currentPassword, row.password_hash))) {
+    return c.json({ error: '当前密码不正确' }, 400)
+  }
+
+  await c.env.DB
+    .prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+    .bind(await hashPassword(newPassword), user.id)
+    .run()
+
+  // 旧会话全部作废;当前请求随后拿到新 cookie,用户不会被踢回登录页
+  await c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id).run()
+  const token = await createSession(c.env.DB, user.id)
+  c.header('Set-Cookie', sessionCookie(token, isSecureRequest(c.req.url)))
   return c.json({ ok: true })
 })
 

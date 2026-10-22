@@ -45,8 +45,8 @@ export default function VerifyEmail() {
 
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
-      <div className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-sm rounded-2xl border border-gray-800 bg-gray-900 p-6">
+      <div className="flex flex-1 items-center justify-center px-3 py-6 sm:px-4">
+        <div className="w-full max-w-sm rounded-2xl border border-gray-800 bg-gray-900 p-5 sm:p-6">
           <div className="mb-6 flex items-center gap-2 font-semibold">
             <span className="h-2.5 w-2.5 rounded-sm bg-gradient-to-br from-indigo-400 to-fuchsia-500" />
             Forge

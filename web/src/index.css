@@ -8,6 +8,9 @@
  */
 html {
   color-scheme: dark;
+  /* 移动端横竖屏切换/系统字号变化时不让浏览器擅自放大正文 */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 html[data-theme="light"] {
@@ -47,6 +50,25 @@ html[data-theme="light"] {
 body {
   background-color: var(--color-gray-950);
   color: var(--color-gray-100);
+}
+
+/* 移动端点击不闪灰块;按钮/链接的触控由浏览器即时响应,避免 300ms 延迟 */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+a,
+[role='button'] {
+  touch-action: manipulation;
+}
+
+/*
+ * 贴底操作区(iPhone Home 指示条)。环境变量在非刘海屏为 0,
+ * 这里保留原有的 0.75rem 内边距,只在需要时额外让位。
+ */
+.pb-safe {
+  padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
 }
 
 /*

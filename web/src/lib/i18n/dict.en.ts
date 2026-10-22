@@ -25,6 +25,7 @@ export const en: Record<DictKey, string> = {
   'common.search': 'Search',
   'common.language': 'Language',
   'common.version': 'Version',
+  'common.more': 'More actions',
 
   // ---------- theme / env ----------
   'theme.toLight': 'Switch to light theme',
@@ -35,6 +36,7 @@ export const en: Record<DictKey, string> = {
   // ---------- top bar ----------
   'topbar.credits': 'Credits',
   'topbar.logout': 'Log out',
+  'topbar.account': 'Account',
 
   // ---------- landing ----------
   'landing.enterWorkspace': 'Open workspace',
@@ -78,6 +80,23 @@ export const en: Record<DictKey, string> = {
   'verify.success': 'Verified. Redirecting…',
   'verify.failedTitle': 'Verification failed',
   'verify.goLogin': 'Go to login to resend',
+
+  // ---------- account ----------
+  'account.title': 'Account settings',
+  'account.email': 'Email',
+  'account.setTitle': 'Set a password',
+  'account.changeTitle': 'Change password',
+  'account.googleHint': 'You sign in with Google and have no password yet. Set one to also sign in with your email and password for the same account.',
+  'account.current': 'Current password',
+  'account.new': 'New password (at least 6 characters)',
+  'account.confirm': 'Confirm new password',
+  'account.set': 'Set password',
+  'account.change': 'Change password',
+  'account.saved': 'Password updated. Other devices will need to sign in again.',
+  'account.saveFailed': 'Could not update password',
+  'account.tooShort': 'New password must be at least 6 characters',
+  'account.mismatch': 'The two new passwords do not match',
+  'account.sessionHint': 'After changing your password, this account is signed out on other devices.',
 
   // ---------- projects ----------
   'projects.title': 'My projects',
@@ -160,6 +179,8 @@ export const en: Record<DictKey, string> = {
   'err.emailTaken': 'This email is already registered',
   'err.invalidEmail': 'Invalid email address',
   'err.passwordTooShort': 'Password must be at least 6 characters',
+  'err.passwordTooLong': 'Password is too long',
+  'err.currentPasswordWrong': 'Current password is incorrect',
   'err.badCredentials': 'Wrong email or password',
   'err.emailNotVerified': 'Email not verified. Please check your verification email first.',
   'err.verifyLinkInvalid': 'This verification link is invalid or expired. Please resend it.',
@@ -325,7 +346,9 @@ export const en: Record<DictKey, string> = {
   'preview.help.6': 'Delivery: “↓ Download project” in the code tab exports that version’s full source (zip, source only, no data) to run locally or keep.',
   'preview.help.7': '“Unpublish” immediately retracts the public link (versions and data are kept; you can republish anytime).',
   'preview.openTestTitle': 'Open the test environment in a new tab — try it on a phone or full screen',
+  'preview.copyTest': 'Copy test link',
   'preview.copyTestTitle': 'Copy the test environment link; whoever opens it sees the draft (with a “test environment” badge), not the live site',
+  'preview.copyLive': 'Copy live link',
   'preview.openLiveTitle': 'Open the live page {url} (anyone can access it)',
   'preview.openExternal': 'Open ↗',
   'preview.unpublishTitle': 'Unpublishing kills the public link immediately (versions and data are kept)',
