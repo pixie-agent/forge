@@ -5,8 +5,8 @@ import { useEffect } from 'react'
  *
  * 为什么是运行时注入而不是写进 index.html:
  *   - 生产与 staging 共用同一份 `web/dist`,构建期写死会把 staging 的访问也算进生产;
- *   - beacon token 由 Worker 通过 `/api/auth/config` 下发,只有生产 vars 配了 token,
- *     staging 留空 → 完全不上报。
+ *   - beacon token 由 Worker 通过 `/api/auth/config` 下发,各环境在 `vars` 里配自己的
+ *     站点 token(生产与 staging 是两个 site,统计数据互不混入);为空 → 不上报。
  *
  * `spa: true` 必须带:平台是 BrowserRouter 单页应用,不带这个只会记录首次整页加载,
  * 站内路由切换的 pageview 会全部丢失。自动注入不保证带该参数,所以走手动 snippet。

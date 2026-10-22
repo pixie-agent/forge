@@ -219,6 +219,15 @@ export default function AdminDashboardPage() {
                 </button>
               ))}
             </div>
+            <a
+              href="https://dash.cloudflare.com/?to=/:account/web-analytics"
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-xl border border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200"
+              title="在 Cloudflare 面板查看 PV/UV、国家分布与来源(数据不经过本平台接口)"
+            >
+              Cloudflare 访问统计 ↗
+            </a>
             <button
               onClick={() => void load()}
               className="rounded-xl border border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200"

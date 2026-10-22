@@ -1058,14 +1058,23 @@ npm run db:migrate:analytics:remote
 
 ### 22.7 平台页面访问量 / 国家分布(Cloudflare Web Analytics)
 
-平台自身的 PV/UV、访问国家、来源、路径走 Cloudflare Web Analytics,**不进本大盘接口**——
-它的数据只在 Cloudflare 面板查看,没有编程式查询 API(`/admin/dashboard` 不返回这些数)。
+平台自身的 PV/UV、访问国家、来源、路径走 Cloudflare Web Analytics,**不进本大盘接口**。
+看板页 `/admin/dashboard` 顶部有「Cloudflare 访问统计 ↗」,直接跳到该账号的 Web Analytics 页面:
+`https://dash.cloudflare.com/?to=/:account/web-analytics`(生产选 `app.1forgen.site`、staging 选
+`app-staging.1forgen.site` 卡片看明细)。
+
+数据本身不进 `/admin/dashboard` 的原因:Web Analytics 没有官方的「站点统计」REST 查询接口;
+要做站内展示,只能走 Cloudflare GraphQL Analytics API(`rumPageloadEventsAdaptiveGroups`,
+按 `siteTag` + `requestHost` 过滤),需要单独建一个带 Account Analytics:Read 的 API Token。
+目前选择先用面板,避免再引入一个外部凭证。
 
 接入方式(手动 snippet,**不要用自动注入**):
 
-1. Dashboard → Web Analytics → 添加站点 `app.1forgen.site` → 注入方式选「Enable with manual snippet」。
-2. 复制 token,填到 `wrangler.jsonc` 顶层 `vars.WEB_ANALYTICS_TOKEN`(只填生产;`env.staging` 故意留空)。
-3. `npm run deploy` 后生效。
+1. Dashboard → Web Analytics → 添加站点(生产 `app.1forgen.site`、staging
+   `app-staging.1forgen.site` 各建一个)→ 注入方式选「Enable with manual snippet」。
+2. 复制 token,填到 `wrangler.jsonc` 对应环境的 `vars.WEB_ANALYTICS_TOKEN`(顶层 = 生产,
+   `env.staging` = staging;绑定类配置两边各写一份,互不继承)。
+3. `npm run deploy` / `npm run deploy:staging` 后生效。
 
 为什么手动而不是自动注入:平台是 `BrowserRouter` 单页应用,beacon 必须带 `spa:true` 才会在
 前端路由切换时上报 pageview;自动注入不保证带该参数,只会记录首次整页加载。

@@ -135,8 +135,9 @@
         // https://app-staging.1forgen.site/api/billing/webhook(密钥 staging 单独 put --env staging)
         "CREEM_API_BASE": "https://test-api.creem.io",
         "CREEM_PRODUCTS": "{\"pack_20\":\"prod_2ShRXhW1eAZhLtXoQCZOEq\",\"pack_60\":\"prod_1JTaGgzickEq949Bx0cHSI\",\"pack_200\":\"prod_5bNr2ZVUETd2Aru6Q0nbvE\",\"plan_plus\":\"prod_37ucbu50c9ifHDDWDTQQIl\",\"plan_pro\":\"prod_52HkiGhNmstKT4ruOPvCWi\"}",
-        // 故意留空:staging 不加载 Web Analytics,避免测试流量混进生产统计
-        "WEB_ANALYTICS_TOKEN": ""
+        // staging 独立的 Web Analytics 站点(app-staging.1forgen.site),与生产是两个不同的 site,
+        // 统计数据互不混入;不填则前端不加载 beacon
+        "WEB_ANALYTICS_TOKEN": "42bbc1ee69524c2e8c8a464a2253d1dc"
       }
     }
   }
