@@ -1055,3 +1055,26 @@ npm run db:migrate:analytics:remote
 - 生成站点(PV/UV)不在本大盘范围:那要另在 `serve.ts` 做访问计数或接 Cloudflare Web Analytics。
 - 渠道 / UTM 未采集,分渠道拉新与留存暂不可用。
 - 大盘是管理后台只读接口,不做用户维度下钻;需要下钻时走 `/admin/users/:id`。
+
+### 22.7 平台页面访问量 / 国家分布(Cloudflare Web Analytics)
+
+平台自身的 PV/UV、访问国家、来源、路径走 Cloudflare Web Analytics,**不进本大盘接口**——
+它的数据只在 Cloudflare 面板查看,没有编程式查询 API(`/admin/dashboard` 不返回这些数)。
+
+接入方式(手动 snippet,**不要用自动注入**):
+
+1. Dashboard → Web Analytics → 添加站点 `app.1forgen.site` → 注入方式选「Enable with manual snippet」。
+2. 复制 token,填到 `wrangler.jsonc` 顶层 `vars.WEB_ANALYTICS_TOKEN`(只填生产;`env.staging` 故意留空)。
+3. `npm run deploy` 后生效。
+
+为什么手动而不是自动注入:平台是 `BrowserRouter` 单页应用,beacon 必须带 `spa:true` 才会在
+前端路由切换时上报 pageview;自动注入不保证带该参数,只会记录首次整页加载。
+前端 `web/src/components/CloudflareAnalytics.tsx` 从 `GET /api/auth/config` 取 token 后动态加载
+`beacon.min.js`——token 走运行时下发,生产与 staging 共用一份 `web/dist` 也不会串数据(AGENTS.md §2)。
+
+已知限制:
+
+- token 是公开值(会出现在浏览器里),不是 secret。
+- 广告拦截器会拦 `static.cloudflareinsights.com`,统计值应视为**下限**(常见 25%~40% 被拦)。
+- 国家按 IP 归属近似,VPN/代理会归到出口国;不做跨天用户识别、不写 cookie。
+- beacon 不覆盖 `/s/:slug` 生成站点(那需要在 `serve.ts` 另做服务端计数)。

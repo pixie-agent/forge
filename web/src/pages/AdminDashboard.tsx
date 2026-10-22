@@ -33,13 +33,21 @@ interface TrendSeries {
 
 /** 手写 SVG 折线图:不引图表库,管理后台只依赖 Tailwind */
 function Trend({ title, points, series }: { title: string; points: string[]; series: TrendSeries[] }) {
+  const [hover, setHover] = useState<number | null>(null)
   const max = Math.max(1, ...series.flatMap((s) => s.values))
   const W = 640
   const H = 120
+  const lastIndex = Math.max(1, points.length - 1)
+  const xAt = (i: number) => (i / lastIndex) * W
   const path = (values: number[]) =>
-    values
-      .map((v, i) => `${i === 0 ? 'M' : 'L'} ${(i / Math.max(1, points.length - 1)) * W} ${H - (v / max) * H}`)
-      .join(' ')
+    values.map((v, i) => `${i === 0 ? 'M' : 'L'} ${xAt(i)} ${H - (v / max) * H}`).join(' ')
+
+  const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!points.length) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const ratio = (e.clientX - rect.left) / Math.max(1, rect.width)
+    setHover(Math.min(points.length - 1, Math.max(0, Math.round(ratio * lastIndex))))
+  }
 
   return (
     <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-4">
@@ -54,14 +62,62 @@ function Trend({ title, points, series }: { title: string; points: string[]; ser
           ))}
         </div>
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="mt-3 h-36 w-full" preserveAspectRatio="none">
-        {[0, 0.25, 0.5, 0.75, 1].map((f) => (
-          <line key={f} x1="0" x2={W} y1={H * f} y2={H * f} stroke="rgb(55 65 81)" strokeWidth="0.5" />
-        ))}
-        {series.map((s) => (
-          <path key={s.label} d={path(s.values)} fill="none" stroke={s.color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
-        ))}
-      </svg>
+      <div className="relative mt-3" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+        <svg viewBox={`0 0 ${W} ${H}`} className="h-36 w-full" preserveAspectRatio="none">
+          {[0, 0.25, 0.5, 0.75, 1].map((f) => (
+            <line key={f} x1="0" x2={W} y1={H * f} y2={H * f} stroke="rgb(55 65 81)" strokeWidth="0.5" />
+          ))}
+          {series.map((s) => (
+            <path key={s.label} d={path(s.values)} fill="none" stroke={s.color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+          ))}
+          {hover !== null && points[hover] && (
+            <>
+              <line
+                x1={xAt(hover)}
+                x2={xAt(hover)}
+                y1="0"
+                y2={H}
+                stroke="rgb(156 163 175)"
+                strokeWidth="1"
+                strokeDasharray="3 3"
+                vectorEffect="non-scaling-stroke"
+              />
+              {series.map((s) => (
+                <circle
+                  key={s.label}
+                  cx={xAt(hover)}
+                  cy={H - (s.values[hover] / max) * H}
+                  r="4"
+                  fill={s.color}
+                  stroke="rgb(17 24 39)"
+                  strokeWidth="1.5"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+            </>
+          )}
+        </svg>
+        {hover !== null && points[hover] && (
+          <div
+            className="pointer-events-none absolute top-1 z-10 min-w-32 rounded-lg border border-gray-700 bg-gray-950/95 px-2.5 py-2 text-[11px] shadow-xl"
+            style={{
+              left: `${(hover / lastIndex) * 100}%`,
+              transform: hover === 0 ? 'translateX(0)' : hover === points.length - 1 ? 'translateX(-100%)' : 'translateX(-50%)',
+            }}
+          >
+            <div className="mb-1 font-medium text-gray-300">{points[hover]}</div>
+            {series.map((s) => (
+              <div key={s.label} className="flex items-center justify-between gap-4 whitespace-nowrap">
+                <span className="flex items-center gap-1 text-gray-500">
+                  <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
+                  {s.label}
+                </span>
+                <span className="tabular-nums text-gray-100">{fmtInt(s.values[hover] ?? 0)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       <div className="flex justify-between text-[11px] text-gray-600">
         <span>{points[0]}</span>
         <span>峰值 {fmtInt(max)}</span>
