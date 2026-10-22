@@ -105,6 +105,7 @@ npm run agent:deploy:free:prod     # 生产免费通道执行体(GLM + 进程内
 npm run agent:deploy:free:staging  # staging 免费通道执行体
 npm run db:init:staging         # staging 库初始化(幂等)
 npm run db:migrate:google:staging
+npm run db:migrate:analytics:staging  # 用户大盘埋点(新列/新表);生产用 :remote
 ```
 
 ---
@@ -112,7 +113,7 @@ npm run db:migrate:google:staging
 ## 6. 多语言(中 / 英)
 
 - **用户可见文案一律走词典**,不许在组件里写死中文。词典在 `web/src/lib/i18n/`(`dict.zh.ts` 是基准,`dict.en.ts` 用 `Record<DictKey, string>` 约束,**漏译即编译错误**)。新增词条只改这两份文件 + 在组件里 `useT()`,加语言不必动组件。
-- **`/admin` 六个管理页面刻意保持中文**(面向中文运营),不要给它们接 i18n。
+- **`/admin` 七个管理页面(产物 / 项目详情 / 用户 / 用户详情 / 模型 / 大盘 / 登录)刻意保持中文**(面向中文运营),不要给它们接 i18n。
 - 带行内格式的词条用 `web/src/components/RichText.tsx`(`**加粗**` / `` `代码` ``);**不要**往 DOM 里注入 HTML 字符串。列表连接符走词条 `chat.listSep`,不要写死 `、`。
 - 非组件代码(如 `lib/api.ts`)取词条用 `tStatic()`,写库前要定语言的文案见 `src/lib/i18n.ts`(Worker 侧那份独立于前端,两者不共享模块)。
 

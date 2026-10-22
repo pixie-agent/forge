@@ -961,3 +961,97 @@ npm run deploy:staging
 改档位同样走「新增一行并启用」,历史 `job_usage.model_config_id` 仍指向旧行,成本可复现。
 **密钥边界不变**:免费执行体必须有自己的 GLM key(`llm-api-key-free`),
 后台切不了密钥;生产上线免费通道前要先建好 secret 并部署 `npm run agent:deploy:free:prod`。
+
+---
+
+## 22. 用户大盘:活跃、漏斗、留存与商业化(2026-10-22)
+
+目标:让运营在 `/admin/dashboard` 一次看到「有多少人来、来了做什么、留下来没有、有没有付钱、每次生成赚不赚钱」,
+而不是把 `jobs`、`orders`、`users` 拆成几张表手工对。
+
+### 22.1 数据模型(`schema.migrate-analytics.sql`)
+
+| 对象 | 作用 |
+| --- | --- |
+| `users.last_active_at` | 最近一次带会话请求 / 登录的时间(UTC)。替代原来用 `MAX(jobs.created_at)` 推活跃 |
+| `projects.published_at` | 首次发布时间(UTC)。`published_version` 只记结果,记不了每日发布与发布耗时 |
+| `user_daily_active(user_id, day, first_seen_at)` | 一天一行、按 UTC+8 切日;DAU/WAU/MAU 与留存的主数据源 |
+| `user_events(id, user_id, name, props, created_at)` | 关键行为流水;`props` 是 JSON,方便扩字段 |
+
+`user_events.name` 目前只记这些高价值动作(不做全量请求日志):
+
+```
+register / register_verified / login
+project_create / job_create / job_end / version_create / publish
+checkout_start / order_paid / subscription_change
+```
+
+### 22.2 埋点链路(`src/lib/events.ts`)
+
+- `touchActivity(db, userId)`:
+  - 更新 `users.last_active_at`,条件是「从没写过 / 超过 10 分钟 / 已跨 UTC+8 自然日」;
+  - 只有真的更新了才 `INSERT OR IGNORE` 一行 `user_daily_active`。
+- `requireUser`(`src/lib/auth.ts`)在 cookie `forge_act` 不是今天时,异步 `waitUntil(touchActivity)`,
+  并把 cookie 写成今天 —— 正常浏览一天最多只触发一次 D1 写。
+- `/api/auth/me` 同样处理:前端每次进应用都拉它,是最稳定的访问活跃信号。
+- `createSession` 在建会话时直接 `touchActivity` + `logEvent('login')`,覆盖「登录后立刻离开」。
+- 业务事件挂在主流程**之后**且全部 best-effort:埋点表没迁移或写失败只打 `console.warn`,
+  不影响注册、生成、支付。
+- 发布时同时写 `projects.published_at = COALESCE(published_at, now)`(首次发布)并记 `publish` 事件
+  (每次发布都记,用于每日发布数)。
+
+### 22.3 口径(看板与 SQL 一致)
+
+| 指标 | 口径 |
+| --- | --- |
+| 活跃(DAU/WAU/MAU) | 当天/近 7 天/近 30 天 `user_daily_active ∪ jobs ∪ user_events` 按 `user_id` 去重,所以埋点上线前的历史活跃也能回算 |
+| 生成活跃 | 当天创建过 `jobs` 的去重用户 |
+| 粘性 | DAU ÷ MAU |
+| 激活 | 首个 `status='succeeded'` 的任务 |
+| TTV | 注册 → 首个成功任务;给 P50 / P90 |
+| 付费转化(累计) | 有 `orders.status='paid'` 的用户 ÷ 全部注册用户 |
+| 30 日付费渗透 | 近 30 天付费用户 ÷ MAU |
+| ARPPU / ARPU | 累计已支付金额 ÷ 付费用户 / 近 30 天已支付金额 ÷ MAU |
+| 留存 Dn | 注册周 cohort 中,注册后第 n 天**当天**有活跃行为的比例;未成熟显示 — |
+| 留存活跃 | `user_daily_active ∪ jobs ∪ user_events` 的按天去重,埋点上线前的历史也能用任务行为回算 |
+| 现金口径毛利 | 近 30 天已支付金额 − 近 30 天 `job_usage.cost_usd` |
+| 消耗口径毛利 | 近 30 天消耗积分 × (累计已支付金额 ÷ 累计购买积分) − 成本;避免充值当天全额计收入虚高 |
+
+时区:**所有日界线按 UTC+8(Asia/Shanghai)**。D1 的 `datetime('now')` 是 UTC,SQL 统一用
+`date(col, '+8 hours')`;区间起点用 `datetime(date('now','+8 hours','-N days'), '-8 hours')`
+把本地日零点换算回 UTC,这样还能走 `created_at` 索引。
+
+### 22.4 接口与页面
+
+- `GET /api/admin/dashboard?days=7|30|90&end=0|1`(`requireAdmin`):一次返回
+  `overview / series / funnel / activation / retention / monetization / quality`;
+  聚合逻辑在 `src/lib/dashboard.ts`。
+  - `end=0` 统计**今天**,`end=1` 统计**昨天(T-1)**。日级指标(`new_users_today`、
+    `jobs_today`、`dau`、`dau_jobs`)取该自然日;WAU/MAU 与 7/30 天滚动窗口也都以该日为终点,
+    不会把今天的数据混进昨天的窗口。
+- 页面 `/admin/dashboard`(`web/src/pages/AdminDashboard.tsx`),中文,顶部有
+  「今日 / 昨日 T-1」统计日切换 + 7/30/90 天趋势窗口切换:
+  概览卡、四条趋势线、激活漏斗、留存热力图、商业化、质量与成本、口径说明。
+- 后台导航 `AdminBar` 新增「大盘」;原「产物 / 用户 / 模型」保留。
+
+### 22.5 上线步骤(顺序不能反)
+
+```bash
+# 1) 先迁移(新表/新列);没迁移就发代码,后台用户列表与大盘会 500
+npm run db:migrate:analytics:staging
+# 2) 再发 Worker
+npm run typecheck && npm run build && npm run deploy:staging
+# 3) 上线生产时同样先迁移,再部署
+npm run db:migrate:analytics:remote
+```
+
+迁移文件是增量 `ALTER TABLE` + `CREATE TABLE IF NOT EXISTS`,幂等性由「只执行一次」保证;
+不要重复执行 `ALTER TABLE`(SQLite 会报 duplicate column)。全新库直接跑 `schema.sql`,已含同样的列与表。
+
+### 22.6 已知边界
+
+- `user_daily_active` 从本次上线开始累积;但活跃口径已 UNION `jobs` / `user_events`,所以 T-1 与历史 DAU 仍能回算(只有访问、没生成也没触发关键行为的用户无法回溯)。
+- `checkout_start` 只在上线后记录;上线前只有「已支付」,没有「发起结账」,所以历史结账转化缺失。
+- 生成站点(PV/UV)不在本大盘范围:那要另在 `serve.ts` 做访问计数或接 Cloudflare Web Analytics。
+- 渠道 / UTM 未采集,分渠道拉新与留存暂不可用。
+- 大盘是管理后台只读接口,不做用户维度下钻;需要下钻时走 `/admin/users/:id`。

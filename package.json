@@ -33,6 +33,8 @@
     "db:migrate:model3:staging": "wrangler d1 execute DB --remote --env staging --file=schema.migrate-model-config-v3.sql",
     "db:migrate:channel:remote": "wrangler d1 execute DB --remote --file=schema.migrate-model-channel.sql",
     "db:migrate:channel:staging": "wrangler d1 execute DB --remote --env staging --file=schema.migrate-model-channel.sql",
+    "db:migrate:analytics:remote": "yes | wrangler d1 execute DB --remote --file=schema.migrate-analytics.sql",
+    "db:migrate:analytics:staging": "yes | wrangler d1 execute DB --remote --env staging --file=schema.migrate-analytics.sql",
     "db:seed:channels:remote": "wrangler d1 execute DB --remote --file=schema.seed-model-channels.sql",
     "db:seed:channels:staging": "wrangler d1 execute DB --remote --env staging --file=schema.seed-model-channels.staging.sql",
     "creem:seed:test": "node scripts/creem-seed-products.mjs",

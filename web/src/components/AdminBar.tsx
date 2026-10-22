@@ -20,6 +20,9 @@ export default function AdminBar({ subtitle }: { subtitle?: string }) {
         </Link>
         <EnvBadge />
         <nav className="flex shrink-0 items-center gap-1">
+          <NavLink to="/admin/dashboard" className={navClass}>
+            大盘
+          </NavLink>
           <NavLink to="/admin" end className={navClass}>
             产物
           </NavLink>

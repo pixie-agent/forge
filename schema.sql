@@ -264,3 +264,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_job_once
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_provider_ref ON orders(provider, provider_ref);
 CREATE INDEX IF NOT EXISTS idx_orders_user    ON orders(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_user_daily_active_day ON user_daily_active(day);
+CREATE INDEX IF NOT EXISTS idx_user_events_name ON user_events(name, created_at);
+CREATE INDEX IF NOT EXISTS idx_user_events_user ON user_events(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_user_events_created ON user_events(created_at);
