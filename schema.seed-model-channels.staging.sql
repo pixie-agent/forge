@@ -15,7 +15,7 @@ VALUES
    'https://open.bigmodel.cn/api/paas/v4', 'openai-completions', 'glm-5.3-flash', 'medium',
    'zai', 16384, 1, 1, 'generate',
    1500000, 300000, 0, 0, 0, 0, 0, 1),
-  ('cfg-free-glm-staging', '免费 · GLM-5.3-Flash(staging,排队)', 'free', 'forge',
-   'https://open.bigmodel.cn/api/paas/v4', 'openai-completions', 'glm-5.3-flash', 'medium',
+  ('cfg-free-glm-staging-low', '免费 · GLM-5.3-Flash(staging,排队, low)', 'free', 'forge',
+   'https://open.bigmodel.cn/api/paas/v4', 'openai-completions', 'glm-5.3-flash', 'low',
    'zai', 16384, 1, 1, 'generate',
    1500000, 300000, 2, 0, 0, 0, 0, 1);

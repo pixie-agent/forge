@@ -17,7 +17,7 @@ VALUES
    'https://api.deepseek.com/anthropic', 'anthropic-messages', 'deepseek-flash', 'medium',
    '', 16384, 1, 0, 'generate',
    1500000, 300000, 0, 0.22, 0.66, 0.007, 0, 1),
-  ('cfg-free-glm-5-3-flash', '免费 · GLM-5.3-Flash(排队)', 'free', 'forge',
-   'https://open.bigmodel.cn/api/paas/v4', 'openai-completions', 'glm-5.3-flash', 'medium',
+  ('cfg-free-glm-5-3-flash-low', '免费 · GLM-5.3-Flash(排队, low)', 'free', 'forge',
+   'https://open.bigmodel.cn/api/paas/v4', 'openai-completions', 'glm-5.3-flash', 'low',
    'zai', 16384, 1, 0, 'generate',
    1500000, 300000, 2, 0, 0, 0, 0, 1);
