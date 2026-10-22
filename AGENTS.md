@@ -17,7 +17,7 @@
 | 对外域名 | `app.1forgen.site`(Custom Domain,根域名留空) | `app-staging.1forgen.site`(同上) |
 | workers.dev | `forge-v2.needle.workers.dev`(保留,旧链接依赖它) | `forge-v2-staging.needle.workers.dev`(同上) |
 | wrangler 环境 | 顶层(不带 `--env`) | `env.staging` |
-| Cloud Run(VIP 通道) | `forge-agent` | `forge-agent-staging`(`--max-instances 1`) |
+| Cloud Run(VIP 通道) | `forge-agent`(`--timeout 3600 --concurrency 1`;运行预算由后台 `max_run_ms` 下发,上限 3400s) | `forge-agent-staging`(`--timeout 3600 --concurrency 1 --max-instances 1`) |
 | Cloud Run(免费通道) | `forge-agent-free`(GLM,`--timeout 3600 --concurrency 8 --no-cpu-throttling --max-instances 1`;任务并发由后台 free 配置的 `queue_concurrency` 下发,env `AGENT_QUEUE_CONCURRENCY` 只是回落值) | `forge-agent-free-staging`(同左) |
 | D1 | `forge-v2`(`6fd724ad-…`) | `forge-v2-staging`(`da94e0ba-…`) |
 | R2 | `forge-v2-artifacts` | `forge-v2-artifacts-staging` |

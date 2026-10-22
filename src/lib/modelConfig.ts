@@ -4,8 +4,8 @@
  * 设计要点:
  *  - 同一 channel 只有一条 enabled = 1 的配置生效;表为空/查询失败时**回落 Cloud Run env**,
  *    所以后台故障或忘记执行迁移不会让生成直接不可用。
- *  - 配置行不可变:改模型 = 新增一行再启用。job_usage.model_config_id 指向当时那一行,
- *    历史成本因此可复现(价格改了也不会重算旧账)。
+ *  - 配置行可在后台原地编辑(不再要求「新增一行再启用」)。job_usage 在用量上报时
+ *    已经把成本落库,所以改价/改预算不会重算历史;只影响之后派发的任务。
  *  - 密钥永远不在这张表里:agent 仍然从 Cloud Run env 读 LLM_API_KEY。
  *    因此后台能切的是「同一网关 + 同一把 key 能访问的模型」,换供应商仍需部署。
  */
@@ -32,8 +32,11 @@ export const THINKING_FORMATS: ThinkingFormat[] = ['', 'openai', 'openrouter', '
 export type ModelChannel = 'default' | 'free' | 'vip'
 export const MODEL_CHANNELS: ModelChannel[] = ['default', 'free', 'vip']
 
-/** Cloud Run --timeout 是 1800s;留 100s 余量,避免 agent 还在跑就被平台强杀 */
-const MAX_RUN_MS = 1_700_000
+/**
+ * Cloud Run --timeout 是 3600s;留 200s 给构建/收尾,避免 agent 还在跑就被平台强杀。
+ * 注意 max_run_ms 只约束模型主循环,构建与复查轮在其后发生,所以不能贴着 3600s 配。
+ */
+const MAX_RUN_MS = 3_400_000
 const MIN_RUN_MS = 60_000
 
 export interface ModelConfigRow {
@@ -193,6 +196,13 @@ export function parseModelConfigInput(raw: unknown): { value?: ModelConfigInput;
   const designReview = text(src.design_review, 20) as DesignReview
   if (!DESIGN_REVIEWS.includes(designReview)) return { error: '复查轮配置不合法' }
 
+  const rawMaxRun = src.max_run_ms
+  if (rawMaxRun !== undefined && rawMaxRun !== '' && rawMaxRun !== null) {
+    const n = Number(rawMaxRun)
+    if (Number.isFinite(n) && (n < MIN_RUN_MS || n > MAX_RUN_MS)) {
+      return { error: `运行上限必须在 ${MIN_RUN_MS / 1000}s 到 ${MAX_RUN_MS / 1000}s 之间` }
+    }
+  }
   const maxRunMs = Math.round(num(src.max_run_ms, 1_500_000, MIN_RUN_MS, MAX_RUN_MS))
   return {
     value: {

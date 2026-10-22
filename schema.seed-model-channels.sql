@@ -16,7 +16,7 @@ VALUES
   ('cfg-vip-deepseek-flash', 'VIP · DeepSeek V4.1-Flash', 'vip', 'forge',
    'https://api.deepseek.com/anthropic', 'anthropic-messages', 'deepseek-flash', 'medium',
    '', 16384, 1, 0, 'generate',
-   1500000, 300000, 0, 0.22, 0.66, 0.007, 0, 1),
+   3000000, 300000, 0, 0.22, 0.66, 0.007, 0, 1),
   ('cfg-free-glm-5-3-flash-low', '免费 · GLM-5.3-Flash(排队, low)', 'free', 'forge',
    'https://open.bigmodel.cn/api/paas/v4', 'openai-completions', 'glm-5.3-flash', 'low',
    'zai', 16384, 1, 0, 'generate',

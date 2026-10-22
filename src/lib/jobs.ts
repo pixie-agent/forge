@@ -8,11 +8,11 @@ export type JobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancel
 
 /** agent 心跳间隔 20s;超过这么久没心跳即认为执行体失联(Cold start + 首跳留足余量) */
 const HEARTBEAT_TIMEOUT_SECONDS = 180
-/** 任务总龄上限:略大于 Cloud Run --timeout(1800s),平台强杀(实例消失、无 fail 回调)后靠巡检兜底判死 */
-const JOB_MAX_SECONDS = 1900
+/** 任务总龄上限:略大于 Cloud Run --timeout(3600s),平台强杀(实例消失、无 fail 回调)后靠巡检兜底判死 */
+const JOB_MAX_SECONDS = 3700
 /**
  * 免费通道总龄上限:免费执行体 --timeout 3600s + 进程内排队,一个任务从建单到收尾
- * 可能远超 VIP 的 1800s。阈值取 3700s(略大于 3600s),仍由心跳(180s)先兜住真正失联的执行体。
+ * 可能远超 VIP 的 3600s。阈值取 3700s(略大于 3600s),仍由心跳(180s)先兜住真正失联的执行体。
  */
 const FREE_JOB_MAX_SECONDS = 3700
 
@@ -69,7 +69,7 @@ export async function sweepJobs(env: Env): Promise<void> {
     .all<{ id: string }>()
   for (const row of stale.results) await markJobFailed(env, row.id, '任务执行体失联,请重试')
 
-  // 总龄上限按通道区分:free 的任务可能在免费执行体的进程内排队,不能按 VIP 的 1900s 判死。
+  // 总龄上限按通道区分:free 的任务可能在免费执行体的进程内排队,不能按 VIP 的 3700s 判死。
   // channel 列来自增量迁移:没跑迁移时退回旧的单阈值查询,巡检不能因为少一列就整体失效。
   const timedOut = await env.DB
     .prepare(
