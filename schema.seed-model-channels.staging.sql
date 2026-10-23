@@ -1,7 +1,8 @@
--- 通道默认配置(staging,2026-10-21)。
+-- 通道默认配置(staging,2026-10-23)。
 --
--- staging 只有一把 GLM key(llm-api-key-staging),没有 DeepSeek key,所以两个通道都用
--- GLM-5.3-Flash:验证的是「免费/VIP 分流 + 免费执行体排队」这条链路,而不是模型差异。
+-- staging 的 VIP 通道仍用 GLM-5.3-Flash(staging 没有 DeepSeek key);免费通道已切到
+-- MiniMax-M3.1-Flash(Anthropic 方言,独立 Secret llm-api-key-minimax-staging),
+-- 与生产免费通道保持一致,验证的是「免费/VIP 分流 + 免费执行体排队」这条链路。
 -- 生产用 schema.seed-model-channels.sql(VIP = DeepSeek)。
 --
 -- 幂等:固定 id + INSERT OR IGNORE;该通道已有 enabled = 1 时本次插入被忽略。
@@ -15,7 +16,7 @@ VALUES
    'https://open.bigmodel.cn/api/paas/v4', 'openai-completions', 'glm-5.3-flash', 'medium',
    'zai', 16384, 1, 1, 'generate',
    3000000, 300000, 0, 0, 0, 0, 0, 1),
-  ('cfg-free-glm-staging-low', '免费 · GLM-5.3-Flash(staging,排队, low)', 'free', 'forge',
-   'https://open.bigmodel.cn/api/paas/v4', 'openai-completions', 'glm-5.3-flash', 'low',
-   'zai', 16384, 1, 1, 'generate',
+  ('cfg-free-minimax-m3-1-flash-low', '免费 · MiniMax-M3.1-Flash(staging,排队, low)', 'free', 'forge',
+   'https://api.minimaxi.com/anthropic', 'anthropic-messages', 'MiniMax-M3.1-Flash', 'low',
+   '', 16384, 1, 1, 'generate',
    1500000, 300000, 2, 0, 0, 0, 0, 1);

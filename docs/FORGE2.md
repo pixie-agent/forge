@@ -321,8 +321,8 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 | KV | `f6b66c90…` | `67e46b44…` |
 | Durable Object | 独立 namespace(Worker `forge-v2`) | 独立 namespace(Worker `forge-v2-staging`) |
 | Cloud Run Service | `forge-agent`(`--max-instances 5`) | `forge-agent-staging`(`--max-instances 1`) |
-| LLM key | Secret `llm-api-key`(DeepSeek) | Secret `llm-api-key-staging`(GLM,**另一把**) |
-| LLM 模型 | `deepseek-flash`(@ `api.deepseek.com/anthropic`,`anthropic-messages`) | `glm-5.3-flash`(@ `open.bigmodel.cn/api/paas/v4`,`openai-completions` + `PI_THINKING_FORMAT=zai`) |
+| LLM key | Secret `llm-api-key`(DeepSeek,VIP);免费执行体用 `llm-api-key-minimax`(MiniMax) | Secret `llm-api-key-staging`(GLM,VIP,**另一把**);免费执行体用 `llm-api-key-minimax-staging`(MiniMax) |
+| LLM 模型 | VIP `deepseek-flash`(@ `api.deepseek.com/anthropic`,`anthropic-messages`);免费 `MiniMax-M3.1-Flash`(@ `api.minimaxi.com/anthropic`,`anthropic-messages`) | VIP `glm-5.3-flash`(@ `open.bigmodel.cn/api/paas/v4`,`openai-completions` + `PI_THINKING_FORMAT=zai`);免费 `MiniMax-M3.1-Flash`(Anthropic 方言) |
 | 内部密钥 | Secret `agent-secret` | Secret `agent-secret-staging`(**另一把**) |
 | Cron | `* * * * *`(仅巡检本环境任务) | `* * * * *`(仅巡检本环境任务) |
 | 注册验证邮件 | Resend Secret `RESEND_API_KEY` + `noreply@1forgen.site`(免费 3,000 封/月) | 同一 Resend 账号,`--env staging` 单独写 secret |
@@ -928,7 +928,7 @@ npm run deploy:staging
 | | 免费通道(`free`) | VIP 通道(`vip`) |
 | --- | --- | --- |
 | 判定 | 没有 paid 订单 | 有过任意一条 paid 订单 |
-| 模型 | GLM-5.3-Flash(`openai-completions` + `zai`) | DeepSeek V4.1-Flash(`anthropic-messages`) |
+| 模型 | MiniMax-M3.1-Flash(`anthropic-messages`) | DeepSeek V4.1-Flash(`anthropic-messages`) |
 | 执行体 | 独立 Cloud Run:`forge-agent-free` / `-staging` | 原 `forge-agent` / `-staging` |
 | 并发 | 资源并发:Cloud Run `--concurrency 8 --no-cpu-throttling --max-instances 1`;任务并发:`model_configs.queue_concurrency`(默认 2,后台可改) | 保持原配置(不排队) |
 | 超时 | Cloud Run `--timeout 3600`;Worker 总龄阈值 3700s | Cloud Run `--timeout 3600`;Worker 总龄阈值 3700s |
@@ -961,8 +961,14 @@ npm run deploy:staging
 `db:seed:channels:*` 的两条默认配置是幂等种子(固定 id + `INSERT OR IGNORE`)。
 免费通道默认 `thinking_level = low`(2026-10-22 从 medium 下调,压规划阶段的时延与成本);
 改档位同样走「新增一行并启用」,历史 `job_usage.model_config_id` 仍指向旧行,成本可复现。
-**密钥边界不变**:免费执行体必须有自己的 GLM key(`llm-api-key-free`),
-后台切不了密钥;生产上线免费通道前要先建好 secret 并部署 `npm run agent:deploy:free:prod`。
+2026-10-23 免费通道从 GLM-5.3-Flash 切到 **MiniMax-M3.1-Flash**(`anthropic-messages`,
+`https://api.minimaxi.com/anthropic`):执行体改绑 Secret `llm-api-key-minimax`
+(staging 为 `llm-api-key-minimax-staging`),库侧跑 `db:migrate:free-minimax:*` 新增生效行并停用旧 GLM 行。
+MiniMax 的 Anthropic 端点实测支持流式、tool_use、thinking(`budget_tokens`)与 image 块;
+生产免费执行体仍不声明图片输入,staging 保持 `PI_MODEL_INPUT_IMAGE=true`。
+**密钥边界不变**:免费执行体必须有自己的 MiniMax key(`llm-api-key-minimax`),
+后台切不了密钥;换模型供应商(新 base URL + 新 key)必须「建 secret + 重新部署执行体 + 改配置行」三件事一起做,
+生产上线前要先建好 secret 并部署 `npm run agent:deploy:free:prod`。
 
 ---
 
