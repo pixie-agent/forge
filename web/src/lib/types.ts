@@ -22,6 +22,18 @@ export interface Project {
   updated_at: string
 }
 
+/** 首页精选案例(公开接口 GET /api/showcase;不含属主/源码等非展示字段) */
+export interface ShowcaseItem {
+  id: string
+  slug: string
+  name: string
+  description: string
+  /** 后台打的展示标签(逗号分隔的库字段已拆成数组) */
+  tags: string[]
+  featured_at: string | null
+  updated_at: string
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant'
@@ -252,6 +264,11 @@ export interface AdminProject {
   description: string
   status: 'draft' | 'published'
   current_version: number
+  published_version: number
+  /** 1 = 上首页精选(只有已发布项目可开启,见后台打标签接口) */
+  featured: number
+  /** 逗号分隔的展示标签,首页拆成小胶囊 */
+  featured_tags: string
   created_at: string
   updated_at: string
   user_id: string

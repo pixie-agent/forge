@@ -51,6 +51,11 @@ CREATE TABLE IF NOT EXISTS projects (
   published_version INTEGER NOT NULL DEFAULT 0,
   -- 发布时刻(UTC):published_version 只记结果、不记时间,大盘的每日发布数用它
   published_at    TEXT,
+  -- 首页精选(见 schema.migrate-showcase.sql):只有已发布项目能上首页;
+  -- featured_tags 是逗号分隔的展示标签(最多 5 个),featured_at 用于首页排序
+  featured        INTEGER NOT NULL DEFAULT 0,
+  featured_tags   TEXT NOT NULL DEFAULT '',
+  featured_at     TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );

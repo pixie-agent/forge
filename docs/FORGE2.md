@@ -1089,3 +1089,80 @@ npm run db:migrate:analytics:remote
 - 广告拦截器会拦 `static.cloudflareinsights.com`,统计值应视为**下限**(常见 25%~40% 被拦)。
 - 国家按 IP 归属近似,VPN/代理会归到出口国;不做跨天用户识别、不写 cookie。
 - beacon 不覆盖 `/s/:slug` 生成站点(那需要在 `serve.ts` 另做服务端计数)。
+
+## 23. 首页精选案例与克隆(2026-10-23)
+
+目标:运营在后台给已发布产物打标签、决定是否上首页;首页展示真实案例,登录用户可一键克隆示例的
+源码与构建产物,在工作台继续对话改成自己的站点。
+
+### 23.1 数据层
+
+`projects` 新增三列(增量迁移 `schema.migrate-showcase.sql`,新库 `schema.sql` 已含):
+
+| 列 | 含义 |
+| --- | --- |
+| `featured` | 1 = 上首页精选;默认 0 |
+| `featured_tags` | 逗号分隔的展示标签,最多 5 个、每个 20 字(写入前归一化) |
+| `featured_at` | 上首页时间,首页按它倒序;下首页清空 |
+
+索引 `idx_projects_featured(featured, featured_at)`。
+
+### 23.2 后台
+
+- `POST /api/admin/projects/:id/featured`(`requireAdmin`,body `{ featured?, tags? }`):
+  - `featured=true` 要求项目 `status='published'` 且 `published_version >= 1`,否则 400;
+  - `tags` 为空串 = 清空;不传则保留;
+  - 不更新 `updated_at`(打标签不该改变用户项目排序)。
+- `/admin` 列表新增「首页」列(快捷上下首页 + 标签摘要);`/admin/projects/:id` 新增「首页展示」面板
+  (标签输入、保存标签、上下首页)。管理后台仍保持中文,不接 i18n。
+
+### 23.3 公开接口与首页
+
+- `GET /api/showcase`(公开):只返回 `featured = 1` 且已发布、`published_version >= 1` 的项目,
+  `featured_at DESC` 最多 12 条;字段仅 `id/slug/name/description/tags/featured_at/updated_at`。
+- 首页(`Landing.tsx`)在示例想法与价格区之间渲染「精选案例」;列表为空时整块不渲染。
+  卡片封面是线上站点的**实时预览**:`<iframe src="/s/:slug/">` 以 400% 尺寸挂载再 `scale(0.25)`
+  缩进 `aspect-[16/10]` 的框里(等价 1200px 宽桌面视口),`loading="lazy"` 只在滚到附近时加载。
+  没有截图服务,实时嵌入是唯一「内容随站点更新」的实现;站点本身由服务端
+  `Content-Security-Policy: sandbox …`(opaque origin)下发,嵌入页面拿不到本页 origin。
+  卡片整体只保留「名称 + 一行标签/描述 + 克隆」,点封面在新标签页打开站点。
+
+### 23.4 克隆
+
+`POST /api/showcase/:id/clone`(登录用户):
+
+1. 再次校验源项目仍是「精选 + 已发布」;
+2. 新建项目(新 UUID、唯一 slug、沿用名称/描述);
+3. 把源项目**线上版本**的 `src_json` / `manifest_json` 写成新项目的草稿 `versions(version_no = 0)`;
+4. 用 `copyArtifactsAcross`(R2 没有服务端 copy,只能逐个 get + put)复制构建产物到新项目草稿目录;
+5. 任一步失败回滚项目行与已写入的 R2 对象。
+
+不复制:站点数据(项目独立 SQLite)、连接器、对话记录、`prompt`;不扣积分(不调用模型)。
+新项目 `current_version = 0` + 草稿存在 → 工作区打开即可预览,输入框直接走 `chat`(以草稿为基线),
+不会重新 `generate`。
+
+未登录点「克隆同款」→ `/login?clone=<id>`;登录页把 id 另存进 `sessionStorage`
+(`web/src/lib/pendingClone.ts`),因此注册走邮箱验证、Google 登录走 OAuth 回调后**也能续跑**:
+`App.tsx` 里的 `CloneResumer` 在拿到会话后取出待办、调用克隆接口并跳进新项目工作区。
+当前 URL 带 `clone` 参数时由登录页自己处理(要显示「正在克隆」状态),`CloneResumer` 跳过以免克隆两次。
+待办只存 sessionStorage,关掉标签页即放弃。
+
+### 23.5 上线顺序
+
+```bash
+# 1) 先迁移
+npm run db:migrate:showcase:staging
+# 2) 再发 Worker
+npm run typecheck && npm run build && npm run deploy:staging
+# 3) 生产同样先迁移
+npm run db:migrate:showcase:remote
+```
+
+### 23.6 已知边界
+
+- 精选项目后续被下线/删除:首页自动隐藏,克隆接口返回 404,无需额外清理;
+- 克隆不复制站点数据,示例里的动态数据在新项目为空;
+- 不做每用户克隆次数上限(克隆不产生模型成本),如出现刷项目再补;
+- 首页卡片没有截图服务:封面是 `/s/:slug/` 的实时 iframe(`loading="lazy"`),代价是访客滚到卡片附近时
+  会加载该生成应用的资源与数据接口(每张卡一次)。若以后要压流量,可给卡片加 IntersectionObserver
+  只挂载可视区域内的 1–2 个,或另接截图链路;需要真实缩略图时必须另建(本方案只是实时预览)。

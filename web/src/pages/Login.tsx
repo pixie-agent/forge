@@ -7,11 +7,14 @@ import PublicFooter from '../components/PublicFooter'
 import { api } from '../lib/api'
 import { SIGNUP_CREDITS } from '../lib/billing'
 import { getActiveLang, useI18n } from '../lib/i18n'
+import { clearPendingClone, savePendingClone } from '../lib/pendingClone'
 import type { User } from '../lib/types'
 
 export default function Login() {
   const [sp] = useSearchParams()
   const idea = sp.get('idea') ?? ''
+  /** 首页「克隆同款」带过来的精选案例 id:登录成功后立即克隆并进工作区 */
+  const clone = sp.get('clone') ?? ''
   // 服务端在 Google 回调失败时把原因放在 URL 里(中文原文),这里翻成当前语言
   const googleError = useI18n().tServer(sp.get('google_error') ?? '')
   const [mode, setMode] = useState<'login' | 'register'>(idea ? 'register' : 'login')
@@ -36,16 +39,25 @@ export default function Login() {
       .catch(() => setGoogleEnabled(false))
   }, [])
 
+  // 克隆待办存 sessionStorage:注册要等邮件验证、Google 回跳直接进 /projects,
+  // 这两种链路都会丢掉 URL 上的 clone 参数,由 App 的 CloneResumer 凭待办补跑。
+  useEffect(() => {
+    if (clone) savePendingClone(clone)
+  }, [clone])
+
   useEffect(() => {
     if (loading || !user || redirected.current) return
     redirected.current = true
-    const go = idea
-      ? api<{ id: string }>('/api/projects', { method: 'POST', body: { idea } }).then(
-          (p) => `/workspace/${p.id}?idea=${encodeURIComponent(idea)}`
-        )
-      : Promise.resolve('/projects')
+    if (clone) clearPendingClone()
+    const go = clone
+      ? api<{ id: string }>(`/api/showcase/${clone}/clone`, { method: 'POST' }).then((p) => `/workspace/${p.id}`)
+      : idea
+        ? api<{ id: string }>('/api/projects', { method: 'POST', body: { idea } }).then(
+            (p) => `/workspace/${p.id}?idea=${encodeURIComponent(idea)}`
+          )
+        : Promise.resolve('/projects')
     go.then((path) => nav(path)).catch(() => nav('/projects'))
-  }, [loading, user, idea, nav])
+  }, [loading, user, idea, clone, nav])
 
   async function submit(e: FormEvent) {
     e.preventDefault()
@@ -168,6 +180,12 @@ export default function Login() {
             {idea && (
               <p className="mb-3 rounded-lg bg-indigo-500/10 px-3 py-2 text-xs text-indigo-300">
                 {t('login.continueIdea', { idea })}
+              </p>
+            )}
+
+            {clone && (
+              <p className="mb-3 rounded-lg bg-indigo-500/10 px-3 py-2 text-xs text-indigo-300">
+                {t('login.continueClone')}
               </p>
             )}
 

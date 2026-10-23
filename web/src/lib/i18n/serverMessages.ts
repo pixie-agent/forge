@@ -40,6 +40,7 @@ export const SERVER_MESSAGES: Record<string, DictKey> = {
   '商品未配置': 'err.billingProductMissing',
   '签名校验失败': 'err.billingBadSignature',
   '项目不存在': 'err.projectNotFound',
+  '克隆失败,请稍后重试': 'err.cloneFailed',
   '该项目已有生成任务在进行中,请稍候': 'err.projectBusy',
   '任务不存在': 'err.jobNotFound',
   '任务刚刚已结束,无需停止': 'err.jobAlreadyDone',

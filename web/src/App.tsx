@@ -1,5 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
 import VerifyEmail from './pages/VerifyEmail'
@@ -17,6 +17,7 @@ import AdminUser from './pages/AdminUser'
 import AdminModels from './pages/AdminModels'
 import AdminDashboard from './pages/AdminDashboard'
 import { api } from './lib/api'
+import { takePendingClone } from './lib/pendingClone'
 import { useT } from './lib/i18n'
 import type { User } from './lib/types'
 
@@ -58,6 +59,7 @@ export default function App() {
   return (
     <AuthCtx.Provider value={{ user, setUser, refresh, loading }}>
       <BrowserRouter>
+        <CloneResumer />
         <Routes>
           <Route path="/" element={<Landing />} />
           <Route path="/login" element={<Login />} />
@@ -152,6 +154,36 @@ export default function App() {
       </BrowserRouter>
     </AuthCtx.Provider>
   )
+}
+
+/**
+ * 登录后补跑「克隆同款」。
+ *
+ * 首页点克隆时还没登录 → 跳 `/login?clone=<id>`,登录页会把 id 存进 sessionStorage;
+ * 但注册走邮件验证、Google 登录走回调,最终落点都是 `/projects`(URL 上的 clone 早就丢了)。
+ * 这里在拿到会话后统一取出待办并克隆,再把用户送进新项目的工作区。
+ * 当前 URL 带 clone 参数时由登录页自己处理(它要显示「正在克隆」的状态),这里跳过避免克隆两次。
+ */
+function CloneResumer() {
+  const { user, loading } = useAuth()
+  const nav = useNavigate()
+  const loc = useLocation()
+  const started = useRef(false)
+  const hasCloneParam = new URLSearchParams(loc.search).has('clone')
+
+  useEffect(() => {
+    if (loading || !user || started.current || hasCloneParam) return
+    started.current = true
+    const id = takePendingClone()
+    if (!id) return
+    api<{ id: string }>(`/api/showcase/${id}/clone`, { method: 'POST' })
+      .then((p) => nav(`/workspace/${p.id}`))
+      .catch(() => {
+        // 案例已下线/删除时接口返回 404:静默放弃,用户仍在当前页正常使用
+      })
+  }, [loading, user, hasCloneParam, nav])
+
+  return null
 }
 
 function Guard({ children }: { children: ReactNode }) {

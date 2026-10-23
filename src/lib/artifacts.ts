@@ -70,8 +70,22 @@ export async function clearArtifacts(env: Env, projectId: string, versionNo: num
 
 /** 整树复制某版本的产物到另一版本(草稿 → 正式版本时用),返回复制的总字节数;不改动源 */
 export async function copyArtifacts(env: Env, projectId: string, fromNo: number, toNo: number): Promise<number> {
-  const from = artifactPrefix(projectId, fromNo)
-  const to = artifactPrefix(projectId, toNo)
+  return copyArtifactsAcross(env, projectId, fromNo, projectId, toNo)
+}
+
+/**
+ * 跨项目整树复制构建产物(精选案例 → 用户克隆出的新项目)。
+ * R2 的 Worker 绑定没有服务端 copy,只能逐个 get + put;返回实际复制的总字节数。
+ */
+export async function copyArtifactsAcross(
+  env: Env,
+  fromProjectId: string,
+  fromNo: number,
+  toProjectId: string,
+  toNo: number,
+): Promise<number> {
+  const from = artifactPrefix(fromProjectId, fromNo)
+  const to = artifactPrefix(toProjectId, toNo)
   let bytes = 0
   let cursor: string | undefined
   for (;;) {
