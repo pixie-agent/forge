@@ -17,6 +17,7 @@ import { callProjectDb, projectSchema, runProjectSql, seedProjectDocs, type Seed
 import { parseModelConfigInput, type ModelConfigRow } from '../lib/modelConfig'
 import { hasPrice } from '../lib/pricing'
 import { buildDashboard } from '../lib/dashboard'
+import { normalizeShowcaseTags, showcaseTagsText } from '../lib/showcase'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -439,7 +440,8 @@ app.get('/projects', async (c) => {
 
   const { results } = await c.env.DB
     .prepare(
-      `SELECT p.id, p.slug, p.name, p.description, p.status, p.current_version, p.created_at, p.updated_at,
+      `SELECT p.id, p.slug, p.name, p.description, p.status, p.current_version, p.published_version,
+              p.featured, p.featured_tags, p.created_at, p.updated_at,
               u.id AS user_id, u.email AS owner_email,
               (SELECT COUNT(*) FROM versions v WHERE v.project_id = p.id AND v.version_no > 0) AS versions_count,
               (SELECT COUNT(*) FROM messages m WHERE m.project_id = p.id) AS messages_count
@@ -472,6 +474,49 @@ app.get('/projects', async (c) => {
     .first<{ n: number }>()
 
   return c.json({ projects: results, total: total?.n ?? 0, page, limit })
+})
+
+/**
+ * 首页展示(唯一改动产物的后台写接口,与「模型配置」并列):
+ *   - featured=true 只允许已发布且 published_version >= 1 的项目,否则首页卡片会打开 404;
+ *   - 标签按逗号拆分归一化(最多 5 个、每个 20 字),空串 = 清空;
+ *   - 上首页时记录 featured_at(首页按它倒序),下首页时清空;
+ *   - 不触碰 updated_at:打标签是运营动作,不该把项目挤到用户列表最前面。
+ */
+app.post('/projects/:id/featured', requireAdmin, async (c) => {
+  const id = c.req.param('id')
+  const row = await c.env.DB
+    .prepare('SELECT id, status, published_version, featured, featured_tags FROM projects WHERE id = ?')
+    .bind(id)
+    .first<{ id: string; status: string; published_version: number; featured: number; featured_tags: string }>()
+  if (!row) return c.json({ error: '项目不存在' }, 404)
+
+  const body = await c.req
+    .json<{ featured?: unknown; tags?: unknown }>()
+    .catch(() => ({}) as { featured?: unknown; tags?: unknown })
+  const featured =
+    body.featured === undefined
+      ? Number(row.featured) === 1
+        ? 1
+        : 0
+      : body.featured === true || body.featured === 1 || body.featured === '1'
+        ? 1
+        : 0
+  if (featured && (row.status !== 'published' || row.published_version < 1)) {
+    return c.json({ error: '请先发布该版本再上首页' }, 400)
+  }
+
+  const tags = body.tags === undefined ? row.featured_tags : showcaseTagsText(normalizeShowcaseTags(body.tags))
+  await c.env.DB
+    .prepare(
+      `UPDATE projects
+          SET featured = ?, featured_tags = ?,
+              featured_at = CASE WHEN ? = 1 THEN COALESCE(featured_at, datetime('now')) ELSE NULL END
+        WHERE id = ?`
+    )
+    .bind(featured, tags, featured, id)
+    .run()
+  return c.json({ ok: true, featured, featured_tags: tags })
 })
 
 /** 用户使用情况(跨用户列表):每行一个注册用户 + 其用量聚合,支持邮箱搜索与分页 */

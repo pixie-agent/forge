@@ -9,24 +9,10 @@ import { deleteProjectBindings } from '../lib/connectors/store'
 import { ACTIVE_STATUS_SQL } from '../lib/jobHelpers'
 import { logEvent } from '../lib/events'
 import { createZip } from '../lib/zip'
+import { newUniqueSlug } from '../lib/slug'
 
 const app = new Hono<AppEnv>()
 app.use('*', requireUser)
-
-function randomSlug(len = 8): string {
-  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789'
-  const bytes = crypto.getRandomValues(new Uint8Array(len))
-  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('')
-}
-
-async function newUniqueSlug(db: D1Database): Promise<string> {
-  for (let i = 0; i < 5; i++) {
-    const slug = randomSlug()
-    const hit = await db.prepare('SELECT id FROM projects WHERE slug = ?').bind(slug).first()
-    if (!hit) return slug
-  }
-  return randomSlug(12)
-}
 
 async function ownedProject(c: Context<AppEnv>, id: string): Promise<ProjectRow | null> {
   return c.env.DB

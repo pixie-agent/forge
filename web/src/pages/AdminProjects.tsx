@@ -17,6 +17,7 @@ export default function AdminProjects() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [stats, setStats] = useState<AdminStats | null>(null)
+  const [featuredBusy, setFeaturedBusy] = useState('')
   const nav = useNavigate()
 
   const load = useCallback(async () => {
@@ -46,6 +47,27 @@ export default function AdminProjects() {
   }, [])
 
   const pages = Math.max(1, Math.ceil(total / LIMIT))
+
+  /**
+   * 快捷上/下首页:标签在详情页编辑,这里只切换展示位。
+   * 未发布的项目不能上首页(首页卡片会打开 404),按钮置灰并在 title 里说明。
+   */
+  async function toggleFeatured(p: AdminProject) {
+    if (featuredBusy) return
+    setFeaturedBusy(p.id)
+    setError('')
+    try {
+      const d = await api<{ featured: number; featured_tags: string }>(`/api/admin/projects/${p.id}/featured`, {
+        method: 'POST',
+        body: { featured: !p.featured },
+      })
+      setItems((list) => list.map((x) => (x.id === p.id ? { ...x, featured: d.featured, featured_tags: d.featured_tags } : x)))
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setFeaturedBusy('')
+    }
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
@@ -97,6 +119,7 @@ export default function AdminProjects() {
                   <th className="px-4 py-2.5 font-medium">名称</th>
                   <th className="px-4 py-2.5 font-medium">属主</th>
                   <th className="px-4 py-2.5 font-medium">状态</th>
+                  <th className="px-4 py-2.5 font-medium">首页</th>
                   <th className="px-4 py-2.5 font-medium">版本</th>
                   <th className="px-4 py-2.5 font-medium">对话</th>
                   <th className="px-4 py-2.5 font-medium">数据</th>
@@ -128,6 +151,25 @@ export default function AdminProjects() {
                       >
                         {p.status === 'published' ? '已发布' : '草稿'}
                       </span>
+                    </td>
+                    <td className="px-4 py-2.5" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        onClick={() => toggleFeatured(p)}
+                        disabled={featuredBusy === p.id || (p.status !== 'published' && !p.featured)}
+                        title={p.status !== 'published' ? '先发布该版本才能上首页' : undefined}
+                        className={`rounded-lg border px-2.5 py-1 text-xs disabled:opacity-40 ${
+                          p.featured
+                            ? 'border-fuchsia-500/40 bg-fuchsia-500/10 text-fuchsia-300'
+                            : 'border-gray-700 text-gray-400 hover:bg-gray-800'
+                        }`}
+                      >
+                        {featuredBusy === p.id ? '…' : p.featured ? '已上首页' : '上首页'}
+                      </button>
+                      {p.featured_tags && (
+                        <div className="mt-1 max-w-32 truncate text-xs text-gray-600" title={p.featured_tags}>
+                          {p.featured_tags.split(',').filter(Boolean).join('、')}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-2.5 text-gray-400">
                       v{p.current_version}（{p.versions_count}）

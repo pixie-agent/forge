@@ -28,11 +28,18 @@ export default function AdminProject() {
   const [dataEnv, setDataEnv] = useState<'draft' | 'live'>('live')
   const [rows, setRows] = useState<SiteDataItem[]>([])
 
+  // 首页展示(唯一可写区域):标签输入 + 上下首页
+  const [featuredTags, setFeaturedTags] = useState('')
+  const [featuredBusy, setFeaturedBusy] = useState(false)
+  const [featuredMsg, setFeaturedMsg] = useState('')
+  const [featuredMsgTone, setFeaturedMsgTone] = useState<'ok' | 'err'>('ok')
+
   const loadDetail = useCallback(async () => {
     setError('')
     try {
       const d = await api<AdminProjectDetail>(`/api/admin/projects/${id}`)
       setDetail(d)
+      setFeaturedTags(d.project.featured_tags ?? '')
       // 默认看草稿(工作副本):它就是用户此刻看到的样子;没有草稿才回退到最新正式版本
       if (d.draft) setVersionNo(0)
       else if (d.versions[0]) setVersionNo(d.versions[0].version_no)
@@ -87,6 +94,33 @@ export default function AdminProject() {
   // 每个版本都签发草稿令牌,后台可直接预览该版本(与线上/当前版本解耦);无构建产物时不签发,previewUrl 为 null
   const previewUrl = versionPreviewToken ? `/p/${versionPreviewToken}/` : null
   const envCollections = (detail?.collections ?? []).filter((c) => c.env === dataEnv)
+
+  /**
+   * 保存首页展示设置。next 省略 = 只保存标签(不动展示状态);
+   * 传 true/false = 同时上/下首页。是否已发布由服务端再校验一次。
+   */
+  async function saveFeatured(next?: boolean) {
+    if (!project || featuredBusy) return
+    setFeaturedBusy(true)
+    setFeaturedMsg('')
+    try {
+      const d = await api<{ featured: number; featured_tags: string }>(`/api/admin/projects/${project.id}/featured`, {
+        method: 'POST',
+        body: next === undefined ? { tags: featuredTags } : { featured: next, tags: featuredTags },
+      })
+      setDetail((prev) =>
+        prev ? { ...prev, project: { ...prev.project, featured: d.featured, featured_tags: d.featured_tags } } : prev
+      )
+      setFeaturedTags(d.featured_tags)
+      setFeaturedMsgTone('ok')
+      setFeaturedMsg(next === undefined ? '标签已保存' : d.featured ? '已上首页' : '已下首页')
+    } catch (err) {
+      setFeaturedMsgTone('err')
+      setFeaturedMsg((err as Error).message)
+    } finally {
+      setFeaturedBusy(false)
+    }
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-gray-100">
@@ -143,6 +177,57 @@ export default function AdminProject() {
                 公开链接:<span className="font-mono">{location.origin}/s/{project.slug}</span>
                 {project.status !== 'published' && <span className="ml-2 text-amber-400/80">(未发布,公开页需先发布)</span>}
               </div>
+            </div>
+
+            {/* 首页展示:打标签 + 上下首页(唯一会写产物元数据的后台区域) */}
+            <div className="mb-5 rounded-2xl border border-gray-800 bg-gray-900 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold">首页展示</h2>
+                  <p className="mt-1 max-w-2xl text-xs leading-relaxed text-gray-500">
+                    勾选后出现在首页「精选案例」。只有已发布项目能上首页;用户克隆时会复制当前线上版本的源码与构建产物,
+                    不包含站点数据、连接器与对话记录。
+                  </p>
+                </div>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-xs ${
+                    project.featured ? 'bg-fuchsia-500/15 text-fuchsia-300' : 'bg-gray-700/60 text-gray-400'
+                  }`}
+                >
+                  {project.featured ? '已上首页' : '未上首页'}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <input
+                  value={featuredTags}
+                  onChange={(e) => setFeaturedTags(e.target.value)}
+                  placeholder="标签,用逗号分隔(最多 5 个,如:电商, 作品集)"
+                  className="w-full rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-sm outline-none focus:border-indigo-500 sm:max-w-md"
+                />
+                <button
+                  onClick={() => saveFeatured()}
+                  disabled={featuredBusy}
+                  className="rounded-xl border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-40"
+                >
+                  保存标签
+                </button>
+                <button
+                  onClick={() => saveFeatured(!project.featured)}
+                  disabled={featuredBusy || (!project.featured && project.status !== 'published')}
+                  title={!project.featured && project.status !== 'published' ? '先发布该版本才能上首页' : undefined}
+                  className={`rounded-xl px-3 py-2 text-sm font-medium text-white disabled:opacity-40 ${
+                    project.featured ? 'bg-gray-700 hover:bg-gray-600' : 'bg-indigo-600 hover:bg-indigo-500'
+                  }`}
+                >
+                  {featuredBusy ? '保存中…' : project.featured ? '下首页' : '上首页'}
+                </button>
+              </div>
+              {featuredMsg && (
+                <p className={`mt-2 text-xs ${featuredMsgTone === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}>{featuredMsg}</p>
+              )}
+              {project.status !== 'published' && (
+                <p className="mt-2 text-xs text-amber-400/80">当前项目未发布:可以先编辑标签,发布会后才能上首页。</p>
+              )}
             </div>
 
             {/* 标签 */}

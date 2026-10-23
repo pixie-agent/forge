@@ -9,6 +9,7 @@ import { jobRoutes } from './routes/jobs'
 import { billingRoutes } from './routes/billing'
 import { internalRoutes } from './routes/internal'
 import { adminRoutes } from './routes/admin'
+import { showcaseRoutes } from './routes/showcase'
 import { serveRoutes } from './routes/serve'
 import { sweepJobs } from './lib/jobs'
 
@@ -29,6 +30,8 @@ app.route('/api/billing', billingRoutes)
 app.route('/api/connections', connectionRoutes)
 // 管理后台(只读,独立口令鉴权):跨用户查看产物
 app.route('/api/admin', adminRoutes)
+// 首页精选案例:公开只读列表 + 登录用户克隆(见 docs/FORGE2.md §23)
+app.route('/api/showcase', showcaseRoutes)
 // 内部回调:Cloud Run agent 上报进度(X-Agent-Secret 保护,不对外)
 app.route('/internal', internalRoutes)
 // 生成应用的对外服务:发布页 /s/:slug/*、草稿预览 /p/:token/*(含各自的 /api 后端)
