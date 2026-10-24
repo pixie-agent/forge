@@ -21,6 +21,7 @@ export default function AdminUsers() {
   const [selected, setSelected] = useState<string[]>([])
   const [grantAmount, setGrantAmount] = useState('')
   const [grantNote, setGrantNote] = useState('')
+  const [grantNotify, setGrantNotify] = useState(false)
   const [granting, setGranting] = useState(false)
   const [notice, setNotice] = useState('')
   const nav = useNavigate()
@@ -79,17 +80,27 @@ export default function AdminUsers() {
       setError('请先勾选用户')
       return
     }
-    if (!window.confirm(`给已选 ${selected.length} 个用户各加 ${amount} 积分?`)) return
+    if (!window.confirm(`给已选 ${selected.length} 个用户各加 ${amount} 积分${grantNotify ? ',并发送邮件通知' : ''}?`)) return
 
     setGranting(true)
     setError('')
     setNotice('')
     try {
-      const data = await api<{ updated: number; granted: number }>('/api/admin/users/credits', {
+      const data = await api<{
+        updated: number
+        granted: number
+        notify: { requested: boolean; sent: number; failed: number; unverified: number }
+      }>('/api/admin/users/credits', {
         method: 'POST',
-        body: { userIds: selected, amount, note: grantNote.trim() },
+        body: { userIds: selected, amount, note: grantNote.trim(), notify: grantNotify },
       })
-      setNotice(`已给 ${data.updated} 个用户各加 ${data.granted} 积分`)
+      const parts = [`已给 ${data.updated} 个用户各加 ${data.granted} 积分`]
+      if (data.notify.requested) {
+        parts.push(`邮件成功 ${data.notify.sent} 人`)
+        if (data.notify.failed) parts.push(`失败 ${data.notify.failed} 人`)
+        if (data.notify.unverified) parts.push(`邮箱未验证 ${data.notify.unverified} 人`)
+      }
+      setNotice(parts.join('；'))
       setSelected([])
       setGrantNote('')
       await load()
@@ -154,6 +165,15 @@ export default function AdminUsers() {
               maxLength={200}
               className="w-full rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-sm outline-none focus:border-indigo-500 sm:w-56"
             />
+            <label className="flex items-center gap-1.5 text-sm text-gray-400">
+              <input
+                type="checkbox"
+                checked={grantNotify}
+                onChange={(e) => setGrantNotify(e.target.checked)}
+                className="h-4 w-4 accent-emerald-600"
+              />
+              邮件通知用户
+            </label>
             <button
               onClick={() => void grant()}
               disabled={granting || selected.length === 0}
@@ -170,7 +190,9 @@ export default function AdminUsers() {
               </button>
             )}
           </div>
-          <p className="mt-2 text-xs text-gray-600">每人加同一额度;每次操作都会写入积分流水（admin_grant）。勾选可跨页保留。</p>
+          <p className="mt-2 text-xs text-gray-600">
+            每人加同一额度;每次操作都会写入积分流水（admin_grant）。勾选可跨页保留。邮件只发给已验证邮箱,发送失败不影响加积分。
+          </p>
           {notice && <div className="mt-2 rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400">{notice}</div>}
         </div>
 

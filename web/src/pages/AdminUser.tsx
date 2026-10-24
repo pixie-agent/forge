@@ -24,6 +24,7 @@ export default function AdminUser() {
   const [error, setError] = useState('')
   const [grantAmount, setGrantAmount] = useState('')
   const [grantNote, setGrantNote] = useState('')
+  const [grantNotify, setGrantNotify] = useState(false)
   const [granting, setGranting] = useState(false)
   const [notice, setNotice] = useState('')
 
@@ -48,17 +49,27 @@ export default function AdminUser() {
       setError('积分数必须是正整数')
       return
     }
-    if (!window.confirm(`给 ${detail?.user.email ?? '该用户'} 加 ${amount} 积分?`)) return
+    if (!window.confirm(`给 ${detail?.user.email ?? '该用户'} 加 ${amount} 积分${grantNotify ? ',并发送邮件通知' : ''}?`)) return
 
     setGranting(true)
     setError('')
     setNotice('')
     try {
-      const data = await api<{ granted: number; credits: number }>(`/api/admin/users/${id}/credits`, {
+      const data = await api<{
+        granted: number
+        credits: number
+        notify: { requested: boolean; status: 'skipped' | 'sent' | 'failed' | 'unverified' }
+      }>(`/api/admin/users/${id}/credits`, {
         method: 'POST',
-        body: { amount, note: grantNote.trim() },
+        body: { amount, note: grantNote.trim(), notify: grantNotify },
       })
-      setNotice(`已加 ${data.granted} 积分,当前余额 ${data.credits}`)
+      const parts = [`已加 ${data.granted} 积分,当前余额 ${data.credits}`]
+      if (data.notify.requested) {
+        if (data.notify.status === 'sent') parts.push('已邮件通知')
+        else if (data.notify.status === 'unverified') parts.push('邮箱未验证,未发送邮件')
+        else parts.push('邮件通知失败')
+      }
+      setNotice(parts.join('；'))
       setGrantNote('')
       await load()
     } catch (err) {
@@ -137,6 +148,15 @@ export default function AdminUser() {
                   maxLength={200}
                   className="w-full rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-sm outline-none focus:border-emerald-500 sm:w-56"
                 />
+                <label className="flex items-center gap-1.5 text-sm text-gray-400">
+                  <input
+                    type="checkbox"
+                    checked={grantNotify}
+                    onChange={(e) => setGrantNotify(e.target.checked)}
+                    className="h-4 w-4 accent-emerald-600"
+                  />
+                  邮件通知用户
+                </label>
                 <button
                   onClick={() => void grant()}
                   disabled={granting}
