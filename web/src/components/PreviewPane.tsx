@@ -3,7 +3,7 @@ import CodeEditor from './CodeEditor'
 import DataPanel from './DataPanel'
 import RichText from './RichText'
 import { formatShortTime as formatTime } from '../lib/format'
-import { useT } from '../lib/i18n'
+import { useT, getActiveLang } from '../lib/i18n'
 import type { ArtifactManifest, Project, VersionMeta } from '../lib/types'
 
 interface Props {
@@ -90,7 +90,8 @@ export default function PreviewPane({
   const publishedVersion = project?.published_version ?? 0
   const publicUrl = project ? `${location.origin}/s/${project.slug}` : ''
   // 多文件产物:源码经平台构建为 dist 存 R2,iframe 用草稿令牌访问 /p/:token/
-  const previewUrl = previewToken ? `/p/${previewToken}/` : null
+  // ?lang= 告诉服务端用哪种语言渲染平台自己的角标(「测试环境 · 草稿预览」)
+  const previewUrl = previewToken ? `/p/${previewToken}/?lang=${getActiveLang()}` : null
   // 最新正式版本号 = 版本列表里的最大号(versions 按 version_no 倒序,版本号越大越新,无需额外标「最新」)。
   // 不依赖 currentVersion,避免服务端历史数据漂移时"最新"判断出错;用于推下一个版本号与历史版本提示。
   const latestVersion = versions[0]?.version_no ?? 0

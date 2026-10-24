@@ -4,8 +4,12 @@
  * 这个示例用了:导航 / Hero / 统计卡 / 表单提交落库 / 列表与统计联动 / 空态与骨架 /
  * 删除二次确认 / 进场动效 / 页脚 —— 新应用按自己的领域内容替换即可,结构可以照搬。
  * 只允许改 src/ 下的文件;src/components/ui/** 与 src/lib/** 是平台提供的,不要改。
+ *
+ * 界面语言:setLocale('zh' | 'en') 决定平台自带的默认文案(空状态、错误提示、Modal 按钮)用哪种语言。
+ * 生成新应用时按目标语言改这一行 —— 应用自己的文案也要跟着一起换。
  */
 import { useMemo, useState } from 'react'
+import { setLocale } from './lib/locale.js'
 import {
   Badge,
   Button,
@@ -28,6 +32,8 @@ import {
   useToast,
 } from './components/ui/index.js'
 import { useCollection } from './lib/store.js'
+
+setLocale('zh')
 
 const NAV = [
   { href: '#top', label: '首页' },

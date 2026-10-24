@@ -42,6 +42,16 @@ const MESSAGES = {
       '已完成「{name}」初稿并写入草稿。满意后点「生成新版本」保存为正式版本,再发布上线。',
     'commit.chat': '已按「{prompt}」更新草稿。满意后点「生成新版本」保存为正式版本。',
     'cancel.message': '已停止本次任务(未扣除积分),中间结果未保留。修改要求后可重新发送。',
+    // ── 任务失败/取消(写进 jobs.error,前端原样展示)──
+    'job.lost': '任务执行体失联,请重试',
+    'job.timeout': '任务超时未完成,请重新发起',
+    'job.cancelled': '已手动停止',
+    'job.failed': '执行失败',
+    'commit.incomplete': '产物不完整(缺源码树或构建产物)',
+    'commit.noJob': '任务不存在',
+    'commit.noProject': '项目不存在',
+    'agent.failed': 'Agent 执行失败({status}),请重试(未扣除积分)',
+    'agent.noArtifact': 'Agent 未返回有效产物,请重试(未扣除积分)',
     // ── 注册验证邮件(发送时刻没有前端,语言由注册请求的 lang 决定)──
     'verify.subject': '验证你的 Forge 邮箱',
     'verify.text':
@@ -67,6 +77,16 @@ const MESSAGES = {
     'commit.chat': 'Draft updated for “{prompt}”. When you are happy with it, click “Save version” to keep it as a version.',
     'cancel.message':
       'This run was stopped (no credits charged) and the intermediate results were discarded. Edit your request and send it again.',
+    // ── 任务失败/取消(写进 jobs.error,前端原样展示)──
+    'job.lost': 'Lost contact with the execution service. Please try again.',
+    'job.timeout': 'The task timed out. Please start it again.',
+    'job.cancelled': 'Stopped manually',
+    'job.failed': 'Execution failed',
+    'commit.incomplete': 'Incomplete artifact (missing source tree or build output)',
+    'commit.noJob': 'Task not found',
+    'commit.noProject': 'Project not found',
+    'agent.failed': 'The agent failed ({status}). Please try again (no credits charged)',
+    'agent.noArtifact': 'The agent returned no usable artifact. Please try again (no credits charged)',
     'verify.subject': 'Verify your Forge email',
     'verify.text':
       'Welcome to Forge. Open the link below to verify your email (valid for 24 hours):\n\n{link}\n\nIf you did not create this account, you can safely ignore this email.',

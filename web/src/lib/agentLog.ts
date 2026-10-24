@@ -4,7 +4,7 @@
  * 日志格式由 agent/src/runner.ts 定义:
  *   - 思考:以 `💭 ` 起头,直到空行或下一个标记行
  *   - 工具调用:`🔧 <工具名> <入参摘要>`
- *   - 工具结果:`   ✓ 完成` / `   ✗ 失败`(回填到最近一次工具调用)
+ *   - 工具结果:`   ✓` / `   ✗`(回填到最近一次工具调用;状态文案由前端自己的词典渲染)
  *   - 其余文本:agent 的文字叙述
  *
  * 纯展示用途:解析失败/格式变化时退化为原文,绝不影响生成功能。
@@ -17,7 +17,11 @@ export type AgentEvent = { kind: 'thinking'; text: string } | { kind: 'say'; tex
 
 const THINK_RE = /^\s*💭\s?(.*)$/
 const TOOL_RE = /^\s*🔧\s*(\S+)\s*(.*)$/
-const RESULT_RE = /^\s*([✓✗])\s*(完成|失败)\s*$/
+/**
+ * 工具结果标记:agent 只写 ✓ / ✗ 两个符号(见 agent/src/runner.ts)——
+ * 状态文案由本文件解析出来后再用前端自己的词典渲染,所以日志里不必(也不该)写死中文。
+ */
+const RESULT_RE = /^\s*([✓✗])\s*$/
 
 function isMarker(line: string): boolean {
   return THINK_RE.test(line) || TOOL_RE.test(line) || RESULT_RE.test(line)

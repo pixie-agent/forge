@@ -12,7 +12,9 @@ import {
   type AgentSession,
 } from '@mariozechner/pi-coding-agent'
 import type { AgentConfig } from './config.js'
-import { SYSTEM_PROMPT } from './prompt.js'
+import { systemPrompt } from './prompt.js'
+import { t, type UiLang } from './i18n.js'
+import type { OutputLang } from './lang.js'
 
 /**
  * 生成 models.json:声明一个指向既有 OpenAI 兼容网关的自定义 provider。
@@ -64,7 +66,12 @@ function modelsJson(config: AgentConfig): string {
  * 另一个任务读到的可能是写了一半的文件(线上踩过:Unexpected end of JSON input)。
  * `.pi` 已在 runner 的 SKIP_DIRS 里,不会被当作源码交付。
  */
-export async function createForgeSession(config: AgentConfig, workspace: string): Promise<AgentSession> {
+export async function createForgeSession(
+  config: AgentConfig,
+  workspace: string,
+  /** 产物语言决定 prompt 的语言约束;界面语言决定面向用户的报错文案 */
+  opts: { outLang: OutputLang; uiLang: UiLang; mode: 'generate' | 'chat' },
+): Promise<AgentSession> {
   const agentDir = join(workspace, '.pi')
   await mkdir(agentDir, { recursive: true })
   const modelsPath = join(agentDir, 'models.json')
@@ -73,15 +80,15 @@ export async function createForgeSession(config: AgentConfig, workspace: string)
   const authStorage = AuthStorage.create(join(agentDir, 'auth.json'))
   const modelRegistry = ModelRegistry.create(authStorage, modelsPath)
   const loadError = modelRegistry.getError()
-  if (loadError) throw new Error(`models.json 加载失败:${loadError}`)
+  if (loadError) throw new Error(t(opts.uiLang, 'error.modelsLoad', { msg: String(loadError) }))
 
   const model = modelRegistry.find(config.providerId, config.modelId)
-  if (!model) throw new Error(`模型未找到:${config.providerId}/${config.modelId}`)
+  if (!model) throw new Error(t(opts.uiLang, 'error.modelMissing', { provider: config.providerId, model: config.modelId }))
 
   const loader = new DefaultResourceLoader({
     cwd: workspace,
     agentDir,
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: systemPrompt(opts.outLang, opts.mode),
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,

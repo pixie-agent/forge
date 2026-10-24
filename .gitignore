@@ -10,3 +10,9 @@ web/dist/
 agent/dist/
 agent/.env
 agent/.npm-cache/
+
+# 宣传素材:整目录只在本地用,不做代码管理
+# (文案、截图、卡片、视频、录屏、生成脚本 —— 全在本地,不进仓库)
+marketing/
+
+.DS_Store

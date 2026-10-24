@@ -11,6 +11,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { motion, useInView, useReducedMotion } from 'motion/react'
+import { getLocale } from './locale.js'
 
 export { motion, useReducedMotion }
 export { AnimatePresence } from 'motion/react'
@@ -64,12 +65,16 @@ export function useCountUp(target, { duration = 1100, decimals = 0 } = {}) {
   return Math.round(display * factor) / factor
 }
 
-/** 数字格式化成中文习惯(千分位;超过 1 万折算成「万」) */
+/**
+ * 数字格式化:跟随当前界面语言(见 lib/locale.js)。
+ * 中文习惯是「万」(超过 1 万折算),英文习惯是千分位。
+ */
 export function formatNumber(n, { decimals = 0 } = {}) {
   const v = Number(n) || 0
-  if (Math.abs(v) >= 10000) {
+  const zh = getLocale() === 'zh'
+  if (zh && Math.abs(v) >= 10000) {
     const w = v / 10000
     return `${w.toFixed(Math.abs(w) >= 100 ? 0 : 1)} 万`
   }
-  return v.toLocaleString('zh-CN', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+  return v.toLocaleString(zh ? 'zh-CN' : 'en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
 }

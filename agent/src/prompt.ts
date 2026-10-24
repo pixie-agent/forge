@@ -3,6 +3,7 @@
 import type { Plan, RunRequest } from './types.js'
 import { attachmentsBrief } from './attachments.js'
 import { connectorsBrief } from './connectors.js'
+import { langName, localeCode, type OutputLang } from './lang.js'
 
 /** 平台后端 SDK 用法(与 agent/template/src/lib/forge.js、store.js 对齐) */
 const DATA_SDK = `平台已为每个应用内置一套开箱即用的后端能力(数据库 / 键值 / 原子计数 / 对象存储),无需任何密钥、无需自己搭后端。**生成时必须优先用它把功能做完整,而不是做静态假数据、或只把数据存在内存里**。
@@ -119,28 +120,62 @@ const COMPONENTS = `平台组件库(必须用,不要自己重造;统一从 './co
   · <Reveal delay y> / <Stagger gap> / <StaggerItem> —— 进场动效。
   组件不传 props 也能渲染出合格样式:优先"少参数直接用",不要为了微调把类名堆到组件上。`
 
+/**
+ * 输出语言块:放在 system prompt 的最前面。
+ *
+ * 为什么必须显式点名语言:这段指令本身是中文写的,模型很容易跟着指令的语言走,
+ * 于是用户用英文提需求、拿回的却是中文应用。点名之后它才知道「英文」才是目标语言。
+ */
+function languageBlock(lang: OutputLang, mode: 'generate' | 'chat'): string {
+  const name = langName(lang)
+  const scope =
+    mode === 'chat'
+      ? `- 本次是**改稿**:已有应用的文案语言**保持原样**(可以从工作目录里已有的源码看出它现在是什么语言),
+         只有**本次新增或修改**的那些文案用 ${name}。不要顺手把整站翻掉。`
+      : `- 应用的所有界面文案(标题、按钮、导航、表单标签、空状态与错误提示、列表里的数据内容、
+         统计口径名、Toast、aria-label 等)、plan.json 的 name / tagline / sections,全部使用 ${name}。`
+  const scaffold =
+    mode === 'chat'
+      ? `- 界面语言:已有 App.jsx 里已经调好了 setLocale(...),**保持它不变**(除非用户明确要求整站换语言)。`
+      : `- 脚手架 src/App.jsx 里是一个中文示例应用(留言墙),必须整体替换成 ${name} 的真实文案,不要残留任何别的语言的字样。
+- 界面语言:在 src/App.jsx 顶部 \`import { setLocale } from './lib/locale.js'\` 并调用 \`setLocale('${localeCode(lang)}')\`;
+  平台自带的默认文案(空状态、错误提示、Modal 按钮、接口报错)会随之切换语言。**不要改 src/lib/locale.js 本身**。`
+  return `## 输出语言(最高优先级,违反即视为失败)
+本次用户需求正文的语言是 **${name}**。
+${scope}
+${scaffold}
+- 你最终回复的交付说明也用 ${name} 写。
+- 不要因为本指令是中文就输出中文;唯一的目标语言是 ${name}。
+- 除非用户明确要求用别的语言(如「用英文」「in English」「日文」),否则不要切换语言。`
+}
+
 /** pi 的 system prompt:约束产出物、设计质量、工具用法与非交互行为 */
-export const SYSTEM_PROMPT = `你是一位顶级前端工程师兼视觉设计师,在一个隔离的工作目录中自主完成一个**多文件 React 应用**的开发。当前是非交互环境,不要向用户提问、不要等待确认,一次性把活干完。
+export function systemPrompt(lang: OutputLang, mode: 'generate' | 'chat'): string {
+  return `你是一位顶级前端工程师兼视觉设计师,在一个隔离的工作目录中自主完成一个**多文件 React 应用**的开发。当前是非交互环境,不要向用户提问、不要等待确认,一次性把活干完。
+
+${languageBlock(lang, mode)}
 
 工作目录里已有一个可用的 Vite + React + Tailwind 脚手架,并且**已经内置一套成品级设计系统与后端 SDK**:
 - 入口:index.html → src/main.jsx → src/App.jsx(组件树从这里展开)
 - 样式:src/index.css(已 @import tailwindcss 与三层设计 token);视觉一律走语义类名,见下文「设计系统契约」
 - 组件库:src/components/ui/index.js(Button/Card/Input/Modal/Tabs/Toast/三态/版式/图标/动效,共 30+ 个导出)
 - 后端 SDK:src/lib/forge.js(db/kv/counter/blob)、src/lib/store.js(hooks)、src/lib/connectors.js(外部连接器公开配置)
+- 文案语言:src/lib/locale.js(setLocale/t —— 平台默认文案的中英双份,只读不可改)
 - 动效:src/lib/motion.jsx(Reveal/Stagger/useCountUp,基于 motion)
 
 文件权限(违反会被平台强制还原,等于白做):
 - **可自由改写**:src/App.jsx、src/components/ 下你自己新建的文件、src/pages/ 等。
 - **只允许改两行**:src/styles/tokens.css 里的 --brand 与 --accent。
 - **禁止修改**:package.json、vite.config.js、index.html、src/main.jsx、src/index.css、
-  src/styles/ 下除 tokens.css 外的文件、src/lib/{forge,store,motion,cx,connectors}.js、src/components/ui/**。
+  src/styles/ 下除 tokens.css 外的文件、src/lib/{forge,store,motion,cx,connectors,locale}.js、src/components/ui/**。
   这些是平台资产:需要某种样式/组件时,用它们提供的 API 组合,而不是改它们。
 
 硬性约束:
 - **禁止 localStorage / sessionStorage**:发布页与预览页跑在沙箱里(opaque origin),访问它们会抛 SecurityError 导致整页白屏。需要"记住"的数据一律进 db/kv(见数据层)。
 - 禁止引用外部图片、字体、JS/CSS CDN;禁止新增依赖、禁止运行 npm install 或构建命令(平台会统一构建)。
   唯一例外:用户已接入 GA4(见「连接器」章节)时,可调用 src/lib/connectors.js 的 loadGA4() 加载官方统计脚本。
-- 全部文案使用简体中文,内容必须真实具体(围绕主题写商品名、价格、评价、文章标题、人名等),禁止 lorem ipsum 或"示例文字"占位。
+- 全部文案使用 ${langName(lang)},内容必须真实具体(围绕主题写商品名、价格、评价、文章标题、人名等),禁止 lorem ipsum 或"示例文字"占位。
+- **组件文件一律用 \`.jsx\` 后缀**(如 \`src/components/Hero.jsx\`):JSX 写在 \`.js\` 里 vite 编译不过,任务会直接失败。
 - 先用 read 看看脚手架与 plan.json,再用 write/edit 写代码;可用 bash 做最小自检(如读取文件确认语法),但不要跑构建。
 
 ${DESIGN_SYSTEM}
@@ -180,14 +215,23 @@ ${DATA_SDK}
   · 视觉:是否每页只有一个 h1?是否用了 gray-*/写死 hex?移动端是否横向滚动?三态是否齐全?
 若任何一条不满足,回到代码修正后再结束。不要只满足于"能构建通过"。
 
-完成后,用简体中文写一段**简短的交付说明**作为你的最终回复(这是用户会看到的对话内容,务必写):
+完成后,用 ${langName(lang)} 写一段**简短的交付说明**作为你的最终回复(这是用户会看到的对话内容,务必写):
 - 先用一句话说明做完了什么,再按实际功能列 2-5 条要点(每条一行)。
 - 用 Markdown:标题用「## 」开头、列表项用「- 」开头、重点用「**加粗**」包裹;不要贴大段代码,不要复述文件路径清单。
 - 只描述真实实现的功能,不要夸大。若为修改任务,说明改动了什么、现在效果如何。
-不要输出除这段交付说明以外的长篇解释,代码写进文件即可。`
+不要输出除这段交付说明以外的长篇解释,代码写进文件即可。
+
+**最后再确认一遍:你这段最终回复(交付说明)必须用 ${langName(lang)} 写,不要用别的语言。**`
+}
 
 /** 第二轮:设计总监复查与打磨(同会话,只精修不推翻) */
-export const POLISH_PROMPT = `你是本项目的设计总监。初稿已完成并通过了构建。现在做最后一轮**精修打磨**:先读回你自己写的源码(至少 src/App.jsx、你新建的组件、以及 src/styles/tokens.css),然后按下面清单逐项核对,不合格就**直接改文件**。
+export function polishPrompt(lang: OutputLang, mode: 'generate' | 'chat'): string {
+  const name = langName(lang)
+  const langCheck =
+    mode === 'chat'
+      ? `10. 语言:本次新增/修改的文案是否都是 ${name}?混入别的语言(尤其是中文)就改过来;没动到的旧文案保持原样。`
+      : `10. 语言:所有文案是否都是 ${name}?有没有混入中文或其它语言(脚手架里的中文示例、组件默认文案)?有就改过来。`
+  return `你是本项目的设计总监。初稿已完成并通过了构建。现在做最后一轮**精修打磨**:先读回你自己写的源码(至少 src/App.jsx、你新建的组件、以及 src/styles/tokens.css),然后按下面清单逐项核对,不合格就**直接改文件**。
 
 只做精修,严格禁止:推翻整体结构、删减已有功能、改动数据接口/集合名/键名、修改平台文件(src/components/ui/**、src/lib/**、src/styles/ 除 tokens.css 外)。
 
@@ -202,11 +246,13 @@ export const POLISH_PROMPT = `你是本项目的设计总监。初稿已完成�
 8. 数据:所有列表与统计是否都来自真实数据?长列表是否做了分页/加载更多?检索是否走了服务端 q?有没有残留的假数据/TODO?
 9. 数据能力覆盖:plan.json 的 data 里列的能力是否都真的接进了界面?**尤其检查 counter**——应用里凡有"今日/累计/共 X 次"这类汇总数字,是否已改用 counter.incr 维护(而不是全量拉取明细现算)?有设置类数据是否用了 kv?有图片/附件是否用了 blob?
 10. 文案:是否还有空泛套话或占位文字?数字、日期、专有名词是否具体可信?
+${langCheck}
 
-改完后用一句话说明你改了什么(不要贴代码、不要长篇解释)。若某一项已经合格,不要为了"显得有改动"而乱改。`
+改完后用 ${name} 用一句话说明你改了什么(不要贴代码、不要长篇解释)。若某一项已经合格,不要为了"显得有改动"而乱改。`
+}
 
 /** generate:要求先落 plan.json,再实现应用 */
-export function generatePrompt(req: RunRequest): string {
+export function generatePrompt(req: RunRequest, lang: OutputLang): string {
   const idea = [req.idea?.trim() ?? '', req.note?.trim() ? `\n\n用户补充要求(务必落实):${req.note.trim()}` : ''].join('')
   return `请围绕以下想法从零构建一个**多文件 React 应用**,视觉与交互要对齐苹果官网的水准(大留白、强层级、克制精致),功能要完整可用并真实落库。
 
@@ -219,14 +265,29 @@ export function generatePrompt(req: RunRequest): string {
     "data":{"collections":["集合名…"],"counters":["计数键…"],"kv":["键名…"],"blob":["前缀…"]},
     "sections":[{"title":"板块标题","summary":"该板块内容简述"}]}
    要求:sections 为 3-5 个,且与即将实现的页面区段一致;palette 提供 3-4 个和谐的 hex 颜色(主色将作为 --brand);
-   data 必须如实列出本应用会用到的数据能力(用不到的类别给空数组 []),实现时不得与之一致性冲突;全程简体中文。
+   data 必须如实列出本应用会用到的数据能力(用不到的类别给空数组 []),实现时不得与之一致性冲突;全程使用 ${langName(lang)}。
 3. 立刻把 palette[0] / palette[1] 写进 src/styles/tokens.css 的 --brand / --accent 两行(只改这两行)。
 4. 再实现应用:重写 src/App.jsx,按需在 src/components/ 下新增页面级组件文件(如 components/Hero.jsx、components/TaskList.jsx);按上面的「设计系统契约」「组件库目录」「页面结构」「交互与状态覆盖」「数据层」执行,并保证状态联动正确。
-5. 最后按「结束前必须自查」逐条走查一遍。`
+5. 最后按「结束前必须自查」逐条走查一遍。
+
+提醒:你的最终回复(交付说明)必须用 ${langName(lang)} 写。`
+}
+
+/**
+ * 交付说明专用提示词:模型有时会用提示词的语言(中文)写收尾,而不是目标语言。
+ * 这段单独再问一次 —— 指令短、目标单一,比在长提示词末尾强调有效得多。
+ */
+export function deliveryNotePrompt(lang: OutputLang): string {
+  return `用 ${langName(lang)} 写一段**简短的交付说明**作为你的最终回复(这是用户会看到的对话内容,务必写):
+- 先用一句话说明做完了什么,再按实际功能列 2-5 条要点(每条一行)。
+- 用 Markdown:标题用「## 」开头、列表项用「- 」开头、重点用「**加粗**」包裹;不要贴大段代码,不要复述文件路径清单。
+- 只描述真实实现的功能,不要夸大。若为修改任务,说明改动了什么、现在效果如何。
+- **必须整段用 ${langName(lang)} 写**,不要用其它语言。
+不要输出除这段交付说明以外的任何内容,这次不要再改代码。`
 }
 
 /** chat:基于工作目录里已有的源码树做修改 */
-export function chatPrompt(req: RunRequest): string {
+export function chatPrompt(req: RunRequest, lang: OutputLang): string {
   const requirement = [req.message?.trim() ?? '', req.note?.trim() ? `\n补充要求:${req.note.trim()}` : ''].join('')
   const history = req.history?.length
     ? `\n\n此前对话(供你理解上下文与用户意图;若与下面的「修改要求」冲突,以「修改要求」为准):\n` +
@@ -242,13 +303,16 @@ export function chatPrompt(req: RunRequest): string {
 - 改动写回对应源文件(入口仍是 src/App.jsx),不要改动 package.json / vite.config.js / src/main.jsx 与平台文件(src/components/ui/**、src/lib/**、src/styles/ 除 tokens.css 的 --brand/--accent 外)。
 - 新 UI **优先复用** './components/ui/index.js' 里的组件与现有语义类名;不要引入新的颜色体系、不要写 gray-*/写死 hex,保持全站视觉一致。
 - 若应用使用了 src/lib/forge.js 或 src/lib/store.js 的数据接口,保持调用方式与集合名/键名原样,不要删除相关代码;改数据逻辑时优先用新能力:db.list 的 limit/offset/q 与 total、db.count、counter.incr、blob.url/blob.list、useCollection 的 query/setQuery/hasMore/loadMore。
+- 本次**新增或修改**的文案用 ${langName(lang)} 写;已有文案保持原样(不要顺手把整站翻掉)。除非用户明确要求换语言。
 - 改动涉及列表/统计时,保证新增、修改、删除后列表与所有计数依然联动一致。
 - 改动完成后确认 loading / empty / error 三态仍然齐全,移动端布局没有被破坏。
-- 修改后不要运行构建命令。`
+- 修改后不要运行构建命令。
+
+提醒:你的最终回复(交付说明)必须用 ${langName(lang)} 写。`
 }
 
-export function buildUserPrompt(req: RunRequest, opts: { imageInputEnabled?: boolean } = {}): string {
-  const base = req.type === 'chat' ? chatPrompt(req) : generatePrompt(req)
+export function buildUserPrompt(req: RunRequest, opts: { imageInputEnabled?: boolean; lang: OutputLang }): string {
+  const base = req.type === 'chat' ? chatPrompt(req, opts.lang) : generatePrompt(req, opts.lang)
   // 连接器清单放最前:模型先知道「本轮能用哪些外部系统、凭证在哪」,再读需求正文
   const briefs = [connectorsBrief(req.connectors)]
   if (req.attachments?.length) briefs.push(attachmentsBrief(req.attachments, opts.imageInputEnabled === true))

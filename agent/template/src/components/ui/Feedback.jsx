@@ -1,4 +1,5 @@
 import { cx } from '../../lib/cx.js'
+import { t } from '../../lib/locale.js'
 import { Icon } from './Icon.jsx'
 
 /**
@@ -44,7 +45,7 @@ export function SkeletonCard({ lines = 3 }) {
 }
 
 /** 整块加载中:给出文字,不要只留一个转圈 */
-export function LoadingBlock({ label = '正在加载…', className = '' }) {
+export function LoadingBlock({ label = t('loading'), className = '' }) {
   return (
     <div className={cx('flex flex-col items-center justify-center gap-3 py-12 text-muted', className)} role="status">
       <Spinner size={22} />
@@ -53,7 +54,7 @@ export function LoadingBlock({ label = '正在加载…', className = '' }) {
   )
 }
 
-export function EmptyState({ icon = 'Inbox', title = '暂无内容', description, action = null, className = '' }) {
+export function EmptyState({ icon = 'Inbox', title = t('empty'), description, action = null, className = '' }) {
   return (
     <div
       className={cx(
@@ -72,7 +73,7 @@ export function EmptyState({ icon = 'Inbox', title = '暂无内容', description
 }
 
 /** 错误态:必须给出「重试」这类可执行的下一步 */
-export function ErrorState({ title = '加载失败', description, onRetry, retryText = '重试', className = '' }) {
+export function ErrorState({ title = t('loadFailed'), description, onRetry, retryText = t('retry'), className = '' }) {
   return (
     <div className={cx('rounded-card border border-line bg-panel px-6 py-10 text-center', className)} role="alert">
       <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-pill bg-danger/10 text-danger">

@@ -14,11 +14,13 @@
  *      需要「记住」的临时界面状态用下面的 storage.get/set(已做安全兜底);业务数据一律进 db / kv。
  */
 
+import { t } from './locale.js'
+
 const API_BASE = (typeof window !== 'undefined' && window.__FORGE_API_BASE__) || './api'
 
 async function toJson(res) {
   if (!res.ok) {
-    let msg = `请求失败(${res.status})`
+    let msg = t('requestFailedWith').replace('{status}', String(res.status))
     try {
       const body = await res.json()
       if (body && body.error) msg = body.error
@@ -129,7 +131,7 @@ export const blob = {
   /** 上传对象(body 可为 Blob/File/字符串);单文件上限 2MB */
   async put(key, body, contentType = 'application/octet-stream') {
     const size = body && typeof body === 'object' && 'size' in body ? Number(body.size) : 0
-    if (size > 2 * 1024 * 1024) throw new Error('文件太大,请压缩到 2MB 以内再上传')
+    if (size > 2 * 1024 * 1024) throw new Error(t('fileTooLarge'))
     return toJson(
       await fetch(`${API_BASE}/blob/${key}`, {
         method: 'PUT',

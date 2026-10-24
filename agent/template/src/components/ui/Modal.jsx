@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { AnimatePresence, motion } from '../../lib/motion.jsx'
 import { cx } from '../../lib/cx.js'
+import { t } from '../../lib/locale.js'
 import { Button, IconButton } from './Button.jsx'
 import { Icon } from './Icon.jsx'
 
@@ -55,7 +56,7 @@ export function Modal({ open, onClose, title, description, footer = null, size =
                 {title ? <h2 className="text-[17px] font-semibold text-ink">{title}</h2> : null}
                 {description ? <p className="mt-1 text-sm text-muted">{description}</p> : null}
               </div>
-              <IconButton label="关闭" size="sm" onClick={() => onClose?.()}>
+              <IconButton label={t('close')} size="sm" onClick={() => onClose?.()}>
                 <Icon name="X" />
               </IconButton>
             </div>
@@ -71,10 +72,10 @@ export function Modal({ open, onClose, title, description, footer = null, size =
 /** 二次确认:删除等破坏性操作必须走它 */
 export function ConfirmDialog({
   open,
-  title = '确认操作',
+  title = t('confirmTitle'),
   description,
-  confirmText = '确认',
-  cancelText = '取消',
+  confirmText = t('confirm'),
+  cancelText = t('cancel'),
   tone = 'danger',
   onConfirm,
   onClose,
@@ -103,7 +104,7 @@ export function ConfirmDialog({
         </>
       }
     >
-      <p className="text-[15px] text-muted">此操作不可撤销,请确认后继续。</p>
+      <p className="text-[15px] text-muted">{t('irreversible')}</p>
     </Modal>
   )
 }
