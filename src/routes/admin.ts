@@ -19,6 +19,7 @@ import { hasPrice } from '../lib/pricing'
 import { buildDashboard } from '../lib/dashboard'
 import { normalizeShowcaseTags, showcaseTagsText } from '../lib/showcase'
 import { grantAdminCredits } from '../lib/credits'
+import { sendCreditGrantEmails } from '../lib/email'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -524,12 +525,20 @@ app.post('/projects/:id/featured', requireAdmin, async (c) => {
 const MAX_ADMIN_GRANT = 100_000
 const MAX_ADMIN_GRANT_USERS = 100
 
-/** 校验「加积分」请求体;note 可选,超长截断而不是报错 */
-function parseAdminGrant(body: { amount?: unknown; note?: unknown }): { amount: number; note: string } | { error: string } {
+/** 校验「加积分」请求体;note 可选,超长截断而不是报错;notify 只认布尔 true */
+function parseAdminGrant(body: {
+  amount?: unknown
+  note?: unknown
+  notify?: unknown
+}): { amount: number; note: string; notify: boolean } | { error: string } {
   const amount = Number(body.amount)
   if (!Number.isInteger(amount) || amount <= 0) return { error: '积分数必须是正整数' }
   if (amount > MAX_ADMIN_GRANT) return { error: `单次最多加 ${MAX_ADMIN_GRANT} 积分` }
-  return { amount, note: typeof body.note === 'string' ? body.note.trim().slice(0, 200) : '' }
+  return {
+    amount,
+    note: typeof body.note === 'string' ? body.note.trim().slice(0, 200) : '',
+    notify: body.notify === true,
+  }
 }
 
 /** 用户使用情况(跨用户列表):每行一个注册用户 + 其用量聚合,支持邮箱搜索与分页 */
@@ -617,28 +626,55 @@ app.get('/users/:id', async (c) => {
 /**
  * 给单个用户加积分。审计流水走 credit_ledger(reason = admin_grant),与充值 / 注册赠送同一本账。
  * 只加不减:扣分属于风控动作,不在这里顺手做,避免一个接口既能加又能扣。
+ * notify=true 时发送到账邮件;邮件失败只回传状态,绝不影响加积分本身。
  */
 app.post('/users/:id/credits', async (c) => {
   const id = c.req.param('id')
   const body = await c.req
-    .json<{ amount?: unknown; note?: unknown }>()
-    .catch(() => ({}) as { amount?: unknown; note?: unknown })
+    .json<{ amount?: unknown; note?: unknown; notify?: unknown }>()
+    .catch(() => ({}) as { amount?: unknown; note?: unknown; notify?: unknown })
   const parsed = parseAdminGrant(body)
   if ('error' in parsed) return c.json({ error: parsed.error }, 400)
 
+  const user = await c.env.DB
+    .prepare('SELECT email, email_verified FROM users WHERE id = ?')
+    .bind(id)
+    .first<{ email: string; email_verified: number }>()
+  if (!user) return c.json({ error: '用户不存在' }, 404)
+
   const [grant] = await grantAdminCredits(c.env.DB, [id], parsed.amount, parsed.note || '后台加积分')
   if (!grant) return c.json({ error: '用户不存在' }, 404)
-  return c.json({ ok: true, granted: parsed.amount, credits: grant.credits })
+
+  let notifyStatus: 'skipped' | 'sent' | 'failed' | 'unverified' = 'skipped'
+  if (parsed.notify) {
+    if (!user.email_verified) {
+      // 未验证邮箱可能是错的/不可投递,发了只会抬高退信率
+      notifyStatus = 'unverified'
+    } else {
+      const { sent } = await sendCreditGrantEmails(c.env, [
+        { to: user.email, amount: parsed.amount, balance: grant.credits },
+      ])
+      notifyStatus = sent === 1 ? 'sent' : 'failed'
+    }
+  }
+
+  return c.json({
+    ok: true,
+    granted: parsed.amount,
+    credits: grant.credits,
+    notify: { requested: parsed.notify, status: notifyStatus },
+  })
 })
 
 /**
  * 批量给多个用户加**同一额度**的积分(后台用户列表勾选后调用)。
  * 先确认所有 id 都存在再写,避免部分成功让运营回头猜谁没加上;重复 id 自动去重。
+ * notify=true 时给其中邮箱已验证的用户发到账邮件,结果按成功/失败/未验证分别计数。
  */
 app.post('/users/credits', async (c) => {
   const body = await c.req
-    .json<{ userIds?: unknown; amount?: unknown; note?: unknown }>()
-    .catch(() => ({}) as { userIds?: unknown; amount?: unknown; note?: unknown })
+    .json<{ userIds?: unknown; amount?: unknown; note?: unknown; notify?: unknown }>()
+    .catch(() => ({}) as { userIds?: unknown; amount?: unknown; note?: unknown; notify?: unknown })
   const parsed = parseAdminGrant(body)
   if ('error' in parsed) return c.json({ error: parsed.error }, 400)
 
@@ -651,9 +687,9 @@ app.post('/users/credits', async (c) => {
 
   const placeholders = userIds.map(() => '?').join(',')
   const { results } = await c.env.DB
-    .prepare(`SELECT id FROM users WHERE id IN (${placeholders})`)
+    .prepare(`SELECT id, email, email_verified FROM users WHERE id IN (${placeholders})`)
     .bind(...userIds)
-    .all<{ id: string }>()
+    .all<{ id: string; email: string; email_verified: number }>()
   const found = new Set(results.map((r) => r.id))
   const missing = userIds.filter((id) => !found.has(id))
   if (missing.length > 0) {
@@ -662,11 +698,29 @@ app.post('/users/credits', async (c) => {
   }
 
   const grants = await grantAdminCredits(c.env.DB, userIds, parsed.amount, parsed.note || '后台加积分')
+  const balanceById = new Map(grants.map((g) => [g.userId, g.credits]))
+
+  const notifySummary = { requested: parsed.notify, sent: 0, failed: 0, unverified: 0 }
+  if (parsed.notify) {
+    const notices = results.flatMap((u) => {
+      if (!u.email_verified) {
+        notifySummary.unverified += 1
+        return []
+      }
+      const balance = balanceById.get(u.id)
+      return balance === undefined ? [] : [{ to: u.email, amount: parsed.amount, balance }]
+    })
+    const { sent, failed } = await sendCreditGrantEmails(c.env, notices)
+    notifySummary.sent = sent
+    notifySummary.failed = failed
+  }
+
   return c.json({
     ok: true,
     granted: parsed.amount,
     updated: grants.length,
     users: grants.map((g) => ({ id: g.userId, credits: g.credits })),
+    notify: notifySummary,
   })
 })
 
