@@ -8,7 +8,9 @@ import { promisify } from 'node:util'
 import type { AgentConfig } from './config.js'
 import type { ProgressReporter, StreamLogger } from './callback.js'
 import type { AgentSession } from '@mariozechner/pi-coding-agent'
-import { POLISH_PROMPT, buildUserPrompt, parsePlan } from './prompt.js'
+import { polishPrompt, buildUserPrompt, parsePlan, deliveryNotePrompt } from './prompt.js'
+import { resolveOutputLang, localeCode, matchesLang } from './lang.js'
+import { t, type UiLang } from './i18n.js'
 import { createForgeSession } from './session.js'
 import { ATTACHMENT_DIR, attachmentFileName } from './attachments.js'
 import { CONNECTOR_DIR, materializeConnectors } from './connectors.js'
@@ -24,6 +26,9 @@ const BUILD_TIMEOUT_MS = 5 * 60 * 1000
 const MAX_FILE_PREVIEW = 20_000
 /** 复查轮至少要有这么多剩余预算才值得跑 */
 const MIN_POLISH_BUDGET_MS = 30_000
+/** 交付说明语言不对时的重问:预算上限与最低剩余量 */
+const DELIVERY_RETRY_BUDGET_MS = 90_000
+const DELIVERY_RETRY_MIN_MS = 120_000
 
 /**
  * 平台自有文件:模型不得修改,每次 job 开始时从模板强制覆盖回工作目录
@@ -38,6 +43,7 @@ const PLATFORM_FILES = [
   'src/lib/cx.js',
   'src/lib/forge.js',
   'src/lib/connectors.js',
+  'src/lib/locale.js',
   'src/lib/motion.jsx',
   'src/lib/store.js',
 ]
@@ -224,7 +230,7 @@ async function collectDist(workspace: string): Promise<{ dist: FileMap; manifest
 }
 
 /** 平台侧确定性构建:agent 只写源码,构建在 agent 结束后由平台执行 */
-async function build(workspace: string, signal?: AbortSignal): Promise<void> {
+async function build(workspace: string, signal: AbortSignal | undefined, uiLang: UiLang, locale: 'zh' | 'en'): Promise<void> {
   try {
     // signal 让用户停止时能直接杀掉 vite 子进程(构造阶段往往是最长的一段,不能等它跑完)
     await execFileAsync('npm', ['run', 'build'], {
@@ -232,22 +238,24 @@ async function build(workspace: string, signal?: AbortSignal): Promise<void> {
       timeout: BUILD_TIMEOUT_MS,
       maxBuffer: 32 * 1024 * 1024,
       signal,
+      // 产物语言:模板的 vite 插件用它写 <html lang>(见 agent/template/vite.config.js)
+      env: { ...process.env, FORGE_LOCALE: locale },
     })
   } catch (err) {
     // 被取消打断:原样抛出,交给调用方按"取消"处理(不要伪装成构建失败)
     if (signal?.aborted) throw err
     const e = err as { stderr?: string; stdout?: string; message?: string }
     const detail = (e.stderr || e.stdout || e.message || '').toString().trim().slice(-800)
-    throw new Error(`构建失败:${detail || 'vite build 未通过'}`)
+    throw new Error(t(uiLang, 'error.buildFailed', { detail: detail || t(uiLang, 'error.buildNotPass') }))
   }
 }
 
 /** 把 promise 与超时竞速;超时抛错,并调用 onTimeout 让 agent 尽快停下 */
-function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void, uiLang: UiLang): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       onTimeout()
-      reject(new Error(`Agent 执行超时(上限 ${Math.round(ms / 1000)}s)`))
+      reject(new Error(t(uiLang, 'error.timeout', { s: Math.round(ms / 1000) })))
     }, ms)
     promise.then(
       (v) => {
@@ -262,10 +270,37 @@ function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void):
   })
 }
 
+/**
+ * 保证 src/App.jsx 调了 setLocale。
+ *
+ * 为什么不让模型自己记得:平台自带的默认文案(空状态「暂无内容」、报错「加载失败」、
+ * Modal 的「确认/取消」…)全靠它切语言 —— 模型漏了这一行,产物里就会到处漏中文。
+ *
+ * generate:就地改成目标语言(模型写错了也纠正)。
+ * chat:**不动已有应用的 locale** —— 续聊时应用是什么语言就还是什么语言,
+ *       只有「整个应用都没有这一行」(本次改动之前生成的老应用)才补一行中文兜底。
+ */
+async function ensureLocaleCall(workspace: string, locale: 'zh' | 'en', mode: 'generate' | 'chat'): Promise<void> {
+  const path = join(workspace, 'src/App.jsx')
+  const text = await readIfExists(path)
+  if (text === null) return
+  const hasCall = /setLocale\(\s*['"][^'"]*['"]\s*\)/.test(text)
+  const call = `setLocale('${locale}')`
+  if (hasCall) {
+    if (mode === 'chat') return
+    if (text.includes(call)) return
+    await writeFile(path, text.replace(/setLocale\(\s*['"][^'"]*['"]\s*\)/, call), 'utf8')
+    return
+  }
+  // 没有这一行调用:generate 用目标语言;chat 里的老应用(本次改动之前生成的,全是中文)用中文兜底
+  const fallback = mode === 'chat' ? 'zh' : locale
+  await writeFile(path, `import { setLocale } from './lib/locale.js'\nsetLocale('${fallback}')\n\n${text}`, 'utf8')
+}
+
 /** 用户主动停止(协作式取消):由 cancel watcher 触发,经 AbortSignal 传进 runJob */
 export class CancelledError extends Error {
-  constructor() {
-    super('任务已被用户停止')
+  constructor(uiLang: UiLang = 'zh') {
+    super(t(uiLang, 'error.cancelled'))
     this.name = 'CancelledError'
   }
 }
@@ -301,7 +336,10 @@ export async function runJob(
   onUsage?: (usage: RunUsage) => void,
 ): Promise<RunResult> {
   // 冷启动期间就被停止:连工作目录都不用建
-  if (signal?.aborted) throw new CancelledError()
+  const uiLang: UiLang = req.lang === 'en' ? 'en' : 'zh'
+  if (signal?.aborted) throw new CancelledError(uiLang)
+  // 产物语言:跟随需求正文的语言,识别不出才回落界面语言(见 lang.ts)
+  const outLang = resolveOutputLang(req)
   const workspace = join(config.workspaceRoot, req.jobId)
   await rm(workspace, { recursive: true, force: true })
   await mkdir(workspace, { recursive: true })
@@ -329,9 +367,12 @@ export async function runJob(
   // 本轮连接器:凭证明文落到 .forge/connectors.json(不进源码树、不进产物,随容器销毁)
   await materializeConnectors(workspace, req.connectors)
 
-  report({ stage: req.type === 'chat' ? 'coding' : 'planning', progress: req.type === 'chat' ? '正在按要求修改应用' : '正在规划方案' })
+  report({
+    stage: req.type === 'chat' ? 'coding' : 'planning',
+    progress: t(uiLang, req.type === 'chat' ? 'progress.chatEdit' : 'progress.plan'),
+  })
 
-  const session = await createForgeSession(config, workspace)
+  const session = await createForgeSession(config, workspace, { outLang, uiLang, mode: req.type })
   // 会话就绪:交给 index.ts,它在模型跑起来之前缓冲的「追加要求」此刻补投
   onSession?.(session)
   // 用户主动停止:signal 一响就 abort 当前轮次;每个阶段结束后再用 throwIfCancelled 把控制流拉出
@@ -340,16 +381,23 @@ export async function runJob(
   if (signal?.aborted) onAbort()
   else signal?.addEventListener('abort', onAbort, { once: true })
   const throwIfCancelled = () => {
-    if (signal?.aborted) throw new CancelledError()
+    if (signal?.aborted) throw new CancelledError(uiLang)
   }
   // 会话建好之前就被停止(冷启动 + 拷模板慢于巡检间隔):abort 一个还没跑过的会话是空操作,
   // 这里直接退出,别让整整一轮生成白跑(不然会占满 --max-instances 1 的实例)
   throwIfCancelled()
   // tool_execution_end 不带入参,先用 start 事件按 toolCallId 记住本次调用的参数
   const pendingArgs = new Map<string, Record<string, unknown>>()
-  // 累积 agent 的正文输出;最后一轮正文(text_end 时定格)即交付说明,回传后作为对话里的 assistant 回复
+  // 累积 agent 的正文输出;交付说明 = **最后一次工具调用之后**的那段正文,
+  // 回传后作为对话里的 assistant 回复。
+  // 为什么不能只取「最后一段正文」:有些模型(实测 MiniMax-M3.1-Flash)整轮只在开头说过一句话,
+  // 之后全是思考与工具调用、收尾时不再输出正文 —— 那样取到的会是开场白,不是交付说明。
   let textBuf = ''
   let summary = ''
+  /** 工具调用之后出现过的最后一段正文(那才是交付说明) */
+  let summaryAfterTool = ''
+  /** 本轮是否调用过工具 */
+  let usedTool = false
   const unsubscribe = session.subscribe((event) => {
     // 流式日志:把模型的思考与正文逐 token 追加,前端据此实时显示 agent 在「想什么、写什么」
     if (event.type === 'message_update') {
@@ -364,7 +412,10 @@ export async function runJob(
         textBuf += ev.delta
         log.append(ev.delta)
       } else if (ev.type === 'text_end') {
-        if (textBuf.trim()) summary = textBuf.trim()
+        if (textBuf.trim()) {
+          summary = textBuf.trim()
+          if (usedTool) summaryAfterTool = summary
+        }
         textBuf = ''
         log.append('\n')
       }
@@ -379,7 +430,10 @@ export async function runJob(
     if (event.type !== 'tool_execution_end') return
     const args = pendingArgs.get(event.toolCallId)
     pendingArgs.delete(event.toolCallId)
-    log.append(event.isError ? '   ✗ 失败\n' : '   ✓ 完成\n')
+    usedTool = true
+    // 工具结果标记只留符号:前端 web/src/lib/agentLog.ts 按 ✓/✗ 解析出状态后,
+    // 文字由前端自己的字典渲染 —— 日志里再写一遍中文/英文反而会被正则卡住。
+    log.append(event.isError ? '   ✗\n' : '   ✓\n')
     if (event.isError) return
     const path = writtenPath(event.toolName, args)
     if (!path) return
@@ -391,11 +445,11 @@ export async function runJob(
     if (rel.endsWith('plan.json')) {
       void readIfExists(join(workspace, 'plan.json')).then((text) => {
         const plan = text ? parsePlan(text) : null
-        if (plan) report({ plan, stage: 'coding', progress: '规划完成,正在实现应用' })
+        if (plan) report({ plan, stage: 'coding', progress: t(uiLang, 'progress.planned') })
       })
       return
     }
-    report({ stage: 'coding', progress: `正在编写 ${rel}` })
+    report({ stage: 'coding', progress: t(uiLang, 'progress.writing', { file: rel }) })
     void readIfExists(join(workspace, rel)).then((text) => {
       if (text !== null) report({ filePreview: { path: rel, content: text.slice(0, MAX_FILE_PREVIEW) } })
     })
@@ -408,21 +462,42 @@ export async function runJob(
 
   try {
     await withTimeout(
-      session.prompt(buildUserPrompt(req, { imageInputEnabled: config.supportsImageInput }), {
+      session.prompt(buildUserPrompt(req, { imageInputEnabled: config.supportsImageInput, lang: outLang }), {
         images: attachmentImages.length ? attachmentImages : undefined,
       }),
       config.maxRunMs,
       () => void session.abort(),
+      uiLang,
     )
     throwIfCancelled()
-    deliverSummary = summary.trim()
+    // 工具调用之后没有正文 → 模型没写交付说明(返回空,让 Worker 用平台自己的收尾文案兜底)
+    deliverSummary = summaryAfterTool || (usedTool ? '' : summary.trim())
+    // 交付说明的语言跑偏了(模型有时会用提示词的中文写收尾)→ 专门再问一次。
+    // 这段提示词短、目标单一,比在长提示词末尾强调有效得多;问不到就保留原来那份。
+    if (deliverSummary && !matchesLang(deliverSummary, outLang) && remainingMs() > DELIVERY_RETRY_MIN_MS) {
+      const budget = Math.min(DELIVERY_RETRY_BUDGET_MS, remainingMs())
+      log.append(t(uiLang, 'log.deliveryLangRetry'))
+      try {
+        await withTimeout(
+          session.prompt(deliveryNotePrompt(outLang)),
+          budget,
+          () => void session.abort(),
+          uiLang,
+        )
+        const retry = summaryAfterTool || summary.trim()
+        if (retry && matchesLang(retry, outLang)) deliverSummary = retry
+      } catch {
+        // 重问失败(超时/异常):保留原来那份,别把交付说明弄丢
+      }
+    }
     // 构建前再覆盖一次平台文件:模型若无视约束改了组件/SDK,也不会进入产物与源码树
     await restorePlatformFiles(workspace, config.templateDir, false)
 
     // 第一轮先构建:既是对初稿的校验,也是复查轮回滚的基线
-    report({ stage: 'building', progress: '正在构建应用产物' })
+    report({ stage: 'building', progress: t(uiLang, 'progress.building') })
     throwIfCancelled()
-    await build(workspace, signal)
+    await ensureLocaleCall(workspace, localeCode(outLang), req.type)
+    await build(workspace, signal, uiLang, localeCode(outLang))
     const baseline = await collectSource(workspace)
 
     // 第二轮:同会话的「设计总监复查与打磨」——只精修,不推翻;失败不判 job 失败
@@ -431,27 +506,28 @@ export async function runJob(
     if (wantPolish && remainingMs() >= MIN_POLISH_BUDGET_MS) {
       throwIfCancelled()
       const budget = Math.min(config.polishMaxMs, remainingMs())
-      log.append('\n💭 设计总监复查轮开始\n')
-      report({ stage: 'coding', progress: '正在做设计总监复查与打磨' })
+      log.append(t(uiLang, 'log.polishStart'))
+      report({ stage: 'coding', progress: t(uiLang, 'progress.polish') })
       try {
-        await withTimeout(session.prompt(POLISH_PROMPT), budget, () => void session.abort())
+        await withTimeout(session.prompt(polishPrompt(outLang, req.type)), budget, () => void session.abort(), uiLang)
         throwIfCancelled()
         await restorePlatformFiles(workspace, config.templateDir, false)
-        report({ stage: 'building', progress: '正在重新构建应用产物' })
+        report({ stage: 'building', progress: t(uiLang, 'progress.rebuilding') })
         try {
-          await build(workspace, signal)
+          await ensureLocaleCall(workspace, localeCode(outLang), req.type)
+          await build(workspace, signal, uiLang, localeCode(outLang))
         } catch {
           // 复查轮把代码改坏了:回滚到已通过构建的初稿,保证交付可用
           await restoreFromMap(workspace, baseline)
-          await build(workspace, signal)
-          log.append('\n⚠️ 复查轮产物构建失败,已回落到第一轮结果\n')
+          await build(workspace, signal, uiLang, localeCode(outLang))
+          log.append(t(uiLang, 'log.polishFallback'))
         }
       } catch (err) {
         // 复查轮本身失败不判 job 失败;但用户主动停止必须传播出去(别被这里吞成"保留第一轮结果")
         throwIfCancelled()
-        log.append(`\n⚠️ 复查轮未完成,保留第一轮结果(${err instanceof Error ? err.message : String(err)})\n`)
+        log.append(t(uiLang, 'log.polishUndone', { msg: err instanceof Error ? err.message : String(err) }))
       }
-      log.append('\n💭 设计总监复查轮结束\n')
+      log.append(t(uiLang, 'log.polishEnd'))
     }
   } finally {
     signal?.removeEventListener('abort', onAbort)
@@ -474,5 +550,5 @@ export async function runJob(
     if (parsed) plan = parsed
   }
 
-  return { src, dist, manifest, plan, summary: deliverSummary || summary.trim() || undefined }
+  return { src, dist, manifest, plan, summary: deliverSummary || undefined }
 }

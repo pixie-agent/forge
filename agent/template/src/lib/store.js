@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { blob, counter, db, kv, uploadKey } from './forge.js'
+import { t } from './locale.js'
 
 /** 把服务端 {id,data,created_at} 摊平成 {id,created_at,...data},用起来更顺手 */
 function flatten(rows) {
@@ -59,7 +60,7 @@ export function useCollection(collection, options = {}) {
       setTotal(Number(res.total ?? 0))
       return true
     } catch (e) {
-      setError(e?.message || '加载失败')
+      setError(e?.message || t('loadFailed'))
       return false
     } finally {
       setLoading(false)
@@ -81,7 +82,7 @@ export function useCollection(collection, options = {}) {
       setItems((prev) => order([...prev, ...next.filter((n) => !prev.some((p) => p.id === n.id))]))
       setTotal(Number(res.total ?? 0))
     } catch (e) {
-      setError(e?.message || '加载失败')
+      setError(e?.message || t('loadFailed'))
     } finally {
       setLoadingMore(false)
     }
@@ -105,7 +106,7 @@ export function useCollection(collection, options = {}) {
         await db.update(collection, id, patch)
       } catch (e) {
         setItems(before)
-        setError(e?.message || '更新失败')
+        setError(e?.message || t('updateFailed'))
         throw e
       }
     },
@@ -127,7 +128,7 @@ export function useCollection(collection, options = {}) {
       } catch (e) {
         setItems(before)
         setTotal((t) => t + 1)
-        setError(e?.message || '删除失败')
+        setError(e?.message || t('deleteFailed'))
         throw e
       }
     },
@@ -163,7 +164,7 @@ export function useKv(key, initialValue = null) {
         const v = await kv.get(key, initialValue)
         if (alive) setValue(v)
       } catch (e) {
-        if (alive) setError(e?.message || '加载失败')
+        if (alive) setError(e?.message || t('loadFailed'))
       } finally {
         if (alive) setLoading(false)
       }
@@ -185,7 +186,7 @@ export function useKv(key, initialValue = null) {
         await kv.set(key, resolved)
       } catch (e) {
         setValue(before)
-        setError(e?.message || '保存失败')
+        setError(e?.message || t('saveFailed'))
         throw e
       }
     },
@@ -258,7 +259,7 @@ export function useUpload(dir = 'uploads') {
         setProgress(100)
         return key
       } catch (e) {
-        setError(e?.message || '上传失败')
+        setError(e?.message || t('uploadFailed'))
         throw e
       } finally {
         setUploading(false)
@@ -283,7 +284,7 @@ export function useBlobs(prefix = '', { limit = 100 } = {}) {
       const res = await blob.list(prefix, { limit })
       setItems(res.items ?? [])
     } catch (e) {
-      setError(e?.message || '加载失败')
+      setError(e?.message || t('loadFailed'))
     } finally {
       setLoading(false)
     }
@@ -299,7 +300,7 @@ export function useBlobs(prefix = '', { limit = 100 } = {}) {
       try {
         await blob.remove(key)
       } catch (e) {
-        setError(e?.message || '删除失败')
+        setError(e?.message || t('deleteFailed'))
         await reload()
       }
     },

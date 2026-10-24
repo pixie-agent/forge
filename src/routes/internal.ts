@@ -216,7 +216,8 @@ app.post('/jobs/:id/commit', async (c) => {
 
 app.post('/jobs/:id/fail', async (c) => {
   const body = await c.req.json<{ error?: string }>().catch(() => ({}) as { error?: string })
-  await failJobWith(c.env, c.req.param('id'), String(body.error ?? '执行失败'))
+  // agent 侧已经按界面语言写过错误文案;这里没带就留空,由 failJobWith 按任务语言兜底
+  await failJobWith(c.env, c.req.param('id'), String(body.error ?? ''))
   return c.json({ ok: true })
 })
 

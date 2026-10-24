@@ -3,7 +3,7 @@
 import type { Env, Plan } from '../types'
 import { clearJobMessages, insertMessage } from './jobHelpers'
 import { releaseJobCredits } from './credits'
-import { langOfPayload, srv } from './i18n'
+import { langOfPayload, srv, type Lang } from './i18n'
 import { clearArtifacts, DRAFT_VERSION_NO, putArtifacts } from './artifacts'
 import { logEvent } from './events'
 import type { AgentRunResult, FileMap } from './agent'
@@ -21,18 +21,21 @@ interface JobRow {
  *  幂等:非活动任务直接忽略。这里**不再扣积分** —— 发起任务时冻结的那笔就是这次的账(见 src/lib/credits.ts)。 */
 export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunResult>): Promise<{ ok: boolean; version?: number; reason?: string }> {
   const db = env.DB
-  const src = body.src as FileMap | undefined
-  const dist = body.dist as FileMap | undefined
-  if (!src || typeof src !== 'object' || !dist || typeof dist !== 'object' || !Object.keys(dist).length) {
-    throw new Error('产物不完整(缺源码树或构建产物)')
-  }
-  const entry = body.manifest?.entry || 'index.html'
-
+  // 先取任务:语言随 payload 落库,后面的报错文案要按任务发起时的语言渲染
   const job = await db
     .prepare('SELECT id, project_id, user_id, type, payload, status FROM jobs WHERE id = ?')
     .bind(jobId)
     .first<JobRow>()
-  if (!job) throw new Error('任务不存在')
+  if (!job) throw new Error(srv('zh', 'commit.noJob'))
+  const lang = langOfPayload(job.payload)
+
+  const src = body.src as FileMap | undefined
+  const dist = body.dist as FileMap | undefined
+  if (!src || typeof src !== 'object' || !dist || typeof dist !== 'object' || !Object.keys(dist).length) {
+    throw new Error(srv(lang, 'commit.incomplete'))
+  }
+  const entry = body.manifest?.entry || 'index.html'
+
   if (job.status !== 'running' && job.status !== 'pending') return { ok: true, reason: 'already-settled' }
 
   // 任务到此为止:追加要求的投递队列(含附件 base64)可以整批释放了
@@ -46,7 +49,7 @@ export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunR
   // 草稿即工作副本,预览/续聊都以它为准;用户点「生成新版本」时才由 /api/projects/:id/commit 快照为正式版本。
   // 覆盖前先清空草稿目录,避免上一轮删掉的文件残留在预览里。
   const meta = await db.prepare('SELECT p.id FROM projects p WHERE p.id = ?').bind(job.project_id).first()
-  if (!meta) throw new Error('项目不存在')
+  if (!meta) throw new Error(srv(lang, 'commit.noProject'))
 
   await clearArtifacts(env, job.project_id, DRAFT_VERSION_NO)
   const bytes = await putArtifacts(env, job.project_id, DRAFT_VERSION_NO, dist)
@@ -88,7 +91,6 @@ export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunR
   // 优先用 agent 的交付说明(带 Markdown 的详细回复,对话体验更好);缺失时回退到简短系统文案。
   // 回退文案按任务发起时的语言渲染 —— 回调是 agent/cron 触发的,不知道用户此刻用什么语言,
   // 所以语言随 payload 落库(见 src/lib/i18n.ts)。
-  const lang = langOfPayload(job.payload)
   const summary = typeof body.summary === 'string' ? body.summary.trim() : ''
   const assistantText =
     summary ||
@@ -123,9 +125,20 @@ export async function markJobFailed(env: Env, jobId: string, error: string): Pro
   return true
 }
 
-/** 失败落定(agent fail 回调入口) */
+/** 失败落定(agent fail 回调入口)。error 为空时按任务语言给默认文案。 */
 export async function failJobWith(env: Env, jobId: string, error: string): Promise<void> {
-  await markJobFailed(env, jobId, error)
+  const text = error.trim() || srv(await jobLang(env, jobId), 'job.failed')
+  await markJobFailed(env, jobId, text)
+}
+
+/** 任务语言:从 payload 里取(任务发起时定的,回调时刻不知道用户此刻在用哪种语言) */
+async function jobLang(env: Env, jobId: string): Promise<Lang> {
+  const row = await env.DB
+    .prepare('SELECT payload FROM jobs WHERE id = ?')
+    .bind(jobId)
+    .first<{ payload: string | null }>()
+    .catch(() => null)
+  return langOfPayload(row?.payload)
 }
 
 /**
@@ -139,12 +152,14 @@ export async function failJobWith(env: Env, jobId: string, error: string): Promi
  * 返回是否真的从活动态迁移到 cancelled(已终态/不存在返回 false)。
  */
 export async function cancelJob(env: Env, jobId: string): Promise<boolean> {
+  // 「已手动停止」按任务发起时的语言渲染(语言随 payload 落库,见 src/lib/i18n.ts)
+  const lang = await jobLang(env, jobId)
   const res = await env.DB
     .prepare(
-      `UPDATE jobs SET status = 'cancelled', error = '已手动停止', files_preview = NULL, updated_at = datetime('now')
+      `UPDATE jobs SET status = 'cancelled', error = ?, files_preview = NULL, updated_at = datetime('now')
        WHERE id = ? AND status IN ('pending','running')`
     )
-    .bind(jobId)
+    .bind(srv(lang, 'job.cancelled'), jobId)
     .run()
     .catch(() => null)
   if (!res?.meta.changes) return false

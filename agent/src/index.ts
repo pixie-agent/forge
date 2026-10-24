@@ -13,6 +13,7 @@ import {
 import { applyModelOverride, loadConfig, type AgentConfig } from './config.js'
 import { FifoQueue } from './queue.js'
 import { runJob } from './runner.js'
+import { t, type UiLang } from './i18n.js'
 import type { AgentSession } from '@mariozechner/pi-coding-agent'
 import type { RunAttachment, RunRequest, RunUsage, SteerMessage } from './types.js'
 
@@ -25,14 +26,14 @@ const MAX_BODY_BYTES = 24 * 1024 * 1024
 
 const queue = new FifoQueue(config.queueConcurrency)
 
-function readJson(req: IncomingMessage): Promise<unknown> {
+function readJson(req: IncomingMessage, uiLang: UiLang): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let size = 0
     const chunks: Buffer[] = []
     req.on('data', (chunk: Buffer) => {
       size += chunk.length
       if (size > MAX_BODY_BYTES) {
-        reject(new Error('请求体过大'))
+        reject(new Error(t(uiLang, 'error.bodyTooLarge')))
         req.destroy()
         return
       }
@@ -42,7 +43,7 @@ function readJson(req: IncomingMessage): Promise<unknown> {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
       } catch {
-        reject(new Error('请求体不是合法 JSON'))
+        reject(new Error(t(uiLang, 'error.badJson')))
       }
     })
     req.on('error', reject)
@@ -93,6 +94,8 @@ async function steerSession(session: AgentSession, msg: SteerMessage, config: Ag
 const server = createServer((req, res) => {
   void (async () => {
     const url = new URL(req.url ?? '/', 'http://localhost')
+    // 界面语言:Worker 放在请求头里(请求体之前失败时也要能回对语言),请求体里的 lang 优先
+    const headerLang: UiLang = req.headers['x-forge-lang'] === 'en' ? 'en' : 'zh'
 
     if (req.method === 'GET' && url.pathname === '/health') {
       send(res, 200, { ok: true })
@@ -100,24 +103,25 @@ const server = createServer((req, res) => {
     }
 
     if (req.method !== 'POST' || url.pathname !== '/run') {
-      send(res, 404, { error: '不存在' })
+      send(res, 404, { error: t(headerLang, 'error.notFound') })
       return
     }
 
     if (req.headers['x-agent-secret'] !== config.agentSecret) {
-      send(res, 401, { error: '未授权' })
+      send(res, 401, { error: t(headerLang, 'error.unauthorized') })
       return
     }
 
-    const body = await readJson(req).catch((err) => {
-      send(res, 400, { error: err instanceof Error ? err.message : '参数错误' })
+    const body = await readJson(req, headerLang).catch((err) => {
+      send(res, 400, { error: err instanceof Error ? err.message : t(headerLang, 'error.badParams') })
       return null
     })
     if (body === null) return
     if (!isRunRequest(body)) {
-      send(res, 400, { error: '参数不完整' })
+      send(res, 400, { error: t(headerLang, 'error.incomplete') })
       return
     }
+    const uiLang: UiLang = body.lang === 'en' ? 'en' : headerLang
 
     // 后台配置的模型覆盖(见 docs/FORGE2.md §21):每次请求独立生效,不改进程级 config,
     // 也不碰密钥 —— baseUrl/modelId/思考档位/复查轮/运行上限都从这里合并,非法值回落 env。
@@ -203,12 +207,15 @@ const server = createServer((req, res) => {
           lastPosition = position
           log(`queued position=${position} (running=${queue.running} waiting=${queue.waiting})`)
           report({
-            progress: position > 0 ? `排队中,前面还有 ${position} 个任务,请稍候` : '排队中,马上开始,请稍候',
+            progress:
+              position > 0
+                ? t(uiLang, 'progress.queued', { n: position })
+                : t(uiLang, 'progress.queuedNow'),
           })
         })
         if (admission === 'cancelled') {
           log('CANCELLED while queued')
-          send(res, 409, { error: '任务已被用户停止' })
+          send(res, 409, { error: t(uiLang, 'error.cancelled') })
           return
         }
         if (admission === 'slot') {
@@ -249,7 +256,7 @@ const server = createServer((req, res) => {
       // 用户主动停止:不报 fail(Worker 侧已是 cancelled 终态,报 fail 也只是幂等空转)
       if (cancelledByUser) {
         log('CANCELLED by user')
-        send(res, 409, { error: '任务已被用户停止' })
+        send(res, 409, { error: t(uiLang, 'error.cancelled') })
         return
       }
       log(`FAILED ${message}`)

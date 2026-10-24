@@ -172,6 +172,8 @@ async function launchJob(
       idea: payload.idea,
       message: payload.message,
       note: payload.note,
+      // 平台界面语言:agent 用它渲染进度/错误提示(产物语言由 agent 自己从需求正文检测)
+      lang,
       currentFiles,
       history,
       attachments: attachments?.length ? attachments : undefined,

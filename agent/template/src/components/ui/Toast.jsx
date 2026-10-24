@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from '../../lib/motion.jsx'
 import { cx } from '../../lib/cx.js'
+import { t } from '../../lib/locale.js'
 import { Icon } from './Icon.jsx'
 
 /**
@@ -20,10 +21,10 @@ const TONE = {
 
 /** 没有包 Provider 时的兜底:不崩、不显示(控制台提示一次) */
 const NOOP = {
-  toast: () => console.warn('[toast] 请在根组件包一层 <ToastProvider>'),
-  success: () => console.warn('[toast] 请在根组件包一层 <ToastProvider>'),
-  error: () => console.warn('[toast] 请在根组件包一层 <ToastProvider>'),
-  info: () => console.warn('[toast] 请在根组件包一层 <ToastProvider>'),
+  toast: () => console.warn(t('toastProviderMissing')),
+  success: () => console.warn(t('toastProviderMissing')),
+  error: () => console.warn(t('toastProviderMissing')),
+  info: () => console.warn(t('toastProviderMissing')),
   dismiss: () => {},
 }
 
@@ -85,7 +86,7 @@ export function ToastProvider({ children, duration = 3200, position = 'top' }) {
                 <button
                   type="button"
                   onClick={() => dismiss(t.id)}
-                  aria-label="关闭提示"
+                  aria-label={t('closeHint')}
                   className="-mr-1 shrink-0 rounded-md p-1 text-muted transition-colors hover:text-ink"
                 >
                   <Icon name="X" size={15} />

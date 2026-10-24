@@ -82,7 +82,7 @@ Cloud Run 请求级计费(便宜、用完即缩)要求**请求在跑时 CPU 才�
 - **当前生产实际值(2026-10-17 实测,以 Cloud Run 服务的 env 为准)**:`LLM_BASE_URL=https://api.deepseek.com/anthropic`、`LLM_MODEL=deepseek-flash`、`PI_LLM_API=anthropic-messages`、`PI_PROVIDER_ID=forge`、`PI_MODEL_REASONING=true`——即走 DeepSeek 的 **Anthropic 协议**端点,不是 OpenAI 兼容端点。文档里早先写的 GLM/`zai` 组合(`PI_THINKING_LEVEL/PI_THINKING_FORMAT=zai/PI_SUPPORTS_DEVELOPER_ROLE=…`)是**过期值**,仅在使用相应 OpenAI 兼容网关时才需要。
 - 其余调优开关(见 `agent/src/config.ts`):`PI_THINKING_LEVEL`(off…xhigh)、`PI_MODEL_REASONING`(模型是否声明支持推理)、`PI_THINKING_FORMAT`(openai|zai|qwen|qwen-chat-template)、`PI_SUPPORTS_DEVELOPER_ROLE` / `PI_SUPPORTS_REASONING_EFFORT`(默认 true;网关不认 `developer` 角色时置 false 走 system)、`PI_MODEL_INPUT_IMAGE`(默认 false;置 true 才声明模型支持图片输入,见 §5.1)。
 - 工具集:`createCodingTools(workspace)`(read/bash/write/edit),`sessionManager: inMemory`,每次 job 全新会话、全新工作目录 → 用完即弃。
-- System prompt 用 `DefaultResourceLoader({ systemPrompt })` 注入:约定产出**多文件 React 应用**(Vite+Tailwind、简体中文、响应式、无外图、真实文案、`src/lib/forge.js` 数据接口)。
+- System prompt 用 `DefaultResourceLoader({ systemPrompt })` 注入:约定产出**多文件 React 应用**(Vite+Tailwind、响应式、无外图、真实文案、`src/lib/forge.js` 数据接口);**文案语言跟随用户需求正文**(见 §17.8),不再写死中文。
   2026-10-17 起 system prompt 扩展为「设计契约 + 组件目录 + 数据层 + 状态覆盖 + 自检清单」(约 23 KB),核心是把**设计系统**与**组件 API** 写成模型可直接照抄的词汇表 —— 参见 §17。
 - **平台自有文件强制还原**:`restorePlatformFiles()` 把 `index.html` / `package.json` / `vite.config.js` / `src/main.jsx` / `src/index.css` / `src/lib/*` / `src/components/ui/**` / `src/styles/**` 从模板覆盖回工作目录,在两个时机各做一次——① agent 动手前(连平台目录一起重建,清掉上一版源码里的漂移);② 每一轮 agent 结束、构建前(只覆盖、不删除,保留模型新增的文件)。唯一例外是 `src/styles/tokens.css` —— 模型按 `plan.palette` 选色的那个文件,任何时候都保留。这样 chat 版源码或模型自身的漂移都不可能改坏脚手架契约、设计系统或后端 SDK,也不会进入产物与源码树。
 - `generate`:先写 `plan.json`(→ 前端规划卡片),再按计划实现 `src/` 下的 React 组件。
@@ -625,11 +625,13 @@ src/App.jsx                       示例应用(留言墙)= 模板自身的冒烟
 
 ### 17.3 Prompt 结构(agent/src/prompt.ts,≈23 KB)
 
-`SYSTEM_PROMPT` 顺序:角色与运行环境 → **文件权限**(可改 `src/**` 与 `tokens.css` 两行;禁改平台文件,违反会被强制还原)→ **设计系统契约**(配色/排版/节奏/动效)→ **组件库目录**(30+ 导出的签名与"何时用")→ **页面结构**(导航/Hero/核心功能/统计/选配/页脚,锚点与 id 对应)→ **交互与状态覆盖清单** → 数据层(`DATA_SDK`)→ 状态联动 → **结束前自检**(按真实点击走主流程 + 异常路径 + 数据能力覆盖 + 视觉清单)→ 交付说明格式。
+`systemPrompt(lang, mode)` 是**函数**(产物语言与任务类型都是入参,见 §17.8),顺序:角色与运行环境 → **输出语言块**(最高优先级,见 §17.8)→ **文件权限**(可改 `src/**` 与 `tokens.css` 两行;禁改平台文件,违反会被强制还原)→ **设计系统契约**(配色/排版/节奏/动效)→ **组件库目录**(30+ 导出的签名与"何时用")→ **页面结构**(导航/Hero/核心功能/统计/选配/页脚,锚点与 id 对应)→ **交互与状态覆盖清单** → 数据层(`DATA_SDK`)→ 状态联动 → **结束前自检**(按真实点击走主流程 + 异常路径 + 数据能力覆盖 + 视觉清单)→ 交付说明格式。
 
 `DATA_SDK` 不只是"用法文档",而是一条**覆盖要求**:平台有四类后端能力(db / counter / kv / blob),先判断本应用能用到哪几类,**能用上的都要用上**(正常 ≥2 类),并给出可判定的触发条件——出现"今日 X / 累计 X / 共 X 次"这类汇总数字就必须用 `counter` 维护汇总值(明细进 db、汇总走 counter,不把全量明细拉下来现算);有"设置/公告/开关/门店资料"就必须用 `kv`;有图片/文件上传就必须用 `blob`。`generatePrompt` 要求把选型写进 `plan.json` 的 `data` 字段(`{collections,counters,kv,blob}`);`POLISH_PROMPT` 的复查清单新增第 9 条专门核对"能力是否真的接进了界面",第 8 条仍是"数据是否真实/分页/服务端检索"。
 
 `generatePrompt` 的步骤被钉成:读脚手架 → 写 `plan.json` → **把 `palette[0]/[1]` 写进 `tokens.css`** → 实现页面 → 自检。规划卡片的色块与成品主色因此必然一致(token-first)。
+
+`polishPrompt(lang, mode)` 复查清单的第 10 条按模式分叉:generate 查「所有文案是否都是目标语言(脚手架里的中文示例、组件默认文案有没有漏)」;chat 查「本次新增/修改的文案是不是目标语言,没动到的旧文案保持原样」。收尾那句话同样用目标语言。
 
 ### 17.4 设计复查回路(runner.ts)
 
@@ -668,6 +670,44 @@ curl -s -X PUT "$BASE/blob" -d x                           # 405(列举只允许
 
 - **浏览器标签标题**:`index.html` 是平台文件、模型不可改,模板里写死 `<title>应用</title>`,于是所有生成应用的标签页都叫"应用"。做法改为**下发时注入**:`injectRuntime(html, apiBase, dataEnv, title)` 用 `projects.name`(generate 落定时已被 `plan.name` 覆盖,聊天天不覆盖)替换 `<title>`,实测 `/p/<token>/` 得 `<title>豆屋管家</title>`。只影响入口 HTML(资产不走这条路径),`projects.name` 为空时保持模板原样;标题文本按 HTML 文本节点转义并截断 60 字。
 - **实时「看代码」预览**:模型的 `write/edit` 有时给工作目录下的**绝对路径**,而原来用 `relative(workspace, join(workspace, path))` 归一化——`path.join` 对绝对路径是**拼接**不是替换,于是算出 `tmp/forge-agent/<jobId>/src/…` 这种错位路径,`readIfExists` 读不到 → `files_preview` 恒为 `null`,前端"实时看代码"面板一直空白。修法:`isAbsolute(path) ? path : join(workspace, path)` 再 `relative`,并丢弃落到工作目录之外(`..` 开头)的路径。
+
+### 17.8 产物文案语言(2026-10-24)
+
+**起因**:system prompt 原本写死「全部文案使用简体中文」,用户用英文提需求、拿回的仍是全中文应用;而中文还不只在模型写的文案里 —— 脚手架的**平台文件**(模型禁止改)里有一批运行时默认串(空状态「暂无内容」、Modal 的「确认/取消」、报错「加载失败」),`index.html` 的 `<html lang="zh-CN">` 也永远改不掉,平台自身的进度/报错更是直接原样透出中文。
+
+**三个「语言」不是一回事,别混**:
+
+| 概念 | 是什么 | 谁决定 |
+| --- | --- | --- |
+| **产物语言** | 生成出来的应用里的文案语言 | agent 从需求正文检测(`agent/src/lang.ts`) |
+| **平台界面语言** | 平台 chrome(任务进度、错误提示)的语言 | Worker 的 `body.lang`,跨 Worker→agent 边界传给 agent(`RunRequest.lang`) |
+| **脚手架 locale** | 平台默认文案(空状态/报错/Modal 按钮)的语言 | 产物自己写进 `src/App.jsx` 的 `setLocale()` 调用 |
+
+**产物语言怎么定的**(`agent/src/lang.ts`):
+
+1. 字符类别:假名 → `ja`、谚文 → `ko`、西里尔 → `ru`;汉字占「汉字 + 拉丁字母」≥ 20% → `zh` —— 这条阈值是给「中文需求里夹一堆 React / TypeScript / IndexedDB」准备的,按字母数比会把它误判成英文。
+2. 拉丁文字:各语言的**特征词**加权打分(只收辨识度高的词,通用功能词会跨语言串味),最高分 ≥ 2 且领先第二名 2 倍才算命中。
+3. 识别不出 → 回落平台界面语言 → 回落 `zh`。
+4. 用户在需求里**显式指定**语言(「用英文」「in English」「日文」)时以用户说的为准 —— 这条交给模型,提示词里明写。
+
+检测逻辑是本次唯一有分支判断的代码,单独有个自检脚本:`node --experimental-strip-types agent/scripts/lang-check.mjs`(中/英/日/韩/西/法/德/意/葡/荷 + 混排 + 回落)。
+
+**提示词怎么落**(`agent/src/prompt.ts`):`systemPrompt(lang, mode)` / `polishPrompt(lang, mode)` / `generatePrompt(req, lang)` / `chatPrompt(req, lang)` 都按目标语言参数化,system prompt 顶部插一段**输出语言块**并**点名**目标语言 —— 指令本身是中文写的,不点名模型大概率跟着中文走。generate 要求全部文案用目标语言;chat 只要求**本次新增/修改**的部分用目标语言,已有文案保持原样(用户在英文应用上说「add a dark mode」,不会把整站翻掉)。
+
+**脚手架 locale**(`agent/template/src/lib/locale.js`):平台默认文案的中英双份,`setLocale()` 切换、`t('key')` 取值。平台文件里的默认串一律走 `t()`,不写死中文字面量。应用侧只有一行:`setLocale('en')`。
+
+- **`<html lang>` 两处都改**:① 运行时 `setLocale()` 会把 `document.documentElement.lang` 改掉;② **构建期**由模板的 vite 插件(`agent/template/vite.config.js`)按 agent 传入的 `FORGE_LOCALE` 写进首屏 HTML —— `index.html` 是平台文件、模型改不了,而首屏 HTML 比 JS 先到,只靠运行时改会晚一拍(屏幕阅读器与浏览器翻译提示读的是首屏)。
+
+- **不依赖模型自觉**:agent 在构建前跑 `ensureLocaleCall()`,检查 `src/App.jsx` 有没有这行调用 —— 没有就补上,写错了就改对。chat 模式**不动**已有应用的 locale(那会把整站默认文案翻掉)。
+
+**平台 chrome**:agent 的进度/日志/错误文案按界面语言(`agent/src/i18n.ts`,与 Worker 那份 `src/lib/i18n.ts` 不共享模块 —— 两个独立构建产物);Worker 侧 `jobs.error` 按任务 payload 里的 lang(`srv(lang, key)`);草稿预览角标「测试环境 · 草稿预览」按预览 URL 上的 `?lang=` 渲染(前端在 iframe 的 URL 上带)。
+
+**交付说明的语言与取法**(两处都踩过坑):
+
+1. **语言**:模型有时会用提示词的语言(中文)写收尾,而不是目标语言 —— 它写的应用内容是英文的,自查里还写着「all English ✓」,但最后那段交付说明是中文(而且它自己声称「并用英文编写了交付说明」)。两道保险:① 提示词**末尾**再钉一遍「你的最终回复(交付说明)必须用 <语言名> 写」(末位指令权重高,顶部语言块会被后面几千字中文稀释);② agent 侧检查交付说明里有没有混进汉字(`lang.ts` 的 `matchesLang`),跑偏了就用一段**短的、只要求写交付说明**的提示词(`deliveryNotePrompt`)专门再问一次 —— 指令短、目标单一,比在长提示词里强调有效得多;问不到就保留原来那份。
+2. **取法**:只认**最后一次工具调用之后**的那段正文 —— 有些模型(实测 MiniMax-M3.1-Flash)整轮只在开头说过一句话,之后全是思考与工具调用、收尾时不再输出正文;只取「最后一段正文」会拿到开场白当交付说明。工具调用之后没有正文 → 视为模型没写交付说明,返回空,由 Worker 用平台自己的收尾文案(`commit.generate`,按任务语言)兜底。
+
+**已知边界**:脚手架 locale 只内置中英两套 —— 日/韩等语言的产物,平台默认文案回落英文(应用自己的文案仍是目标语言)。
 
 ## 18. 对话栏交互(2026-10-18)
 
@@ -788,6 +828,7 @@ npm run db:migrate:billing:remote      # 生产
 - **服务端**:Worker **只返回中文原文**(它的用户就是中文运营/开发场景),前端在 `web/src/lib/i18n/serverMessages.ts` 把中文文案映射到词典键;映射不中时**原样透出中文** —— 宁可露出中文,也不要吞掉真实原因。之所以不是「服务端直接返回 code」,是因为那要改 50+ 处 return,收益只是少一张表;新接口想更干净可以直接在响应里带 `code`。
 - **Worker 侧另有一份** `src/lib/i18n.ts`:只为**直接写进 D1 的文案**服务(附件的 📎 清单标记、commit 的 assistant 消息)。它和前端那份**不共享模块** —— 两者是两个独立构建产物(共用的是 `web/dist`,不是源码)。
 - 环境差异只能来自运行时配置(见 §2 与 AGENTS.md),**禁用构建期变量**,所以语言只能在运行时选,不能按环境打两份包。
+- **产物语言是另一回事**:上面讲的都是**平台界面**的语言;**生成出来的应用用什么语言**由需求正文决定(见 §17.8),与界面语言相互独立 —— 中文界面里用英文提需求,拿回的是英文应用。
 - **覆盖面**:除 `/admin` 六个页面(刻意保持中文,面向中文运营)外的**全部用户可见文案**都已进词典 —— 首页 / 登录 / 项目列表 / 工作台(对话栏、预览区、连接器面板与对话内凭证卡片、数据面板、代码视图)/ 计费页 / 顶栏 / 主题与环境角标。判断标准是「渲染给用户的字」;代码注释、`console`、SQL 里的列名不进词典。
 - **带行内格式的词条**(`**加粗**`、`` `代码` ``)用 `web/src/components/RichText.tsx` 渲染 —— 它只处理这两种标记、不递归,把标记解析成 React 元素而**不是** `dangerouslySetInnerHTML`。纯文本词条直接 `t()` 就行,不必套这层;漏写标记只会丢样式、不会丢内容。列表连接符同理走词条(`chat.listSep`,中文「、」/ 英文「, 」),不要写死分隔符。
 

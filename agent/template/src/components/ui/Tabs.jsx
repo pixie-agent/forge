@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 import { AnimatePresence, motion } from '../../lib/motion.jsx'
 import { cx } from '../../lib/cx.js'
+import { t } from '../../lib/locale.js'
 
 /**
  * 标签页与分段控件。用于「同页多视图」切换(列表/看板、日/周/月)。
@@ -30,7 +31,7 @@ export function Tabs({ items = [], value, onChange, className = '' }) {
 
   return (
     <div className={className}>
-      <div role="tablist" aria-label="视图切换" onKeyDown={onKeyDown} className="flex gap-1 border-b border-line">
+      <div role="tablist" aria-label={t('viewSwitch')} onKeyDown={onKeyDown} className="flex gap-1 border-b border-line">
         {items.map((it) => {
           const on = it.key === active
           return (
@@ -88,7 +89,7 @@ export function SegmentedControl({ items = [], value, onChange, className = '' }
   return (
     <div
       role="tablist"
-      aria-label="分段切换"
+      aria-label={t('segmentedSwitch')}
       className={cx('inline-flex rounded-pill border border-line bg-panel-2 p-1', className)}
     >
       {items.map((it) => {

@@ -127,15 +127,26 @@ export function contentTypeFor(path: string): string {
 }
 
 /** 草稿预览角标:固定在左下角的高 z-index 胶囊,pointer-events:none 不挡交互。
- *  跟随页面本体下发,因此无论内嵌 iframe、新标签打开还是分享出去的测试链接,都能一眼看出「这是测试环境」。 */
-const ENV_BADGE =
-  '<div aria-hidden="true" style="position:fixed;left:12px;bottom:12px;z-index:2147483647;pointer-events:none;display:flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;background:rgba(217,119,6,.95);color:#fff;font:600 12px/1 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif;letter-spacing:.02em;box-shadow:0 2px 10px rgba(0,0,0,.35)">' +
-  '<span style="width:6px;height:6px;border-radius:999px;background:#fff;opacity:.9"></span>测试环境 · 草稿预览</div>'
+ *  跟随页面本体下发,因此无论内嵌 iframe、新标签打开还是分享出去的测试链接,都能一眼看出「这是测试环境」。
+ *  文案按预览者的界面语言渲染(URL 上的 ?lang=)—— 这是平台自己加的字,英文用户不该看到中文。 */
+const ENV_BADGE_TEXT = {
+  zh: '测试环境 · 草稿预览',
+  en: 'Test environment · draft preview',
+} as const
+
+function envBadge(lang: 'zh' | 'en'): string {
+  const text = ENV_BADGE_TEXT[lang] ?? ENV_BADGE_TEXT.zh
+  return (
+    '<div aria-hidden="true" style="position:fixed;left:12px;bottom:12px;z-index:2147483647;pointer-events:none;display:flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;background:rgba(217,119,6,.95);color:#fff;font:600 12px/1 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif;letter-spacing:.02em;box-shadow:0 2px 10px rgba(0,0,0,.35)">' +
+    `<span style="width:6px;height:6px;border-radius:999px;background:#fff;opacity:.9"></span>${text}</div>`
+  )
+}
 
 /** 把角标插到 </body> 前;无 body 时追加到结尾 */
-function injectEnvBadge(html: string): string {
-  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${ENV_BADGE}</body>`)
-  return html + ENV_BADGE
+function injectEnvBadge(html: string, lang: 'zh' | 'en'): string {
+  const badge = envBadge(lang)
+  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${badge}</body>`)
+  return html + badge
 }
 
 /** 转义 HTML 文本节点,避免应用名里的 & < > 破坏文档 */
@@ -172,7 +183,8 @@ export function injectRuntime(
   apiBase: string,
   dataEnv: 'draft' | 'live',
   title?: string | null,
-  connectors?: Record<string, Record<string, string>> | null
+  connectors?: Record<string, Record<string, string>> | null,
+  lang: 'zh' | 'en' = 'zh'
 ): string {
   let script = `window.__FORGE_API_BASE__=${JSON.stringify(apiBase)};window.__FORGE_ENV__=${JSON.stringify(dataEnv)}`
   if (connectors && Object.keys(connectors).length) {
@@ -181,7 +193,7 @@ export function injectRuntime(
   const tag = `<script>${script}</script>`
   let out = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${tag}`) : tag + html
   if (title && title.trim()) out = injectTitle(out, title.trim().slice(0, 60))
-  return dataEnv === 'draft' ? injectEnvBadge(out) : out
+  return dataEnv === 'draft' ? injectEnvBadge(out, lang) : out
 }
 
 // ---------- 预览令牌(无状态 HMAC,绑定 projectId + versionNo) ----------

@@ -34,7 +34,7 @@ async function manifestOf(env: Env, projectId: string, versionNo: number): Promi
 }
 
 /** 服务某个版本:subpath 为空或含扩展名 → 静态产物;以 api/ 开头 → 后端数据 API */
-async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo: number, dataEnv: 'draft' | 'live', apiBase: string, subpath: string, title?: string | null): Promise<Response> {
+async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo: number, dataEnv: 'draft' | 'live', apiBase: string, subpath: string, title?: string | null, lang: 'zh' | 'en' = 'zh'): Promise<Response> {
   const env = c.env
   if (subpath.startsWith('api/') || subpath === 'api') {
     if (c.req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS })
@@ -56,7 +56,7 @@ async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo
   const renderEntry = async (): Promise<Response | null> => {
     const obj = await env.ARTIFACTS.get(prefix + entry)
     if (!obj) return null
-    const html = injectRuntime(await obj.text(), apiBase, dataEnv, title, await connectors())
+    const html = injectRuntime(await obj.text(), apiBase, dataEnv, title, await connectors(), lang)
     return new Response(html, {
       headers: {
         ...ASSET_CORS,
@@ -73,7 +73,7 @@ async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo
   const obj = await env.ARTIFACTS.get(prefix + clean)
   if (obj) {
     const isHtml = contentTypeFor(clean).startsWith('text/html')
-    const body = isHtml ? injectRuntime(await obj.text(), apiBase, dataEnv, title, await connectors()) : obj.body
+    const body = isHtml ? injectRuntime(await obj.text(), apiBase, dataEnv, title, await connectors(), lang) : obj.body
     return new Response(body, {
       headers: {
         ...ASSET_CORS,
@@ -109,7 +109,9 @@ app.all('/p/:token/*', async (c) => {
   if (!loc) return c.text('404 Not Found', 404)
   const name = await c.env.DB.prepare('SELECT name FROM projects WHERE id = ?').bind(loc.projectId).first<{ name: string }>()
   const subpath = c.req.path.slice(`/p/${token}/`.length)
-  return serve(c, loc.projectId, loc.versionNo, 'draft', `/p/${token}/api`, subpath, name?.name)
+  // 预览页的平台角标按预览者的界面语言渲染(前端在 iframe 的 URL 上带 ?lang=)
+  const lang = c.req.query('lang') === 'en' ? 'en' : 'zh'
+  return serve(c, loc.projectId, loc.versionNo, 'draft', `/p/${token}/api`, subpath, name?.name, lang)
 })
 
 export const serveRoutes = app

@@ -1,5 +1,7 @@
 /** Cloudflare Worker ↔ Cloud Run agent 之间的请求/回传协议(Worker 侧 src/lib/agent.ts 有对应副本) */
 
+import type { UiLang } from './i18n.js'
+
 export interface PlanItem {
   title: string
   summary: string
@@ -110,6 +112,11 @@ export interface RunRequest {
   message?: string
   /** 补充要求(generate/chat 通用) */
   note?: string
+  /**
+   * 平台界面语言(Worker 传来的 body.lang):决定**平台自身**的文案(任务进度、错误提示),
+   * 不决定产物语言 —— 产物语言由需求正文自动检测(见 lang.ts)。
+   */
+  lang?: UiLang
   /** 后台配置的模型覆盖;缺省时使用 Cloud Run env 的默认配置 */
   model?: ModelOverride
   /**

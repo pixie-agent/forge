@@ -1,6 +1,7 @@
 /** 把 job 派发给 Cloud Run 的 agent service,并接收其回传的多文件产物(源码树 + 构建产物) */
 
 import type { Env, ConnectorGrant, Plan } from '../types'
+import { srv, type Lang } from './i18n'
 import type { AgentAttachment } from './attachments'
 
 /** 路径 → 文件内容 */
@@ -41,6 +42,11 @@ export interface AgentRunRequest {
   idea?: string
   message?: string
   note?: string
+  /**
+   * 平台界面语言(zh|en)。agent 用它决定**平台自身**的文案(任务进度、错误提示);
+   * 产物语言由 agent 从需求正文自动检测,不经过这里。
+   */
+  lang?: 'zh' | 'en'
   /** 后台配置的模型覆盖;缺省时 agent 使用 Cloud Run env 的默认模型 */
   model?: AgentModelOverride
   /**
@@ -85,11 +91,17 @@ export async function dispatchAgent(
   agentUrl?: string
 ): Promise<AgentRunResult> {
   const body: AgentRunRequest = { ...input, callbackBase: env.PUBLIC_BASE_URL }
+  const lang: Lang = body.lang === 'en' ? 'en' : 'zh'
   const timeoutMs = Number(env.AGENT_DISPATCH_TIMEOUT_MS ?? 0)
   const target = (agentUrl || env.AGENT_URL).replace(/\/+$/, '')
   const res = await fetch(`${target}/run`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Agent-Secret': env.AGENT_SECRET },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Agent-Secret': env.AGENT_SECRET,
+      // 请求体之前就失败(404/401/400)时 agent 也要知道用哪种语言回话
+      'X-Forge-Lang': body.lang === 'en' ? 'en' : 'zh',
+    },
     body: JSON.stringify(body),
     ...(timeoutMs > 0 ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   })
@@ -102,9 +114,9 @@ export async function dispatchAgent(
     } catch {
       message = text.slice(0, 200)
     }
-    throw new Error(message || `Agent 执行失败(${res.status}),请重试(未扣除积分)`)
+    throw new Error(message || srv(lang, 'agent.failed', { status: res.status }))
   }
   const data = JSON.parse(text) as AgentRunResult
-  if (!data?.src || !data.dist || !data.manifest) throw new Error('Agent 未返回有效产物,请重试(未扣除积分)')
+  if (!data?.src || !data.dist || !data.manifest) throw new Error(srv(lang, 'agent.noArtifact'))
   return data
 }
