@@ -18,6 +18,7 @@ import { parseModelConfigInput, type ModelConfigRow } from '../lib/modelConfig'
 import { hasPrice } from '../lib/pricing'
 import { buildDashboard } from '../lib/dashboard'
 import { normalizeShowcaseTags, showcaseTagsText } from '../lib/showcase'
+import { grantAdminCredits } from '../lib/credits'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -519,6 +520,18 @@ app.post('/projects/:id/featured', requireAdmin, async (c) => {
   return c.json({ ok: true, featured, featured_tags: tags })
 })
 
+/** 后台人工加积分:单次上限与批量人数上限(防止误输入把余额写成天文数字 / 一次打爆 D1 语句配额) */
+const MAX_ADMIN_GRANT = 100_000
+const MAX_ADMIN_GRANT_USERS = 100
+
+/** 校验「加积分」请求体;note 可选,超长截断而不是报错 */
+function parseAdminGrant(body: { amount?: unknown; note?: unknown }): { amount: number; note: string } | { error: string } {
+  const amount = Number(body.amount)
+  if (!Number.isInteger(amount) || amount <= 0) return { error: '积分数必须是正整数' }
+  if (amount > MAX_ADMIN_GRANT) return { error: `单次最多加 ${MAX_ADMIN_GRANT} 积分` }
+  return { amount, note: typeof body.note === 'string' ? body.note.trim().slice(0, 200) : '' }
+}
+
 /** 用户使用情况(跨用户列表):每行一个注册用户 + 其用量聚合,支持邮箱搜索与分页 */
 app.get('/users', async (c) => {
   const q = (c.req.query('q') ?? '').trim()
@@ -553,7 +566,7 @@ app.get('/users/:id', async (c) => {
     .first()
   if (!user) return c.json({ error: '用户不存在' }, 404)
 
-  const [projectsRes, jobsRes] = await Promise.all([
+  const [projectsRes, jobsRes, ledgerRes] = await Promise.all([
     c.env.DB
       .prepare(
         `SELECT p.id, p.slug, p.name, p.status, p.current_version, p.published_version, p.created_at, p.updated_at,
@@ -574,6 +587,14 @@ app.get('/users/:id', async (c) => {
       )
       .bind(id)
       .all(),
+    // 积分流水:后台加积分后运营要能直接看到扣/加记录(最近 30 条,同秒按 rowid 倒序)
+    c.env.DB
+      .prepare(
+        `SELECT id, delta, reason, ref_type, ref_id, balance_after, note, created_at
+         FROM credit_ledger WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 30`
+      )
+      .bind(id)
+      .all(),
   ])
 
   // 数据行数与草稿需逐项目读(前者读 Durable Object,后者读 versions),仅在该用户的项目集上计算
@@ -590,7 +611,63 @@ app.get('/users/:id', async (c) => {
     })
   )
 
-  return c.json({ user, projects, jobs: jobsRes.results })
+  return c.json({ user, projects, jobs: jobsRes.results, credits_log: ledgerRes.results })
+})
+
+/**
+ * 给单个用户加积分。审计流水走 credit_ledger(reason = admin_grant),与充值 / 注册赠送同一本账。
+ * 只加不减:扣分属于风控动作,不在这里顺手做,避免一个接口既能加又能扣。
+ */
+app.post('/users/:id/credits', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req
+    .json<{ amount?: unknown; note?: unknown }>()
+    .catch(() => ({}) as { amount?: unknown; note?: unknown })
+  const parsed = parseAdminGrant(body)
+  if ('error' in parsed) return c.json({ error: parsed.error }, 400)
+
+  const [grant] = await grantAdminCredits(c.env.DB, [id], parsed.amount, parsed.note || '后台加积分')
+  if (!grant) return c.json({ error: '用户不存在' }, 404)
+  return c.json({ ok: true, granted: parsed.amount, credits: grant.credits })
+})
+
+/**
+ * 批量给多个用户加**同一额度**的积分(后台用户列表勾选后调用)。
+ * 先确认所有 id 都存在再写,避免部分成功让运营回头猜谁没加上;重复 id 自动去重。
+ */
+app.post('/users/credits', async (c) => {
+  const body = await c.req
+    .json<{ userIds?: unknown; amount?: unknown; note?: unknown }>()
+    .catch(() => ({}) as { userIds?: unknown; amount?: unknown; note?: unknown })
+  const parsed = parseAdminGrant(body)
+  if ('error' in parsed) return c.json({ error: parsed.error }, 400)
+
+  const rawIds = Array.isArray(body.userIds) ? body.userIds : []
+  const userIds = [...new Set(rawIds.filter((v): v is string => typeof v === 'string' && v.length > 0))]
+  if (userIds.length === 0) return c.json({ error: '请选择用户' }, 400)
+  if (userIds.length > MAX_ADMIN_GRANT_USERS) {
+    return c.json({ error: `单次最多给 ${MAX_ADMIN_GRANT_USERS} 个用户加积分` }, 400)
+  }
+
+  const placeholders = userIds.map(() => '?').join(',')
+  const { results } = await c.env.DB
+    .prepare(`SELECT id FROM users WHERE id IN (${placeholders})`)
+    .bind(...userIds)
+    .all<{ id: string }>()
+  const found = new Set(results.map((r) => r.id))
+  const missing = userIds.filter((id) => !found.has(id))
+  if (missing.length > 0) {
+    const shown = missing.slice(0, 5).join(', ')
+    return c.json({ error: `部分用户不存在:${shown}${missing.length > 5 ? ' 等' : ''}`, missing }, 400)
+  }
+
+  const grants = await grantAdminCredits(c.env.DB, userIds, parsed.amount, parsed.note || '后台加积分')
+  return c.json({
+    ok: true,
+    granted: parsed.amount,
+    updated: grants.length,
+    users: grants.map((g) => ({ id: g.userId, credits: g.credits })),
+  })
 })
 
 /** 单个产物详情:项目 + 属主 + 版本元信息 + 草稿 + 对话 + 任务(含 agent 日志尾部)+ 站点数据计数 */
