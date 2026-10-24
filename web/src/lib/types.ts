@@ -376,11 +376,26 @@ export interface AdminProjectDetail {
   collections: SiteCollection[]
 }
 
-/** 用户详情:用量聚合 + 该用户的项目 + 最近任务时间线 */
+/** 单条积分流水(credit_ledger 的只读投影;reason 见服务端 src/lib/credits.ts) */
+export interface AdminCreditLog {
+  id: string
+  /** 正数为加、负数为扣 */
+  delta: number
+  reason: string
+  ref_type: string
+  ref_id: string
+  balance_after: number
+  note: string
+  created_at: string
+}
+
+/** 用户详情:用量聚合 + 该用户的项目 + 最近任务时间线 + 积分流水 */
 export interface AdminUserDetail {
   user: AdminUser
   projects: AdminUserProject[]
   jobs: AdminJob[]
+  /** 最近 30 条积分流水(后台加积分后用于核对) */
+  credits_log: AdminCreditLog[]
 }
 
 // ─────────────────────────── 计费(见 docs/FORGE2.md §20)───────────────────────────

@@ -5,12 +5,27 @@ import { api } from '../lib/api'
 import { formatBytes, formatTime } from '../lib/format'
 import type { AdminUserDetail } from '../lib/types'
 
-/** 单个用户详情:用量聚合 + 该用户的项目 + 最近任务时间线(全量只读) */
+/** 积分流水类型文案(与服务端 credit_ledger.reason 对应,后台固定中文) */
+const CREDIT_REASON_LABELS: Record<string, string> = {
+  signup: '注册赠送',
+  job_hold: '任务冻结',
+  job_release: '任务退还',
+  purchase: '充值',
+  refund: '退款',
+  admin_grant: '后台加积分',
+  expire: '过期',
+}
+
+/** 单个用户详情:用量聚合 + 该用户的项目 + 最近任务时间线 + 积分流水,可人工加积分 */
 export default function AdminUser() {
   const { id = '' } = useParams()
   const nav = useNavigate()
   const [detail, setDetail] = useState<AdminUserDetail | null>(null)
   const [error, setError] = useState('')
+  const [grantAmount, setGrantAmount] = useState('')
+  const [grantNote, setGrantNote] = useState('')
+  const [granting, setGranting] = useState(false)
+  const [notice, setNotice] = useState('')
 
   const load = useCallback(async () => {
     setError('')
@@ -24,6 +39,34 @@ export default function AdminUser() {
   useEffect(() => {
     void load()
   }, [load])
+
+  const grant = async () => {
+    if (granting) return
+    const amount = Math.floor(Number(grantAmount))
+    if (!Number.isInteger(amount) || amount <= 0) {
+      setNotice('')
+      setError('积分数必须是正整数')
+      return
+    }
+    if (!window.confirm(`给 ${detail?.user.email ?? '该用户'} 加 ${amount} 积分?`)) return
+
+    setGranting(true)
+    setError('')
+    setNotice('')
+    try {
+      const data = await api<{ granted: number; credits: number }>(`/api/admin/users/${id}/credits`, {
+        method: 'POST',
+        body: { amount, note: grantNote.trim() },
+      })
+      setNotice(`已加 ${data.granted} 积分,当前余额 ${data.credits}`)
+      setGrantNote('')
+      await load()
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setGranting(false)
+    }
+  }
 
   const user = detail?.user
   const usage: [string, string][] = user
@@ -74,6 +117,70 @@ export default function AdminUser() {
                   </div>
                 ))}
               </div>
+
+              {/* 人工加积分:写入 credit_ledger(admin_grant),下方流水可直接核对 */}
+              <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-gray-800 pt-4">
+                <span className="text-sm font-medium text-gray-300">加积分</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={grantAmount}
+                  onChange={(e) => setGrantAmount(e.target.value)}
+                  placeholder="积分数量"
+                  className="w-28 rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-sm outline-none focus:border-emerald-500"
+                />
+                <input
+                  value={grantNote}
+                  onChange={(e) => setGrantNote(e.target.value)}
+                  placeholder="备注（可选）"
+                  maxLength={200}
+                  className="w-full rounded-xl border border-gray-700 bg-gray-950 px-3 py-2 text-sm outline-none focus:border-emerald-500 sm:w-56"
+                />
+                <button
+                  onClick={() => void grant()}
+                  disabled={granting}
+                  className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {granting ? '处理中…' : '加积分'}
+                </button>
+                {notice && <span className="text-xs text-emerald-400">{notice}</span>}
+              </div>
+            </div>
+
+            {/* 积分流水 */}
+            <div className="mb-5">
+              <h2 className="mb-2 text-sm font-medium text-gray-300">积分流水（最近 {detail.credits_log?.length ?? 0} 条）</h2>
+              {(detail.credits_log?.length ?? 0) === 0 ? (
+                <div className="rounded-2xl border border-dashed border-gray-800 py-10 text-center text-sm text-gray-500">该用户暂无积分流水</div>
+              ) : (
+                <div className="overflow-x-auto rounded-2xl border border-gray-800">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-gray-900 text-xs text-gray-500">
+                      <tr>
+                        <th className="px-4 py-2.5 font-medium">时间</th>
+                        <th className="px-4 py-2.5 font-medium">类型</th>
+                        <th className="px-4 py-2.5 font-medium">变动</th>
+                        <th className="px-4 py-2.5 font-medium">余额</th>
+                        <th className="px-4 py-2.5 font-medium">备注</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-800">
+                      {detail.credits_log.map((e) => (
+                        <tr key={e.id} className="bg-gray-950">
+                          <td className="px-4 py-2.5 text-xs text-gray-600">{formatTime(e.created_at)}</td>
+                          <td className="px-4 py-2.5 text-gray-300">{CREDIT_REASON_LABELS[e.reason] ?? e.reason}</td>
+                          <td className={`px-4 py-2.5 font-medium ${e.delta > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {e.delta > 0 ? `+${e.delta}` : e.delta}
+                          </td>
+                          <td className="px-4 py-2.5 text-gray-300">{e.balance_after}</td>
+                          <td className="px-4 py-2.5 text-xs text-gray-500">{e.note || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
             {/* 项目 */}

@@ -151,3 +151,50 @@ export async function releaseJobCredits(db: D1Database, jobId: string, note = ''
   })
   return amount
 }
+
+/** 后台人工加积分的结果:用户 id + 加完后的余额 */
+export interface AdminGrant {
+  userId: string
+  credits: number
+}
+
+/**
+ * 后台给一个或多个用户加积分(同一额度),每个用户一条 `admin_grant` 流水。
+ *
+ * 余额仍然只走 `UPDATE users SET credits = credits + ?`,`UPDATE ... RETURNING` 拿到新余额后再批量写账本,
+ * 与其它积分操作一样是「余额权威、流水尽力而为」。
+ * 调用方负责校验 amount / 用户是否存在与去重 —— 这里只做写入,不存在(或已删除)的 id 直接跳过。
+ */
+export async function grantAdminCredits(
+  db: D1Database,
+  userIds: string[],
+  amount: number,
+  note = '后台加积分'
+): Promise<AdminGrant[]> {
+  if (!Number.isInteger(amount) || amount <= 0 || userIds.length === 0) return []
+
+  const results = await db.batch(
+    userIds.map((userId) =>
+      db.prepare('UPDATE users SET credits = credits + ? WHERE id = ? RETURNING credits').bind(amount, userId)
+    )
+  )
+
+  const grants: AdminGrant[] = []
+  results.forEach((result, index) => {
+    const row = (result.results as { credits?: number }[] | undefined)?.[0]
+    if (typeof row?.credits === 'number') grants.push({ userId: userIds[index], credits: row.credits })
+  })
+  if (grants.length === 0) return []
+
+  await db.batch(
+    grants.map((g) =>
+      db
+        .prepare(
+          `INSERT INTO credit_ledger (id, user_id, delta, reason, ref_type, ref_id, balance_after, note)
+           VALUES (?, ?, ?, 'admin_grant', '', '', ?, ?)`
+        )
+        .bind(crypto.randomUUID(), g.userId, amount, g.credits, note)
+    )
+  )
+  return grants
+}

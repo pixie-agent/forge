@@ -342,12 +342,12 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 跨用户查看全部产物的后台,与普通用户体系**完全隔离**:口令来自 `ADMIN_PASSWORD` secret,`POST /api/admin/login` 校验后下发由口令派生的 HttpOnly cookie(`lib/admin.ts`,改口令即全体失效,无需会话表)。
 
-- 页面:`/admin`(产物列表:属主、状态、版本/对话/数据计数、公开链接 + **草稿预览**,支持关键字搜索与分页,含全站统计);`/admin/projects/:id`(详情:草稿 + 全部版本源码 + iframe 预览 + 公开链接、对话记录、任务与 **agent 流式日志**尾部、站点数据);`/admin/users`(用户使用情况列表,按邮箱搜索、分页);`/admin/users/:id`(单个用户详情);`/admin/models`(模型配置与用量,见 §21)。「数据计数」= 该项目两个环境 SQLite 各表行数之和,实时统计(页大小上限 20 以控制子请求)。顶栏在「产物 / 用户」间切换,产物列表的属主邮箱、用户详情的项目行互链。
+- 页面:`/admin`(产物列表:属主、状态、版本/对话/数据计数、公开链接 + **草稿预览**,支持关键字搜索与分页,含全站统计);`/admin/projects/:id`(详情:草稿 + 全部版本源码 + iframe 预览 + 公开链接、对话记录、任务与 **agent 流式日志**尾部、站点数据);`/admin/users`(用户使用情况列表,按邮箱搜索、分页,可勾选用户**批量加积分**);`/admin/users/:id`(单个用户详情,可**加积分**并查看最近积分流水);`/admin/models`(模型配置与用量,见 §21)。「数据计数」= 该项目两个环境 SQLite 各表行数之和,实时统计(页大小上限 20 以控制子请求)。顶栏在「产物 / 用户」间切换,产物列表的属主邮箱、用户详情的项目行互链。
 - **草稿预览**:「草稿」是 `version_no = 0` 的工作副本,不进正式版本序列,但正是用户当下看到的样子。列表/详情/用户详情都会给它单独签发预览令牌(`draft.preview_token`),详情页默认就停在草稿上,列表页可一键 `↗` 打开。令牌是无状态 HMAC(绑定 `projectId + versionNo`),与 `/p/:token/` 的定位方式一致,所以后台预览不依赖用户 cookie;草稿在 `/p/` 下以 `env=draft` 提供数据接口,并带「测试环境 · 草稿预览」角标。管理侧只在**构建清单有产物**(`manifest.files` 非空)时才签发令牌,否则 `preview_token` 为 `null`,前端显示空状态而不是打开一个必然 404 的 iframe;`GET /projects/:id/versions/:no` 同样遵守这条(`no = 0` 即草稿,允许请求)。
-- 接口(除 login/logout/me 外全部 `requireAdmin` 只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`;`POST /api/admin/{login,logout,migrate-doc-data}`。数据行取自项目该环境的独立 SQLite 库(§15)。`stats` 除项目/用户/版本外,含任务总数、成功/失败数、近 7 天任务数与近 7 天活跃用户数。项目列表/用户详情每行附 `draft` 字段:产物文件数直接用 SQL 的 `json_array_length(json_extract(manifest_json,'$.files'))` 算(带 `json_valid` 兜底),不把整棵清单拉进 Worker。
+- 接口(除 login/logout/me 外全部 `requireAdmin`;除模型配置与人工加积分外只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`;`POST /api/admin/{login,logout,migrate-doc-data}`;人工加积分 `POST /api/admin/users/:id/credits`(单用户)与 `POST /api/admin/users/credits`(批量,同一额度,单次 ≤100 人、额度为正整数且 ≤100000,全部用户存在才写入)。加积分只写 `users.credits` + 一条 `credit_ledger`(`reason = admin_grant`),不做扣分;`GET /api/admin/users/:id` 额外返回最近 30 条 `credits_log`。数据行取自项目该环境的独立 SQLite 库(§15)。`stats` 除项目/用户/版本外,含任务总数、成功/失败数、近 7 天任务数与近 7 天活跃用户数。项目列表/用户详情每行附 `draft` 字段:产物文件数直接用 SQL 的 `json_array_length(json_extract(manifest_json,'$.files'))` 算(带 `json_valid` 兜底),不把整棵清单拉进 Worker。
 - **用户使用情况**(`/admin/users`、`/admin/users/:id`):每个注册用户一行,聚合「核心用量」(项目数、正式版本数、对话消息数、任务数(生成/对话、成功/失败))、「积分」(余额 credits;已消耗 ≈ 成功任务数,每次成功 commit 扣 1)、「活跃度」(注册时间、最近活跃 = 最后一次任务时间、近 7/30 天任务数)、「产物体量」(构建产物总字节 = 各正式版本 `bytes` 之和;数据行数按项目读两个环境的独立 SQLite 求和,仅在用户详情页按该用户的项目集计算以控制子请求)。聚合走 `users` 上的关联子查询,任务量以 `jobs` 表为准。
-- 接口(除 login/logout/me 外全部 `requireAdmin` 只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`;`POST /api/admin/{login,logout,migrate-doc-data}`。数据行取自项目该环境的独立 SQLite 库(§15)。`stats` 除项目/用户/版本外,含任务总数、成功/失败数、近 7 天任务数与近 7 天活跃用户数。
-- **模型配置与用量**(`/admin/models`):后台唯一可写区域,见 §21。`GET /api/admin/models` 返回配置列表 + 近 7 天按配置/模型聚合的用量;`POST /api/admin/models` 新增配置,`POST /api/admin/models/:id/enable|disable` 启用/停用。顶栏在「产物 / 用户 / 模型」间切换。
+- 接口(除 login/logout/me 外全部 `requireAdmin`;除模型配置与人工加积分外只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`;`POST /api/admin/{login,logout,migrate-doc-data}`;人工加积分 `POST /api/admin/users/:id/credits`(单用户)与 `POST /api/admin/users/credits`(批量)。数据行取自项目该环境的独立 SQLite 库(§15)。`stats` 除项目/用户/版本外,含任务总数、成功/失败数、近 7 天任务数与近 7 天活跃用户数。
+- **模型配置与用量**(`/admin/models`):可写区域之一(另一个是人工加积分),见 §21。`GET /api/admin/models` 返回配置列表 + 近 7 天按配置/模型聚合的用量;`POST /api/admin/models` 新增配置,`POST /api/admin/models/:id/enable|disable` 启用/停用。顶栏在「产物 / 用户 / 模型」间切换。
 - 配置:`npx wrangler secret put ADMIN_PASSWORD`(未设置则后台整体不可用)。
 
 ## 13. 产物形态与选型(多文件 / 全栈)
@@ -791,7 +791,7 @@ curl -s -X PUT "$BASE/blob" -d x                           # 405(列举只允许
 ### 20.1 口径
 
 - **单位是「积分」**(credit)。一次生成 = **1 积分**;`generate`(首次生成)与 `chat`(对话修改)同价。价格表就是 `src/lib/credits.ts` 的 `JOB_COST`,调价只改这一处,调用方无需改动。
-- **三个来源**:注册 / Google 首次登录赠送(`SIGNUP_CREDITS = 5`,即 5 次生成)、一次性充值包、按月订阅。赠送额度**显式写入** `users.credits`(见 §20.6),不依赖 `schema.sql` 的列默认值。
+- **四个来源**:注册 / Google 首次登录赠送(`SIGNUP_CREDITS = 5`,即 5 次生成)、一次性充值包、按月订阅、**后台人工加积分**(`src/lib/credits.ts` 的 `grantAdminCredits`;单用户 `POST /api/admin/users/:id/credits`、批量 `POST /api/admin/users/credits`,同一额度、单次 ≤100 人,额度为正整数且 ≤100000;只加不减,每个用户记一条 `credit_ledger.reason = admin_grant`)。赠送额度**显式写入** `users.credits`(见 §20.6),不依赖 `schema.sql` 的列默认值。
 - **失败不收费**:任务失败或用户点「停止」时,把发起时冻结的积分原额退还(前端文案、对话卡片口径都建立在这条承诺上)。
 - 为什么预付而不是按量月结:预付天然是**滥用闸门**(见 §20.2),也把现金流与坏账风险挡在平台之外。
 
