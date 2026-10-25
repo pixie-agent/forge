@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import CodeEditor from './CodeEditor'
 import DataPanel from './DataPanel'
 import RichText from './RichText'
@@ -75,6 +75,16 @@ export default function PreviewPane({
   const [showMore, setShowMore] = useState(false)
   const [copied, setCopied] = useState(false)
   const [copiedPreview, setCopiedPreview] = useState(false)
+  // 预览 iframe 的重载计数:草稿预览令牌按 project+version 签发,同一个草稿改完后令牌不变,
+  // iframe 的 src 也就没变,浏览器不会自己重新拉取最新产物 —— 靠这个计数强制重挂载。
+  const [reloadNonce, setReloadNonce] = useState(0)
+  const wasStreaming = useRef(streaming)
+  useEffect(() => {
+    // 生成/修改刚结束:自动刷新一次,把右侧预览换成刚落盘的最新产物
+    if (wasStreaming.current && !streaming && previewToken) setReloadNonce((n) => n + 1)
+    wasStreaming.current = streaming
+  }, [streaming, previewToken])
+  const refreshPreview = () => setReloadNonce((n) => n + 1)
   const published = project?.status === 'published'
   /** 线上正在服务的版本号(与「当前工作版本」currentVersion 相互独立) */
   const publishedVersion = project?.published_version ?? 0
@@ -197,6 +207,18 @@ export default function PreviewPane({
               </button>
             )
           })()}
+
+          {/* 手动刷新预览:生成完成后自动刷新一次,若页面仍需重载可点这里 */}
+          {tab === 'preview' && previewUrl && (
+            <button
+              onClick={refreshPreview}
+              title={t('preview.refreshTitle')}
+              aria-label={t('preview.refresh')}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-gray-700 text-sm leading-none text-gray-300 hover:border-indigo-500 hover:text-gray-100"
+            >
+              ⟳
+            </button>
+          )}
 
           {/* 桌面端:版本切换 / 设备预览 / 连接器 / 帮助 常驻 */}
           <div className="hidden items-center gap-2 md:flex">
@@ -429,6 +451,7 @@ export default function PreviewPane({
           <div className={`mx-auto h-full ${device === 'mobile' ? 'w-full max-w-[390px]' : 'w-full'}`}>
             {previewUrl ? (
               <iframe
+                key={`${previewUrl}:${reloadNonce}`}
                 title="preview"
                 src={previewUrl}
                 sandbox="allow-scripts allow-forms allow-popups"

@@ -116,6 +116,11 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
   const [attachError, setAttachError] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  // 输入法组词中(中文/日文等):回车用来确认候选词,不能顺手把半截内容发出去
+  const composingRef = useRef(false)
+  // 部分 Safari 在 compositionend 之后才派发那次回车,此时 isComposing 已是 false;
+  // 记下收尾时间,极短时间内到达的回车仍视为「确认候选词」而不是发送。
+  const compositionEndedAt = useRef(0)
   // 对话栏宽度(桌面端),拖右边缘调节;双击复位。持久化到 localStorage,刷新后保持
   const [width, setWidth] = useState(readStoredWidth)
   // 桌面端才把像素宽度写进内联样式;窄屏仍是整屏宽(由 w-full 决定)
@@ -496,12 +501,27 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
             value={input}
             readOnly={streaming && !onSteer}
             onChange={(e) => setInput(e.target.value)}
+            onCompositionStart={() => {
+              composingRef.current = true
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false
+              compositionEndedAt.current = Date.now()
+            }}
             onPaste={onPaste}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                void submit()
-              }
+              if (e.key !== 'Enter' || e.shiftKey) return
+              // 组词中的回车属于输入法(确认候选词),放行给浏览器,不触发发送。
+              // isComposing 覆盖 Chromium/Firefox,keyCode 229 兜底部分 Safari 的实现,
+              // composingRef / compositionEndedAt 兜住 compositionend 与 keydown 的先后差异。
+              if (
+                composingRef.current ||
+                e.nativeEvent.isComposing ||
+                e.keyCode === 229 ||
+                Date.now() - compositionEndedAt.current < 100
+              ) return
+              e.preventDefault()
+              void submit()
             }}
           />
           {streaming && (
