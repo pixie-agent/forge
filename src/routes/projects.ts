@@ -5,7 +5,6 @@ import { requireUser } from '../lib/auth'
 import { clearArtifacts, copyArtifacts, deleteProjectArtifacts, DRAFT_VERSION_NO, signPreviewToken } from '../lib/artifacts'
 import { BLOB_KEY_RE, blobKey, blobPrefix, deleteProjectAppData, KV_KEY_RE, kvKey, kvPrefix, type DataEnv } from '../lib/appdata'
 import { projectSchema, runProjectSql } from '../lib/projectDb'
-import { deleteProjectBindings } from '../lib/connectors/store'
 import { ACTIVE_STATUS_SQL } from '../lib/jobHelpers'
 import { logEvent } from '../lib/events'
 import { createZip } from '../lib/zip'
@@ -200,13 +199,25 @@ app.get('/:id/versions/:no/export', async (c) => {
 app.delete('/:id', async (c) => {
   const project = await ownedProject(c, c.req.param('id'))
   if (!project) return c.json({ error: '项目不存在' }, 404)
-  await Promise.all([deleteProjectArtifacts(c.env, project.id), deleteProjectAppData(c.env, project.id), deleteProjectBindings(c.env.DB, project.id)])
+  // 顺序很重要:
+  // 1) D1 默认开启外键(jobs/project_connectors/... 都 REFERENCES projects),子表必须先删,
+  //    否则 batch 里最后一句 DELETE FROM projects 会报 FOREIGN KEY constraint failed(2026-10-25 生产踩到)。
+  // 2) 先落 DB 再清 R2/KV/DO:反过来一旦 DB 失败,项目还在但产物和数据已经没了,留下一个打不开的空项目。
   await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM job_messages WHERE job_id IN (SELECT id FROM jobs WHERE project_id = ?)').bind(project.id),
+    c.env.DB.prepare('DELETE FROM jobs WHERE project_id = ?').bind(project.id),
     c.env.DB.prepare('DELETE FROM messages WHERE project_id = ?').bind(project.id),
     c.env.DB.prepare('DELETE FROM versions WHERE project_id = ?').bind(project.id),
     c.env.DB.prepare('DELETE FROM site_data WHERE project_id = ?').bind(project.id),
+    c.env.DB.prepare('DELETE FROM project_connectors WHERE project_id = ?').bind(project.id),
     c.env.DB.prepare('DELETE FROM projects WHERE id = ?').bind(project.id),
   ])
+  // 清理失败只记日志:项目行已删,再抛 500 会让用户以为没删掉而重复操作;残留对象是孤儿数据,可由后台清理。
+  try {
+    await Promise.all([deleteProjectArtifacts(c.env, project.id), deleteProjectAppData(c.env, project.id)])
+  } catch (err) {
+    console.error(`[projects] 删除项目 ${project.id} 的产物/数据失败:`, err)
+  }
   return c.json({ ok: true })
 })
 
