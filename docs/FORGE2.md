@@ -919,6 +919,7 @@ npm run db:migrate:billing:remote      # 生产
 | --- | --- |
 | `name` / `model_id` / `provider_id` | 后台展示名 / 上游模型 id / pi provider id |
 | `base_url` / `api_dialect` | 网关地址与方言(`openai-completions` / `anthropic-messages`) |
+| `api_key_env` | **密钥环境变量名**(执行体上 `--set-secrets` 绑定的变量,如 `LLM_API_KEY_MINIMAX` / `LLM_API_KEY_GLM`);表里只存变量名,不存密钥值 |
 | `thinking_level` / `reasoning` / `image_input` | 思考档位、是否推理模型、是否声明图片输入 |
 | `thinking_format` / `max_tokens` | pi 的 `compat.thinkingFormat`(空 = 按 baseUrl 自动推断)与 `Model.maxTokens`;思考预算从 `max_tokens` 里划,值太小会挤掉输出 |
 | `design_review` / `max_run_ms` / `polish_max_ms` | 复查轮开关与运行预算 |
@@ -927,7 +928,13 @@ npm run db:migrate:billing:remote      # 生产
 
 - **配置可原地编辑**:后台直接改已有行(模型/网关/预算/价格等),保存后对下一个任务生效。`job_usage` 在用量上报时已把成本换算结果落库,所以改价或改预算不会重算历史账;`jobs.model_config_id` 仍保留派发时的配置 id 用于归因。
 - **回落**:表为空、没有启用行、或查询失败(含未执行迁移)→ Worker 不向 agent 下发覆盖,agent 使用 Cloud Run env 默认模型。后台不是生成链路的单点。
-- **密钥边界**:表里没有 API key。agent 仍从 Cloud Run env 读 `LLM_API_KEY`,所以后台能切的是「同一网关 + 同一把 key 能访问的模型」;换供应商(新 base URL + 新 key)仍然要部署并写 secret。
+- **密钥边界(2026-10-25 修正)**:表里**只存变量名** `api_key_env`,密钥值仍只在 Cloud Run Secret 里。执行体可同时绑定多把 key(`LLM_API_KEY_MINIMAX` / `LLM_API_KEY_GLM` / `LLM_API_KEY_DEEPSEEK` …),后台按行选择用哪把 —— **切换供应商不再需要重部署**。变量名白名单 `/^LLM_API_KEY(?:_[A-Z0-9]+)*$/`,防止把 `AGENT_SECRET` 等非模型密钥发给上游。
+  - 踩过的坑:旧实现只有 `LLM_API_KEY` 一把 key,后台把 free 切到 GLM 后请求仍带 MiniMax 的 key → bigmodel 401;pi 把 provider 错误降级成「空轮次」,构建在未改动的脚手架上照常通过,任务仍标 `succeeded` 并交付旧模板(用户看到"秒回旧页面")。当天修了三层兜底:
+    1. `runner.ts` 接活前检查 `process.env[apiKeyEnv]` 是否存在,缺失直接失败;
+    2. `message_end` 的 `stopReason === 'error'` 在构建前判失败,不再静默降级;
+    3. 生成前后对比源码树,一个字节都没变 → 判 `error.emptyModelRun`(chat 不受此限)。
+  - bigmodel 的 Anthropic 端点:`https://open.bigmodel.cn/api/anthropic`,方言 `anthropic-messages`,`x-api-key` 认证(与 `/api/paas/v4` 的 OpenAI 兼容端点并存)。
+  - 新增供应商 = 建 Secret + 在 `agent:deploy:*` 的 `--set-secrets` 加一行绑定(一次性),之后后台随时切换。
 
 ### 21.2 链路
 
@@ -950,6 +957,9 @@ npm run db:migrate:model:staging      # v1:model_configs + usage 快照列
 npm run db:migrate:model2:staging     # v2:thinking_format + max_tokens
 npm run db:migrate:channel:staging    # jobs.channel
 npm run db:seed:channels:staging      # 写入 staging 的 vip / free 默认配置(幂等)
+npm run agent:deploy:staging          # 执行体绑多把 key(LLM_API_KEY_GLM 等)
+npm run agent:deploy:free:staging
+npm run db:migrate:api-key-env:staging # model_configs.api_key_env + 回填 + 修正 GLM 端点
 npm run typecheck && npm run build
 npm run deploy:staging
 # 验证:后台 /admin/models 看到两个通道各一条生效配置 → 分别发起任务 →

@@ -77,6 +77,17 @@ async function readIfExists(path: string): Promise<string | null> {
   }
 }
 
+/**
+ * 两版源码是否完全一致。用于识别「模型什么都没写就结束」——
+ * 线上事故:provider 401 被 pi 降级成空轮次,构建仍能通过未改动的脚手架,
+ * 于是用户看到"秒回旧页面"。没有代码改动就不该交付。
+ */
+function sourcesEqual(a: FileMap, b: FileMap): boolean {
+  const ak = Object.keys(a)
+  if (ak.length !== Object.keys(b).length) return false
+  return ak.every((k) => a[k] === b[k])
+}
+
 /** 递归拷贝模板(跳过 node_modules;node_modules 用符号链接复用,省时省空间) */
 async function copyTemplate(src: string, dest: string): Promise<void> {
   await mkdir(dest, { recursive: true })
@@ -338,6 +349,9 @@ export async function runJob(
   // 冷启动期间就被停止:连工作目录都不用建
   const uiLang: UiLang = req.lang === 'en' ? 'en' : 'zh'
   if (signal?.aborted) throw new CancelledError(uiLang)
+  // 凭证缺失必须在接活前就失败:pi 解析不到环境变量时会把变量名当字面量发出去,
+  // 上游 401 → pi 降级成空轮次(见 error.modelFailed / error.emptyModelRun 的兜底)。
+  if (!process.env[config.apiKeyEnv]) throw new Error(t(uiLang, 'error.apiKeyMissing', { env: config.apiKeyEnv }))
   // 产物语言:跟随需求正文的语言,识别不出才回落界面语言(见 lang.ts)
   const outLang = resolveOutputLang(req)
   const workspace = join(config.workspaceRoot, req.jobId)
@@ -366,6 +380,10 @@ export async function runJob(
 
   // 本轮连接器:凭证明文落到 .forge/connectors.json(不进源码树、不进产物,随容器销毁)
   await materializeConnectors(workspace, req.connectors)
+
+  // 生成前的源码快照:生成结束若一个字节都没变,说明模型空转(provider 401/空回复),
+  // 绝不能把未改动的脚手架当成"生成成功"交付。
+  const sourceBefore = req.type === 'generate' ? await collectSource(workspace) : null
 
   report({
     stage: req.type === 'chat' ? 'coding' : 'planning',
@@ -398,6 +416,12 @@ export async function runJob(
   let summaryAfterTool = ''
   /** 本轮是否调用过工具 */
   let usedTool = false
+  /**
+   * 最后一次 provider 错误。pi 的约定是:请求失败不抛异常,而是产出一条
+   * stopReason='error' 的 assistant 消息。必须在 prompt 结束后检查 —— 否则一次 401
+   * 会变成「空轮次 + 构建未改动的脚手架 + commit 成功」,用户看到的是"秒回旧页面"。
+   */
+  let providerError = ''
   const unsubscribe = session.subscribe((event) => {
     // 流式日志:把模型的思考与正文逐 token 追加,前端据此实时显示 agent 在「想什么、写什么」
     if (event.type === 'message_update') {
@@ -418,6 +442,14 @@ export async function runJob(
         }
         textBuf = ''
         log.append('\n')
+      }
+      return
+    }
+    if (event.type === 'message_end') {
+      // 只关心 assistant 终态:成功消息会清掉之前 auto-retry 留下的错误
+      const msg = event.message
+      if (msg.role === 'assistant') {
+        providerError = msg.stopReason === 'error' ? msg.errorMessage || 'provider error' : ''
       }
       return
     }
@@ -470,6 +502,12 @@ export async function runJob(
       uiLang,
     )
     throwIfCancelled()
+    // provider 失败(401/404/5xx)不会让 prompt 抛错,只会留下一轮空回复;
+    // 必须在构建前显式判失败,否则未改动的脚手架会被当成产物交付。
+    if (providerError) throw new Error(t(uiLang, 'error.modelFailed', { msg: providerError }))
+    if (sourceBefore && sourcesEqual(sourceBefore, await collectSource(workspace))) {
+      throw new Error(t(uiLang, 'error.emptyModelRun'))
+    }
     // 工具调用之后没有正文 → 模型没写交付说明(返回空,让 Worker 用平台自己的收尾文案兜底)
     deliverSummary = summaryAfterTool || (usedTool ? '' : summary.trim())
     // 交付说明的语言跑偏了(模型有时会用提示词的中文写收尾)→ 专门再问一次。

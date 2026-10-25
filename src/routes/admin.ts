@@ -288,14 +288,14 @@ app.post('/models', async (c) => {
   const insert = c.env.DB
     .prepare(
       `INSERT INTO model_configs (id, name, channel, provider_id, base_url, api_dialect, model_id, thinking_level,
-                                  thinking_format, max_tokens,
+                                  thinking_format, api_key_env, max_tokens,
                                   reasoning, image_input, design_review, max_run_ms, polish_max_ms, queue_concurrency,
                                   input_price, output_price, cache_read_price, cache_write_price, enabled)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id, v.name, v.channel, v.provider_id, v.base_url, v.api_dialect, v.model_id, v.thinking_level,
-      v.thinking_format, v.max_tokens,
+      v.thinking_format, v.api_key_env, v.max_tokens,
       v.reasoning, v.image_input, v.design_review, v.max_run_ms, v.polish_max_ms, v.queue_concurrency,
       v.input_price, v.output_price, v.cache_read_price, v.cache_write_price, v.enabled
     )
@@ -332,7 +332,7 @@ app.put('/models/:id', async (c) => {
     .prepare(
       `UPDATE model_configs SET
          name = ?, channel = ?, provider_id = ?, base_url = ?, api_dialect = ?, model_id = ?,
-         thinking_level = ?, thinking_format = ?, max_tokens = ?, reasoning = ?, image_input = ?,
+         thinking_level = ?, thinking_format = ?, api_key_env = ?, max_tokens = ?, reasoning = ?, image_input = ?,
          design_review = ?, max_run_ms = ?, polish_max_ms = ?, queue_concurrency = ?,
          input_price = ?, output_price = ?, cache_read_price = ?, cache_write_price = ?,
          enabled = ?, updated_at = datetime('now')
@@ -340,7 +340,7 @@ app.put('/models/:id', async (c) => {
     )
     .bind(
       v.name, v.channel, v.provider_id, v.base_url, v.api_dialect, v.model_id,
-      v.thinking_level, v.thinking_format, v.max_tokens, v.reasoning, v.image_input,
+      v.thinking_level, v.thinking_format, v.api_key_env, v.max_tokens, v.reasoning, v.image_input,
       v.design_review, v.max_run_ms, v.polish_max_ms, v.queue_concurrency,
       v.input_price, v.output_price, v.cache_read_price, v.cache_write_price,
       v.enabled, id

@@ -42,6 +42,9 @@ const DICT = {
     'error.incomplete': '参数不完整',
     'error.modelsLoad': 'models.json 加载失败:{msg}',
     'error.modelMissing': '模型未找到:{provider}/{model}',
+    'error.modelFailed': '模型调用失败:{msg}',
+    'error.emptyModelRun': '模型没有返回可用内容,也没有写入任何文件;请检查网关、凭证与 API 方言',
+    'error.apiKeyMissing': '执行体没有绑定凭证 {env};请在 Cloud Run 加 Secret,或把这条配置切回可用的凭证',
   },
   en: {
     'progress.plan': 'Planning the app',
@@ -70,6 +73,9 @@ const DICT = {
     'error.incomplete': 'Missing parameters',
     'error.modelsLoad': 'Failed to load models.json: {msg}',
     'error.modelMissing': 'Model not found: {provider}/{model}',
+    'error.modelFailed': 'Model call failed: {msg}',
+    'error.emptyModelRun': 'The model returned nothing usable and wrote no files; check the gateway, credential and API dialect',
+    'error.apiKeyMissing': 'The agent has no credential {env}; bind the Secret in Cloud Run or switch this config back to an available credential',
   },
 } as const
 

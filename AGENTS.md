@@ -23,7 +23,7 @@
 | R2 | `forge-v2-artifacts` | `forge-v2-artifacts-staging` |
 | KV | `f6b66c90…` | `67e46b44…` |
 | 内部密钥 | Secret `agent-secret` | Secret `agent-secret-staging` |
-| LLM 密钥 | Secret `llm-api-key`(DeepSeek,VIP 执行体);免费执行体另需 Secret `llm-api-key-minimax`(MiniMax) | VIP 执行体用 Secret `llm-api-key-staging`(GLM);免费执行体用 `llm-api-key-minimax-staging`(MiniMax,单独一份) |
+| LLM 密钥 | VIP 执行体:`llm-api-key`(DeepSeek);免费执行体:`llm-api-key-minimax`(MiniMax)+ `llm-api-key-free`(GLM)。**每个执行体一次绑多把 key**,后台 `model_configs.api_key_env` 按行选变量名(只存变量名,不存密钥值) | VIP 执行体:`llm-api-key-staging`(GLM)→ `LLM_API_KEY` + `LLM_API_KEY_GLM`;免费执行体:`llm-api-key-minimax-staging` → `LLM_API_KEY` + `LLM_API_KEY_MINIMAX`,另绑 `LLM_API_KEY_GLM=llm-api-key-staging` |
 | LLM 模型 | VIP `deepseek-flash`(Anthropic 方言);免费 `MiniMax-M3.1-Flash`(Anthropic 方言,`api.minimaxi.com/anthropic`) | VIP 仍用 `glm-5.3-flash`(OpenAI 兼容 + `zai`);免费 `MiniMax-M3.1-Flash`(Anthropic 方言) |
 | 用户上传图片给模型看 | **关闭**(`PI_MODEL_INPUT_IMAGE` 未设) | 开启(`PI_MODEL_INPUT_IMAGE=true`) |
 | 计费收款(MoR) | Creem **live 门店**:Secret `CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET`;`vars.CREEM_API_BASE=https://api.creem.io`;`vars.CREEM_PRODUCTS` 填 live 商品 id | Creem **测试门店**:两个 secret 加 `--env staging` 单独写,值用 test 模式;`CREEM_API_BASE=https://test-api.creem.io`;`CREEM_PRODUCTS` 填 test 商品 id |

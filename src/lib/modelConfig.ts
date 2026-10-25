@@ -6,8 +6,9 @@
  *    所以后台故障或忘记执行迁移不会让生成直接不可用。
  *  - 配置行可在后台原地编辑(不再要求「新增一行再启用」)。job_usage 在用量上报时
  *    已经把成本落库,所以改价/改预算不会重算历史;只影响之后派发的任务。
- *  - 密钥永远不在这张表里:agent 仍然从 Cloud Run env 读 LLM_API_KEY。
- *    因此后台能切的是「同一网关 + 同一把 key 能访问的模型」,换供应商仍需部署。
+ *  - 密钥值永远不在这张表里,只存**变量名**(api_key_env,如 LLM_API_KEY_GLM)。
+ *    执行体可以同时绑定多把 key(Cloud Run --set-secrets),后台按行选择用哪把;
+ *    新增供应商仍需给执行体加 Secret 绑定,但切换模型不再需要重部署。
  */
 
 import type { AgentModelOverride } from './agent'
@@ -49,6 +50,8 @@ export interface ModelConfigRow {
   model_id: string
   thinking_level: ThinkingLevel
   thinking_format: ThinkingFormat
+  /** 该配置使用哪个密钥环境变量(执行体绑定的 Secret 名),如 LLM_API_KEY_MINIMAX */
+  api_key_env: string
   /** pi Model.maxTokens;思考预算从这里划走,太小会把输出挤没 */
   max_tokens: number
   reasoning: number
@@ -123,6 +126,8 @@ export function modelOverrideOf(row: ModelConfigRow): AgentModelOverride {
     thinkingLevel: row.thinking_level,
     // 空串不下发,agent 侧继续用 env / pi 的自动推断
     thinkingFormat: row.thinking_format || undefined,
+    // 只下发变量名;密钥值始终在 Cloud Run Secret 里,不经过这张表
+    apiKeyEnv: row.api_key_env || undefined,
     maxTokens: row.max_tokens,
     reasoning: row.reasoning === 1,
     imageInput: row.image_input === 1,
@@ -142,6 +147,8 @@ export interface ModelConfigInput {
   model_id: string
   thinking_level: ThinkingLevel
   thinking_format: ThinkingFormat
+  /** 密钥环境变量名,必须匹配 /^LLM_API_KEY(_[A-Z0-9]+)*$/ */
+  api_key_env: string
   max_tokens: number
   reasoning: number
   image_input: number
@@ -193,6 +200,12 @@ export function parseModelConfigInput(raw: unknown): { value?: ModelConfigInput;
   if (!THINKING_LEVELS.includes(thinking)) return { error: '思考档位不合法' }
   const thinkingFormat = text(src.thinking_format, 40) as ThinkingFormat
   if (!THINKING_FORMATS.includes(thinkingFormat)) return { error: '思考方言不合法' }
+  // 只存变量名;白名单化到 LLM_API_KEY / LLM_API_KEY_XXX,
+  // 防止把 AGENT_SECRET 之类非模型密钥当成上游 key 发出去
+  const apiKeyEnv = text(src.api_key_env, 40) || 'LLM_API_KEY'
+  if (!/^LLM_API_KEY(?:_[A-Z0-9]+)*$/.test(apiKeyEnv)) {
+    return { error: '凭证变量名不合法(只允许 LLM_API_KEY 或 LLM_API_KEY_XXX)' }
+  }
   const designReview = text(src.design_review, 20) as DesignReview
   if (!DESIGN_REVIEWS.includes(designReview)) return { error: '复查轮配置不合法' }
 
@@ -214,6 +227,7 @@ export function parseModelConfigInput(raw: unknown): { value?: ModelConfigInput;
       model_id: modelId,
       thinking_level: thinking,
       thinking_format: thinkingFormat,
+      api_key_env: apiKeyEnv,
       // 1024 是 pi 给输出预留的最小值;上限取模型常见的 200k 上下文量级
       max_tokens: Math.round(num(src.max_tokens, 16_384, 1024, 200_000)),
       reasoning: boolInt(src.reasoning, 1),
