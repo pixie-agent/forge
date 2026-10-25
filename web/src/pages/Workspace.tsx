@@ -9,7 +9,9 @@ import PreviewPane from '../components/PreviewPane'
 import TopBar from '../components/TopBar'
 import { api, cancelJob, getActiveJob, startJob, steerJob, subscribeJob } from '../lib/api'
 import { attachmentMarker, type OutgoingAttachment } from '../lib/attachments'
+import { formatElapsed } from '../lib/format'
 import { useT } from '../lib/i18n'
+import { useElapsed } from '../lib/useElapsed'
 import type { ArtifactManifest, JobSnapshot, Message, Plan, Project, ProjectConnectorsResponse, ProjectDetail, ProjectDraft, ProjectVersionDetail, SiteDataEnv, VersionMeta } from '../lib/types'
 
 type FilePreview = { path: string; content: string }
@@ -45,6 +47,9 @@ export default function Workspace() {
   const [resumeIdea, setResumeIdea] = useState<string | null>(null)
   // 最近一次失败的任务(本次会话内失败,或刷新后从服务端还原):用于渲染"未完成卡片 + 重试"
   const [failedJob, setFailedJob] = useState<JobSnapshot | null>(null)
+  // 最近一次失败/停止且留有断点的任务:驱动「从断点继续」。停止任务的最终快照往往比终态晚一点到,
+  // 所以 settle 后会再拉一次 /job/active(见 settle)。
+  const [resumeJob, setResumeJob] = useState<JobSnapshot | null>(null)
   // 「停止」请求在途(禁用按钮,避免连点)
   const [stopping, setStopping] = useState(false)
   const started = useRef(false)
@@ -60,7 +65,8 @@ export default function Workspace() {
 
   const streaming = !!job && (job.status === 'pending' || job.status === 'running')
   const runningAction = job?.type ?? null
-  const elapsed = job?.elapsed ?? 0
+  // 计时器在前端自己走(每秒),服务端快照到达时只用来对表;结束后停在最终值
+  const elapsed = useElapsed(job?.elapsed ?? 0, streaming, job?.id)
 
   // 成功提示几秒后自动消失
   useEffect(() => {
@@ -165,6 +171,27 @@ export default function Workspace() {
     }
   }, [connectorChips, connectorOff, connectorOn])
 
+  /**
+   * 拉取「可断点继续」的任务快照。
+   * 失败任务在 fail 回调之前已经写过快照,可以立刻查;用户停止时 Worker 先置 cancelled,
+   * agent 的最后一次快照往往晚几秒才到,所以调用方会传一个延迟再查。
+   */
+  const loadResume = useCallback(
+    async (delayMs = 0) => {
+      if (!id) return null
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs))
+      try {
+        const { resume } = await getActiveJob(id)
+        setResumeJob(resume?.resumable ? resume : null)
+        return resume
+      } catch {
+        // 拉取失败不影响主流程:没有继续入口,用户仍可重试
+        return null
+      }
+    },
+    [id]
+  )
+
   /** 任务收尾:成功则刷新详情与积分,失败则展示错误(幂等:同一任务只结算一次) */
   const settled = useRef(new Set<string>())
   const settle = useCallback(
@@ -175,27 +202,37 @@ export default function Workspace() {
       setConnectorOff([])
       setConnectorOn([])
       if (finished.status === 'failed') {
-        // 失败但有产物:记下原想法,后续消息作为补充要求继续该任务;同时保留失败任务用于重试
+        // 失败但有产物:记下原想法,后续消息作为补充要求继续该任务;同时保留失败任务用于重试。
+        // 断点快照在 fail 回调之前已经写好,立刻查一次,失败卡片上就能给「从断点继续」。
         if (finished.idea) setResumeIdea(finished.idea)
         setFailedJob(finished)
         setError(finished.error ?? t('ws.generateFailed'))
+        void loadResume()
         return
       }
       if (finished.status === 'cancelled') {
-        // 用户主动停止:不是失败,不弹"未完成卡片"。清掉任务态的临时视图(半成品预览、过程中的
-        // 规划卡片与执行路径),否则会定格成"三步全打勾"的假成功;再拉一次详情补上服务端写的
-        // "已停止"消息。积分未扣,不用 refresh。
+        // 用户主动停止:不是失败,不弹红色未完成卡片。保留最后写入的文件预览,让用户看到停在哪;
+        // 清掉规划/执行路径,避免定格成"三步全打勾"的假成功。最后那次快照通常比 cancelled
+        // 晚几秒到,等一下再查,查到就在对话里给「已停止,可继续」卡片。
         setResumeIdea(null)
         setFailedJob(null)
         setError('')
         setJob(null)
         setPlan(null)
-        setFilesPreview(null)
         void reloadDetail()
+        // agent 每 5s 才看到 cancelled,再 abort + 上传最后一份快照,整个过程可能 6~10s;
+        // 分几次探,拿到断点就停(查不到就不再打扰)
+        void (async () => {
+          for (let i = 0; i < 4; i++) {
+            const r = await loadResume(3000)
+            if (r?.resumable) break
+          }
+        })()
         return
       }
       setResumeIdea(null)
       setFailedJob(null)
+      setResumeJob(null)
       setPlan((p) => (finished.type === 'generate' && finished.plan ? finished.plan : p))
       // 结果落定依赖这次拉取:瞬时失败退避重试,避免“积分已扣但界面显示失败”
       for (let attempt = 0; ; attempt++) {
@@ -210,7 +247,7 @@ export default function Workspace() {
       setFilesPreview(null)
       refresh()
     },
-    [reloadDetail, refresh, t]
+    [loadResume, reloadDetail, refresh, t]
   )
 
   /** 创建后台任务;服务端已落用户消息,前端本地补一条保证即时反馈 */
@@ -218,6 +255,7 @@ export default function Workspace() {
     async (action: 'generate' | 'chat', body: Record<string, unknown>, userText: string) => {
       setError('')
       setFailedJob(null)
+      setResumeJob(null)
       // 新任务开始:凭证卡片(含「已接入」完成态)收起来,它是单轮的一次性痕迹
       setAddingProvider(null)
       const localId = crypto.randomUUID()
@@ -255,6 +293,45 @@ export default function Workspace() {
     },
     [id]
   )
+
+  /**
+   * 从断点继续:把失败/停止任务的源码树快照作为新一轮 chat 的基线,agent 接着改而不是从头重写。
+   * 服务端会落一条「继续」用户消息并返回它的文案,这里用同一条文案补本地消息,避免两边不一致。
+   */
+  const resumeTask = useCallback(async () => {
+    if (!id || !resumeJob) return
+    const sourceJobId = resumeJob.id
+    setError('')
+    setStopping(false)
+    try {
+      const { jobId, message } = await startJob(`/api/projects/${id}/resume`, { jobId: sourceJobId })
+      setMessages((m) => [
+        ...m,
+        { id: crypto.randomUUID(), role: 'user', content: message ?? t('chat.resume'), created_at: '' },
+      ])
+      setResumeJob(null)
+      setFailedJob(null)
+      setResumeIdea(null)
+      setPlan(null)
+      setJob({
+        id: jobId,
+        type: 'chat',
+        status: 'pending',
+        stage: 'coding',
+        progress: null,
+        files_preview: null,
+        agent_log: null,
+        idea: null,
+        prompt: message ?? null,
+        plan: null,
+        error: null,
+        version: null,
+        elapsed: 0,
+      })
+    } catch (err) {
+      setError((err as Error).message)
+    }
+  }, [id, resumeJob, t])
 
   /** 订阅任务进度:SSE 推送、断线自动降级轮询都在 subscribeJob 内部处理;终态时结算 */
   useEffect(() => {
@@ -311,12 +388,17 @@ export default function Workspace() {
           if (active.files_preview) setFilesPreview(active.files_preview)
           return
         }
-        // 失败续聊恢复:上次任务失败但有产物,恢复卡片与半成品预览,后续消息将继续该任务
+        // 未完成任务恢复:失败 → 未完成卡片 + 重试;停止 → 「已停止」卡片。
+        // 有断点时两者都多一个「从断点继续」入口。
         if (resume) {
-          setResumeIdea(resume.idea)
-          setFailedJob(resume)
-          if (resume.error) setError(resume.error)
-          if (resume.plan) setPlan(resume.plan)
+          if (resume.resumable) setResumeJob(resume)
+          if (resume.status === 'failed') {
+            setResumeIdea(resume.idea)
+            setFailedJob(resume)
+            if (resume.error) setError(resume.error)
+          }
+          // 停止任务不恢复规划卡片(否则三步全打勾像成功);只保留最后写入的文件预览
+          if (resume.status === 'failed' && resume.plan) setPlan(resume.plan)
           if (resume.files_preview) setFilesPreview(resume.files_preview)
         }
         // 连接器 OAuth 回调回来时带的结果提示(见 routes/connections.ts 的 backToWorkspace)
@@ -552,11 +634,14 @@ export default function Workspace() {
           error={error}
           stage={job?.stage ?? failedJob?.stage ?? null}
           elapsed={elapsed}
-          agentLog={job?.agent_log ?? failedJob?.agent_log ?? ''}
+          progressText={stageText}
           jobType={job?.type ?? failedJob?.type ?? null}
           idlePlaceholder={idlePlaceholder}
           onSend={send}
           onRetry={failedJob && !streaming ? retry : undefined}
+          onResume={resumeJob && !streaming ? () => void resumeTask() : undefined}
+          resumeFiles={resumeJob?.checkpoint_files ?? null}
+          stoppedResumable={resumeJob?.status === 'cancelled'}
           onStop={streaming ? () => void stopTask() : undefined}
           stopping={stopping}
           connectorsBar={
@@ -607,8 +692,7 @@ export default function Workspace() {
           manifest={manifest}
           src={src}
           streaming={streaming}
-          progressText={stageText ? `${stageText} · ${t('chat.elapsed', { seconds: elapsed })}` : ''}
-          agentLog={job?.agent_log ?? ''}
+          progressText={stageText ? `${stageText} · ${formatElapsed(elapsed, t)}` : ''}
           filesPreview={filesPreview}
           project={project}
           versions={versions}

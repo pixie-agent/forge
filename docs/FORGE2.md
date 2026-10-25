@@ -58,21 +58,23 @@ Cloud Run 请求级计费(便宜、用完即缩)要求**请求在跑时 CPU 才�
 - Cloud Run 订阅 pi 的事件:
   - `agent_start` → `stage=planning`,`progress=正在规划方案`
   - 首次写 `plan.json` → 回填 `plan_json`(前端规划卡片)
-  - 写/改源文件 → `stage=coding`,`progress=正在编写 {path}`,并把该文件内容作为 `files_preview`(前端「代码」页随写随看)
+  - 写/改源文件 → `stage=coding`,`progress=正在编写 {path} · 已修改 {count} 个文件`,并把该文件内容作为 `files_preview`(前端「代码」页随写随看)
   - 结束前的 `vite build` → `stage=building`,`progress=正在构建应用产物`
-  - **设计复查轮**(仅 generate,见 §17.4):初稿构建通过后,同一会话再跑一轮「设计总监复查与打磨」→ `stage` **仍是 `coding`**、`progress=正在做设计总监复查与打磨`(再构建时回到 `building`/`正在重新构建应用产物`),并在 `agent_log` 追加 `💭 设计总监复查轮开始/结束` 一行。**不新增 stage**:`src/routes/internal.ts` 的 stage 白名单是 `planning|coding|building`,加新值只会被静默忽略,收益不匹配。
-  - `message_update`(thinking/正文的逐 token 增量)+ `tool_execution_start/end` → 追加进 **`agent_log`**(前端「Agent 实时输出」面板,像终端一样跟随)
+  - **设计复查轮**(仅 generate,见 §17.4):初稿构建通过后,同一会话再跑一轮「设计总监复查与打磨」→ `stage` **仍是 `coding`**、`progress=正在做设计总监复查与打磨`(再构建时回到 `building`/`正在重新构建应用产物`),并在 `agent_log` 追加一行里程碑。**不新增 stage**:`src/routes/internal.ts` 的 stage 白名单是 `planning|coding|building`,加新值只会被静默忽略,收益不匹配。
+  - `message_update`(thinking/正文的逐 token 增量)+ `tool_execution_start/end` → **只写 Cloud Run stdout**(5s 一批,运维用 `gcloud logging read` 排查);**不再进 D1**。D1 的 `agent_log` 只保留里程碑(复查轮开始/结束、交付语言重问等)与告警,前端也只展示「阶段 + 当前文件 + 已改动文件数」这几个关键节点 —— 曾经把逐 token 日志当消息总线写,实测产生 3.6 万次 `POST /log`、7.3 万行 D1 写入/天,用户根本不看。
 - 回调走 Worker 内部接口(`X-Agent-Secret` 校验),只允许字段级更新,不碰状态机:
   - `POST /internal/jobs/:id/progress`:进度 / 规划 / 当前文件预览 / 心跳
-  - `POST /internal/jobs/:id/log`:流式日志增量;**原子追加** `agent_log = substr(COALESCE(agent_log,'') || ?, -20000)` 保留尾部,免读改写;agent 侧按 ~800ms 串行 flush,终态前 `stop()` 补发剩余
+  - `POST /internal/jobs/:id/log`:里程碑日志增量;**原子追加** `agent_log = substr(COALESCE(agent_log,'') || ?, -20000)` 保留尾部,免读改写;agent 侧按 ~800ms 串行 flush,终态前 `stop()` 补发剩余。**不要在 flush 完成后立刻递归续发**,否则每个网络往返就写一次 D1(实测 ~11 次/秒)。
+  - `POST /internal/jobs/:id/checkpoint`:源码树断点快照(见下)
   - `GET /internal/jobs/:id/state`:只读 `{status, cancelled, messages}`,给 agent 的取消巡检 + 追加要求取件用(见 §5.2)
+- **断点快照 / 失败续跑**:agent 每 60s(源码树 SHA-256 有变化才发)以及异常收尾时上传整棵源码树;Worker 存 R2 `cp/<projectId>/<jobId>.json`,`jobs` 上只记 `checkpoint_key/checkpoint_files/checkpoint_bytes/checkpoint_at`,源码不进 D1。任务成功 commit 时删除本次断点(连同 payload `resumeOf` 指向的旧任务断点);失败/停止保留 7 天,由 cron 巡检清理。`POST /api/projects/:id/resume` 把快照读出来,作为新一轮 `chat` 任务的 `currentFiles` 基线派发 —— agent 在已写好的文件上继续,而不是拿模板脚手架从头重写。
 - 任务的**终态**只由 `commit` / `fail` 回调落定(幂等):成功才补 assistant 消息 + 扣积分;失败/判死不扣。回调带守卫(`WHERE status IN ('pending','running')`),迟到回调不复活已判死任务,但「判死后又收到 commit」的迟到成功仍可复活交付。
 - **手动停止(协作式取消)**:第 4 个终态 `cancelled`。Worker 无法反向杀掉 Cloud Run 的在途请求,所以分两段:
-  - **Worker 侧立即**:`POST /api/projects/:id/cancel`(用户鉴权)→ `cancelJob()` 把活动任务置 `cancelled`、清 `files_preview`、补一条 assistant 消息。`ACTIVE_STATUS_SQL` 不含 `cancelled`,**项目锁当场释放**(不必再等心跳超时,这是"停止"最实际的价值)。不扣积分、不写版本。
-  - **agent 侧尽力**:`GET /internal/jobs/:id/state` 只回 `{status, cancelled}`;agent 每 5s 轮一次(`startJobWatcher`,带 `X-Agent-Secret`,同一次巡检顺带取追加要求,见 §5.2),看到 `cancelled` 就 `AbortController.abort()` 中断当前 pi 轮次,`runJob` 各阶段后 `throwIfCancelled()`,并把本轮产物整个丢弃(`index.ts` 用它记的本地 `cancelledByUser` 标志判定,不报 `fail`——Worker 侧已是终态,报也是幂等空转)。
+  - **Worker 侧立即**:`POST /api/projects/:id/cancel`(用户鉴权)→ `cancelJob()` 把活动任务置 `cancelled`、补一条 assistant 消息。`ACTIVE_STATUS_SQL` 不含 `cancelled`,**项目锁当场释放**(不必再等心跳超时,这是"停止"最实际的价值)。不扣积分、不写版本。
+  - **agent 侧尽力**:`GET /internal/jobs/:id/state` 只回 `{status, cancelled}`;agent 每 5s 轮一次(`startJobWatcher`,带 `X-Agent-Secret`,同一次巡检顺带取追加要求,见 §5.2),看到 `cancelled` 就 `AbortController.abort()` 中断当前 pi 轮次,`runJob` 各阶段后 `throwIfCancelled()`。**本轮产物不进草稿,但会在异常收尾时强制写一次断点快照** —— 用户可点「从断点继续」接着做,不再整个丢弃。
   - 竞态:先取消则迟到的 commit 被守卫拦成 `already-settled`(不会复活成成功);cancel 请求赶上 commit 已过守卫的瞬间,可能草稿已更新但任务显示 cancelled——极小窗口,产物仍是完整可用的,不做处理。
-  - 前端:任务进行中把「发送」换成「■ 停止」(`ChatPanel`);服务端落定后由 SSE 推 `cancelled`,`Workspace.settle` 清掉任务态视图(半成品预览 / 规划卡 / 执行路径),避免定格成"三步全打勾"的假成功。
-  - 响应延迟:用户可见的"已停止"是即时的;Cloud Run 侧真正收手最多晚 5s(巡检间隔)。
+  - 前端:任务进行中把「发送」换成「■ 停止」(`ChatPanel`);服务端落定后由 SSE 推 `cancelled`,`Workspace.settle` 清掉规划卡/执行路径(避免定格成"三步全打勾"的假成功),**保留最后写入的文件预览**;随后拉一次 `/job/active`,有断点就在对话里给「已停止,可从断点继续」卡片。
+  - 响应延迟:用户可见的"已停止"是即时的;Cloud Run 侧真正收手与最后一份快照最多晚 5s(巡检间隔),所以前端查断点时等 3s。
 - 前端 `subscribeJob` 走 SSE(`/api/jobs/:id/events`),指纹含 `files_preview/agent_log` 的长度变化 → 每次追加都会推送一份最新快照。
 
 ## 5. Agent 形态(pi coding agent)
@@ -105,7 +107,7 @@ Cloud Run 请求级计费(便宜、用完即缩)要求**请求在跑时 CPU 才�
 - **不落库**:附件字节不走 D1(单条 4MB 会撑爆行/语句上限),也不进 `jobs.payload`。用户消息文本末尾追加一行 `📎 附件 N 个:…` 作为持久痕迹,真实字节只活在这一条消息的 dispatch 里。**推论:失败后「一键重试」只重发文本,附件需要重传。**
 - **agent 侧两种用法**:图片「落盘 + 内联」双份——内联(`session.prompt(text, { images })`,pi 的 `ImageContent`)保证模型第一眼就看见;同时写入工作目录 `.attachments/1-<原名>`,需要时还能自己 `read`。文本附件只落盘,由提示词里的清单引导模型 `read`。
 - `.attachments/` 进了 `runner.ts` 的 `SKIP_DIRS` → 不进 `collectSource` 的源码树,也不进构建产物、不会被 `restoreFromMap` 误删。
-- **图片输入按环境开关**:只有 `PI_MODEL_INPUT_IMAGE=true` 时 `models.json` 才声明 `input: ['text','image']`,图片才内联给模型(否则模型看不见画面,提示词会如实说明)。这是因为**上游网关方言不一定认 image 块**——声明了却发不出去会直接 400。staging(GLM,OpenAI 兼容)已开;生产(DeepSeek Anthropic 方言)**默认关**,要开需先实测该端点接受 image 块。
+- **图片输入按环境开关 + 后台行**:`models.json` 声明 `input: ['text','image']` 需要后台 `model_configs.image_input=1`(逐任务下发),Cloud Run 的 `PI_MODEL_INPUT_IMAGE=true` 只是回落。上游网关方言不一定认 image 块——声明了却发不出去会直接 400,所以新供应商要先实测。staging(GLM,OpenAI 兼容)已开;生产 DeepSeek / GLM 的 Anthropic 端点已在 2026-10-25 实测接受 image 块,后台生产行 `image_input=1` 生效(Cloud Run env 不设)。
 - 请求体上限:`agent/src/index.ts` 的 `MAX_BODY_BYTES` 从 2MB 提到 24MB(chat 源码树 + 4MB 附件的 base64 ≈ 5.4MB,留一倍余量);Cloud Run 单请求上限 32MB。
 
 ### 5.2 生成过程中追加要求(steering)
@@ -138,7 +140,7 @@ Cloud Run 请求级计费(便宜、用完即缩)要求**请求在跑时 CPU 才�
 ## 8. 新增/改动清单
 
 新增(Cloud Run 侧,`agent/`):
-- `index.ts`(HTTP:`POST /run`、`GET /health`)、`runner.ts`(pi 会话 + 事件→进度 + 平台自有文件还原 + 用户附件落盘/多模态输入 + 平台侧构建 + 设计复查轮回滚 + `AbortSignal` 协作式取消)、`session.ts`(模型/工具装配)、`prompt.ts`(system / `POLISH_PROMPT` / generate / chat)、`attachments.ts`(附件落盘命名与提示词清单,见 §5.1)、`callback.ts`(进度/心跳/流式日志/commit/fail + `startJobWatcher`:一次 5s 巡检同时做协作式取消与追加要求取件,见 §5.2)、`config.ts`;`template/`(预装依赖的 Vite+React 脚手架 + 设计系统,见 §17)、`Dockerfile`、`package.json`、`tsconfig.json`。
+- `index.ts`(HTTP:`POST /run`、`GET /health`)、`runner.ts`(pi 会话 + 事件→进度 + 平台自有文件还原 + 用户附件落盘/多模态输入 + 平台侧构建 + 设计复查轮回滚 + `AbortSignal` 协作式取消 + 周期断点快照)、`session.ts`(模型/工具装配)、`prompt.ts`(system / `POLISH_PROMPT` / generate / chat)、`attachments.ts`(附件落盘命名与提示词清单,见 §5.1)、`callback.ts`(进度/心跳/里程碑日志/断点/commit/fail + `startJobWatcher`:一次 5s 巡检同时做协作式取消与追加要求取件,见 §5.2)、`config.ts`;`template/`(预装依赖的 Vite+React 脚手架 + 设计系统,见 §17)、`Dockerfile`、`package.json`、`tsconfig.json`。
 
 改动(Cloudflare 侧):
 - `src/workflow.ts`:**已删除**(用 `waitUntil` 异步 dispatch + 回调替代持久编排)。
@@ -342,7 +344,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 跨用户查看全部产物的后台,与普通用户体系**完全隔离**:口令来自 `ADMIN_PASSWORD` secret,`POST /api/admin/login` 校验后下发由口令派生的 HttpOnly cookie(`lib/admin.ts`,改口令即全体失效,无需会话表)。
 
-- 页面:`/admin`(产物列表:属主、状态、版本/对话/数据计数、公开链接 + **草稿预览**,支持关键字搜索与分页,含全站统计);`/admin/projects/:id`(详情:草稿 + 全部版本源码 + iframe 预览 + 公开链接、对话记录、任务与 **agent 流式日志**尾部、站点数据);`/admin/users`(用户使用情况列表,按邮箱搜索、分页,可勾选用户**批量加积分**,可选邮件通知);`/admin/users/:id`(单个用户详情,可**加积分**(可选邮件通知)并查看最近积分流水);`/admin/models`(模型配置与用量,见 §21)。「数据计数」= 该项目两个环境 SQLite 各表行数之和,实时统计(页大小上限 20 以控制子请求)。顶栏在「产物 / 用户」间切换,产物列表的属主邮箱、用户详情的项目行互链。
+- 页面:`/admin`(产物列表:属主、状态、版本/对话/数据计数、公开链接 + **草稿预览**,支持关键字搜索与分页,含全站统计);`/admin/projects/:id`(详情:草稿 + 全部版本源码 + iframe 预览 + 公开链接、对话记录、任务与 **agent 里程碑日志**尾部、站点数据);`/admin/users`(用户使用情况列表,按邮箱搜索、分页,可勾选用户**批量加积分**,可选邮件通知);`/admin/users/:id`(单个用户详情,可**加积分**(可选邮件通知)并查看最近积分流水);`/admin/models`(模型配置与用量,见 §21)。「数据计数」= 该项目两个环境 SQLite 各表行数之和,实时统计(页大小上限 20 以控制子请求)。顶栏在「产物 / 用户」间切换,产物列表的属主邮箱、用户详情的项目行互链。
 - **草稿预览**:「草稿」是 `version_no = 0` 的工作副本,不进正式版本序列,但正是用户当下看到的样子。列表/详情/用户详情都会给它单独签发预览令牌(`draft.preview_token`),详情页默认就停在草稿上,列表页可一键 `↗` 打开。令牌是无状态 HMAC(绑定 `projectId + versionNo`),与 `/p/:token/` 的定位方式一致,所以后台预览不依赖用户 cookie;草稿在 `/p/` 下以 `env=draft` 提供数据接口,并带「测试环境 · 草稿预览」角标。管理侧只在**构建清单有产物**(`manifest.files` 非空)时才签发令牌,否则 `preview_token` 为 `null`,前端显示空状态而不是打开一个必然 404 的 iframe;`GET /projects/:id/versions/:no` 同样遵守这条(`no = 0` 即草稿,允许请求)。
 - 接口(除 login/logout/me 外全部 `requireAdmin`;除模型配置与人工加积分外只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`;`POST /api/admin/{login,logout,migrate-doc-data}`;人工加积分 `POST /api/admin/users/:id/credits`(单用户)与 `POST /api/admin/users/credits`(批量,同一额度,单次 ≤100 人、额度为正整数且 ≤100000,全部用户存在才写入)。加积分只写 `users.credits` + 一条 `credit_ledger`(`reason = admin_grant`),不做扣分;`GET /api/admin/users/:id` 额外返回最近 30 条 `credits_log`。请求带 `notify: true` 时额外给**邮箱已验证**的用户发中英双语到账邮件(Resend,`src/lib/email.ts`),单封失败或未验证只计入返回的 `notify` 统计,**不影响加积分本身**。数据行取自项目该环境的独立 SQLite 库(§15)。`stats` 除项目/用户/版本外,含任务总数、成功/失败数、近 7 天任务数与近 7 天活跃用户数。项目列表/用户详情每行附 `draft` 字段:产物文件数直接用 SQL 的 `json_array_length(json_extract(manifest_json,'$.files'))` 算(带 `json_valid` 兜底),不把整棵清单拉进 Worker。
 - **用户使用情况**(`/admin/users`、`/admin/users/:id`):每个注册用户一行,聚合「核心用量」(项目数、正式版本数、对话消息数、任务数(生成/对话、成功/失败))、「积分」(余额 credits;已消耗 ≈ 成功任务数,每次成功 commit 扣 1)、「活跃度」(注册时间、最近活跃 = 最后一次任务时间、近 7/30 天任务数)、「产物体量」(构建产物总字节 = 各正式版本 `bytes` 之和;数据行数按项目读两个环境的独立 SQLite 求和,仅在用户详情页按该用户的项目集计算以控制子请求)。聚合走 `users` 上的关联子查询,任务量以 `jobs` 表为准。
@@ -934,6 +936,12 @@ npm run db:migrate:billing:remote      # 生产
     2. `message_end` 的 `stopReason === 'error'` 在构建前判失败,不再静默降级;
     3. 生成前后对比源码树,一个字节都没变 → 判 `error.emptyModelRun`(chat 不受此限)。
   - bigmodel 的 Anthropic 端点:`https://open.bigmodel.cn/api/anthropic`,方言 `anthropic-messages`,`x-api-key` 认证(与 `/api/paas/v4` 的 OpenAI 兼容端点并存)。
+  - **2026-10-25 第二起线上事故(max_tokens 截断)**:生产免费通道切到 `glm-5.3-flash` + Anthropic 方言后,任务能正常鉴权、也读了脚手架(6~8 轮 tool 调用),但最后一轮思考把 16384 的 `max_tokens` 全部吃掉,`stop_reason=max_tokens`,模型还没调用 `write` 就结束;源码零改动 → 被第 3 层兜底判失败(前端提示「模型没有返回可用内容…」)。
+    - 不是凭证问题:日志里有真实用量(`in≈28k / out≈16.8k / cacheRead≈124k`),401 时用量为 0。
+    - bigmodel 的 Anthropic 端点不按 pi 下发的 `thinking.budget_tokens` 收口,所以单轮思考可能超过 16k;OpenAI 兼容 + `thinkingFormat=zai` 的行由 `reasoning_effort` 约束思考量,16384 足够。
+    - 修复:`schema.migrate-glm-max-tokens.sql` 把 Anthropic 方言的 GLM 行 `max_tokens` 调到 65536(pi 会再按思考预算加总并封顶 32000 → 实际请求 40192;本地同 prompt 实测可完整生成,775s/21 轮/33 次 tool 调用)。
+    - `runner.ts` 现在区分 `stopReason=length`:判 `error.modelTruncated`,明确提示「调大该配置的 max_tokens」,不再与凭证/方言问题混在一起。
+  - **env 与后台的优先级**:任务级 `model_id` / `base_url` / `api_dialect` / `thinking_level` / `reasoning` / `image_input` / `max_tokens` / `max_run_ms` / `polish_max_ms` / `queue_concurrency` 一律以 `model_configs` 下发的覆盖为准,Cloud Run env 只是回落;`api_key_env` 只选变量名,密钥值仍来自 Secret,后台改不了。`--timeout 3600s` 是硬上限,后台 `max_run_ms` 上限 3400s,env `AGENT_MAX_RUN_MS=1500s` 仅在配置行缺失时生效。
   - 新增供应商 = 建 Secret + 在 `agent:deploy:*` 的 `--set-secrets` 加一行绑定(一次性),之后后台随时切换。
 
 ### 21.2 链路
@@ -960,6 +968,7 @@ npm run db:seed:channels:staging      # 写入 staging 的 vip / free 默认配�
 npm run agent:deploy:staging          # 执行体绑多把 key(LLM_API_KEY_GLM 等)
 npm run agent:deploy:free:staging
 npm run db:migrate:api-key-env:staging # model_configs.api_key_env + 回填 + 修正 GLM 端点
+npm run db:migrate:glm-tokens:staging  # Anthropic 方言 GLM 行 max_tokens → 65536(思考截断)
 npm run typecheck && npm run build
 npm run deploy:staging
 # 验证:后台 /admin/models 看到两个通道各一条生效配置 → 分别发起任务 →
@@ -1015,9 +1024,9 @@ npm run deploy:staging
 `https://api.minimaxi.com/anthropic`):执行体改绑 Secret `llm-api-key-minimax`
 (staging 为 `llm-api-key-minimax-staging`),库侧跑 `db:migrate:free-minimax:*` 新增生效行并停用旧 GLM 行。
 MiniMax 的 Anthropic 端点实测支持流式、tool_use、thinking(`budget_tokens`)与 image 块;
-生产免费执行体仍不声明图片输入,staging 保持 `PI_MODEL_INPUT_IMAGE=true`。
-**密钥边界不变**:免费执行体必须有自己的 MiniMax key(`llm-api-key-minimax`),
-后台切不了密钥;换模型供应商(新 base URL + 新 key)必须「建 secret + 重新部署执行体 + 改配置行」三件事一起做,
+图片输入由后台行 `image_input` 决定(2026-10-25 起生产 GLM / DeepSeek 行也已开启并实测)。
+**密钥边界**:执行体一次绑定多把 key,后台用 `api_key_env` 选变量名即可切换已绑定的供应商;
+只有**从未绑定过的新供应商**才需要「建 secret + 补一行 `--set-secrets` + 重新部署执行体」,
 生产上线前要先建好 secret 并部署 `npm run agent:deploy:free:prod`。
 
 ---

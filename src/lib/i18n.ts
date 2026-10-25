@@ -41,7 +41,13 @@ const MESSAGES = {
     'commit.generate':
       '已完成「{name}」初稿并写入草稿。满意后点「生成新版本」保存为正式版本,再发布上线。',
     'commit.chat': '已按「{prompt}」更新草稿。满意后点「生成新版本」保存为正式版本。',
-    'cancel.message': '已停止本次任务(未扣除积分),中间结果未保留。修改要求后可重新发送。',
+    'cancel.message': '已停止本次任务(未扣除积分)。',
+    // ── 断点续跑(写进新一轮 chat 的用户消息 / 错误响应)──
+    'resume.message':
+      '从断点继续上一次未完成的任务。当前源码已经是上次中断时的状态(已写好的文件都在),请在此基础上继续完成,不要从头重写。',
+    'resume.notUnfinished': '该任务不是失败/停止状态,无需从断点继续',
+    'resume.notLatest': '该任务已不是项目最新进度,不能从它继续(避免覆盖后续生成的内容)',
+    'resume.noCheckpoint': '没有可用的断点快照(可能已过期或该任务还没写入过快照)',
     // ── 任务失败/取消(写进 jobs.error,前端原样展示)──
     'job.lost': '任务执行体失联,请重试',
     'job.timeout': '任务超时未完成,请重新发起',
@@ -86,8 +92,13 @@ const MESSAGES = {
     'commit.generate':
       'The first draft of “{name}” is ready and saved as a draft. When you are happy with it, click “Save version” to keep it as a version, then publish.',
     'commit.chat': 'Draft updated for “{prompt}”. When you are happy with it, click “Save version” to keep it as a version.',
-    'cancel.message':
-      'This run was stopped (no credits charged) and the intermediate results were discarded. Edit your request and send it again.',
+    'cancel.message': 'This run was stopped (no credits charged).',
+    // ── 断点续跑(写进新一轮 chat 的用户消息 / 错误响应)──
+    'resume.message':
+      'Continue the unfinished task from the checkpoint. The current source is exactly what was saved when the last run stopped (everything already written is still here) — build on it instead of starting over.',
+    'resume.notUnfinished': 'This task is not failed/stopped, so there is nothing to resume',
+    'resume.notLatest': 'This task is no longer the latest progress for the project, so it cannot be resumed (this avoids overwriting newer work)',
+    'resume.noCheckpoint': 'No checkpoint snapshot is available (it may have expired, or the task never wrote one)',
     // ── 任务失败/取消(写进 jobs.error,前端原样展示)──
     'job.lost': 'Lost contact with the execution service. Please try again.',
     'job.timeout': 'The task timed out. Please start it again.',

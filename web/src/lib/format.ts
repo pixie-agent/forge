@@ -1,5 +1,7 @@
 /** 时间与字节的展示格式化工具(统一按浏览器本地时区显示) */
 
+import type { DictKey } from './i18n'
+
 /**
  * 把库里的时间戳解析成 Date。
  * 库里存的是 SQLite `datetime('now')`(UTC、无时区标记,如 `2026-10-12 15:44:00`),
@@ -40,6 +42,20 @@ export function formatFullTime(iso: string | null | undefined): string {
 export function formatShortTime(iso: string | null | undefined): string {
   const x = parts(iso)
   return x ? `${x.mo}-${x.da} ${x.h}:${x.mi}` : ''
+}
+
+/**
+ * 秒数 → 人读耗时:不足 1 分钟按秒,不足 1 小时按「分 + 秒」,再往上按「小时 + 分」。
+ * 文案走词典(见 i18n),不同语言各写一条;用于生成过程的实时计时器。
+ */
+export function formatElapsed(
+  seconds: number,
+  t: (key: DictKey, vars?: Record<string, string | number>) => string
+): string {
+  const s = Math.max(0, Math.floor(seconds))
+  if (s < 60) return t('chat.elapsedSec', { s })
+  if (s < 3600) return t('chat.elapsedMin', { m: Math.floor(s / 60), s: s % 60 })
+  return t('chat.elapsedHour', { h: Math.floor(s / 3600), m: Math.floor((s % 3600) / 60) })
 }
 
 /** 字节数 → 人读文本(B / KB / MB),与 DataPanel 的口径一致 */

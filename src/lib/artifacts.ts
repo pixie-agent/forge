@@ -45,8 +45,8 @@ export async function putArtifacts(env: Env, projectId: string, versionNo: numbe
   return bytes
 }
 
-export async function deleteProjectArtifacts(env: Env, projectId: string): Promise<void> {
-  const prefix = projectArtifactPrefix(projectId)
+/** 按前缀清空 R2(逐页删,处理 list 分页) */
+async function deletePrefix(env: Env, prefix: string): Promise<void> {
   let cursor: string | undefined
   for (;;) {
     const listed = await env.ARTIFACTS.list({ prefix, cursor })
@@ -54,6 +54,12 @@ export async function deleteProjectArtifacts(env: Env, projectId: string): Promi
     if (!listed.truncated) break
     cursor = listed.cursor
   }
+}
+
+export async function deleteProjectArtifacts(env: Env, projectId: string): Promise<void> {
+  // p/:构建产物与正式版本;cp/:失败/停止任务的断点快照(见 src/lib/checkpoints.ts)
+  await deletePrefix(env, projectArtifactPrefix(projectId))
+  await deletePrefix(env, `cp/${projectId}/`)
 }
 
 /** 清空某版本的全部产物:草稿(version_no=0)每次覆盖前调用,避免上一轮删掉的文件残留在预览里 */

@@ -16,7 +16,8 @@ app.get('/:id', async (c) => {
 
 /**
  * 任务进度订阅(SSE)。任务执行体在别的隔离实例里跑,这里只是把 D1 里的状态变化推给浏览器:
- * - 状态有变化才推送(status/stage/plan/version/error),空闲期每 5s 发一次心跳(携带最新 elapsed,保证计时器在跑)
+ * - 状态有变化才推送(status/stage/plan/version/error),空闲期每 5s 发一次心跳(携带最新 elapsed,供前端对表;
+ *   秒数由前端自己每秒递增,见 web/src/lib/useElapsed.ts,心跳只负责纠正漂移)
  * - 到达终态后发送最终快照并主动关闭;连接断开不影响后台任务
  * 客户端 EventSource onerror 时自动降级为轮询(见 api.ts subscribeJob)
  */

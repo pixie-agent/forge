@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Markdown from './Markdown'
-import { collectChangedFiles, parseAgentLog, toolVerb, type AgentToolEvent } from '../lib/agentLog'
 import {
   ACCEPT_ATTR,
   SEND_LIMITS,
@@ -15,6 +14,7 @@ import {
   type OutgoingAttachment,
   type PendingAttachment,
 } from '../lib/attachments'
+import { formatElapsed } from '../lib/format'
 import { useT, type DictKey } from '../lib/i18n'
 import type { Message, Plan } from '../lib/types'
 
@@ -28,8 +28,8 @@ interface Props {
   /** 当前生成阶段(规划/编写/构建),驱动「执行路径」实时走到哪一步 */
   stage: StageKey | null
   elapsed: number
-  /** agent 的原始流式输出(thinking/正文/工具调用),解析成过程事件后友好展示 */
-  agentLog: string
+  /** 当前阶段的用户可读进度(如「正在编写 src/App.jsx · 已改动 3 个文件」),只展示关键节点 */
+  progressText?: string
   /** 本次任务类型:chat 跳过规划,展示「修改代码 → 构建产物」 */
   jobType: 'generate' | 'chat' | null
   /** 空闲时输入框的提示文案(默认描述想法);用于说明本次修改基于哪个版本 */
@@ -44,6 +44,12 @@ interface Props {
   onSteer?: (text: string, attachments?: OutgoingAttachment[]) => Promise<void>
   /** 失败后的一键重试(重发上一次任务的输入);无失败任务时不传 */
   onRetry?: () => void
+  /** 从断点继续(仅失败/停止的任务留有快照);不传则卡片上没有该入口 */
+  onResume?: () => void
+  /** 断点快照里的源码文件数(展示在「从断点继续」按钮旁) */
+  resumeFiles?: number | null
+  /** 上次任务被用户手动停止且留有断点:展示一张轻量「已停止,可继续」卡片 */
+  stoppedResumable?: boolean
   /** 停止当前任务(仅任务进行中传入);不传则发送按钮旁不出现停止入口 */
   onStop?: () => void
   /** 停止请求在途 */
@@ -103,13 +109,11 @@ function storeWidth(w: number): void {
   }
 }
 
-export default function ChatPanel({ messages, plan, streaming, error, stage, elapsed, agentLog, jobType, idlePlaceholder, mobileHidden, onSend, onSteer, onRetry, onStop, stopping, connectorsBar, credentialCard }: Props) {
+export default function ChatPanel({ messages, plan, streaming, error, stage, elapsed, progressText, jobType, idlePlaceholder, mobileHidden, onSend, onSteer, onRetry, onResume, resumeFiles, stoppedResumable, onStop, stopping, connectorsBar, credentialCard }: Props) {
   const t = useT()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [attachError, setAttachError] = useState('')
-  const [showProcess, setShowProcess] = useState(false)
-  const [showThinking, setShowThinking] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   // 对话栏宽度(桌面端),拖右边缘调节;双击复位。持久化到 localStorage,刷新后保持
@@ -153,27 +157,9 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
     storeWidth(DEFAULT_CHAT_WIDTH)
   }
 
-  // agent 原始日志 → 结构化过程事件(叙述 / 工具调用 / 思考),纯展示
-  const events = useMemo(() => parseAgentLog(agentLog), [agentLog])
-  const tools = useMemo(() => events.filter((e): e is AgentToolEvent => e.kind === 'tool'), [events])
-  const thinkings = useMemo(
-    () => events.filter((e): e is { kind: 'thinking'; text: string } => e.kind === 'thinking').map((e) => e.text),
-    [events],
-  )
-  const changedFiles = useMemo(() => collectChangedFiles(events), [events])
-  const lastSay = useMemo(() => {
-    for (let i = events.length - 1; i >= 0; i--) {
-      const e = events[i]
-      if (e.kind === 'say') return e.text
-    }
-    return ''
-  }, [events])
-  // 最近一步仍在思考(还没有产生工具调用/正文)→ 显示「思考中…」
-  const stillThinking = streaming && events.length > 0 && events[events.length - 1].kind === 'thinking'
-
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
-  }, [messages.length, plan, streaming, error, agentLog])
+  }, [messages.length, plan, streaming, error, progressText])
 
   /** 生成中追加走的限额更紧(要整行进 D1 投递队列);空闲发送用常规限额 */
   const limits: AttachmentLimits = streaming ? STEER_LIMITS : SEND_LIMITS
@@ -308,25 +294,14 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
         ))}
 
         {/* 执行/过程卡:分步进度 + agent 叙述 + 工具动作;进行中实时展示,结束后可折叠回看 */}
-        {(streaming || plan || events.length > 0) && (
+        {(streaming || plan) && (
           <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-indigo-200">
                 {streaming && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-indigo-400" />}
                 <span className="truncate">{plan ? t('chat.planningPrefix', { name: plan.name }) : streaming ? t('chat.processing') : t('chat.processTitle')}</span>
               </span>
-              {streaming ? (
-                <span className="shrink-0 text-xs text-gray-400">{t('chat.elapsed', { seconds: elapsed })}</span>
-              ) : (
-                events.length > 0 && (
-                  <button
-                    onClick={() => setShowProcess((v) => !v)}
-                    className="shrink-0 text-xs text-gray-400 hover:text-gray-200"
-                  >
-                    {showProcess ? t('chat.collapse') : t('chat.expand')}
-                  </button>
-                )
-              )}
+              {streaming && <span className="shrink-0 text-xs text-gray-400">{formatElapsed(elapsed, t)}</span>}
             </div>
             {plan?.tagline && <div className="mb-2 hidden text-xs text-gray-400 sm:block">{plan.tagline}</div>}
 
@@ -357,65 +332,12 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
               })}
             </ul>
 
-            {/* agent 过程:叙述气泡 + 工具动作行 + 已改动文件(进行中实时;结束后折叠) */}
-            {(streaming || showProcess) && (
-              <>
-                {lastSay && (
-                  <div className="mt-2.5 whitespace-pre-wrap break-words rounded-lg bg-gray-800/60 px-3 py-2 text-xs leading-relaxed text-gray-200">
-                    {lastSay}
-                  </div>
-                )}
-                {thinkings.length > 0 && (
-                  <div className="mt-2">
-                    <button
-                      onClick={() => setShowThinking((v) => !v)}
-                      className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300"
-                    >
-                      <span>💭</span>
-                      <span>{t('chat.thinking')}</span>
-                      <span>{showThinking ? '▾' : '▸'}</span>
-                      {stillThinking && (
-                        <span className="flex items-center gap-1 text-gray-600">
-                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-500" />{t('chat.thinkingNow')}
-                        </span>
-                      )}
-                    </button>
-                    {showThinking && (
-                      <div className="mt-1.5 max-h-40 space-y-1.5 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 text-xs leading-relaxed text-gray-500">
-                        {thinkings.slice(-3).map((text, i) => (
-                          <p key={i}>{text}</p>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-                {tools.length > 0 && (
-                  <ul className="mt-2 space-y-1.5 text-xs">
-                    {tools.slice(-6).map((ev, i) => (
-                      <li key={i} className="flex items-center gap-1.5 text-gray-400">
-                        {ev.status === 'running' ? (
-                          <span className="h-3 w-3 shrink-0 animate-spin rounded-full border border-indigo-400/70 border-t-transparent" />
-                        ) : (
-                          <span className={`shrink-0 ${ev.status === 'ok' ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {ev.status === 'ok' ? '✓' : '✗'}
-                          </span>
-                        )}
-                        <span className="truncate">
-                          {ev.status === 'running' ? t('chat.toolRunning') : ''}
-                          {toolVerb(ev.name)}
-                          {ev.arg ? <span className="hidden text-gray-500 sm:inline"> {ev.arg}</span> : null}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {changedFiles.length > 0 && (
-                  <div className="mt-2 border-t border-indigo-500/20 pt-1.5 text-xs text-gray-500">
-                    {t('chat.changedFiles', { count: changedFiles.length })}
-                    <span className="hidden text-gray-400 sm:inline">{changedFiles.slice(-4).join(t('chat.listSep'))}</span>
-                  </div>
-                )}
-              </>
+            {/* 关键节点只展示「当前在做什么」:阶段 + 正在写的文件 + 已改动文件数,
+                原始 thinking / 工具调用留在 Cloud Run 日志里(运维排查用,不打扰用户) */}
+            {streaming && progressText && (
+              <div className="mt-2 whitespace-pre-wrap break-words text-xs leading-relaxed text-gray-400">
+                {progressText}
+              </div>
             )}
 
             {plan && plan.sections.length > 0 && (
@@ -452,14 +374,51 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
             </div>
             <p className="mb-2 whitespace-pre-wrap break-words text-xs leading-relaxed text-red-200/90">{error}</p>
             <p className="mb-2.5 text-xs text-gray-400">{t('chat.jobFailedHint')}</p>
-            {onRetry && !streaming && (
-              <button
-                onClick={onRetry}
-                className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-500/20"
-              >
-                ↻ {t('chat.retry')}
-              </button>
+            {!streaming && (onRetry || onResume) && (
+              <div className="flex flex-wrap items-center gap-2">
+                {onRetry && (
+                  <button
+                    onClick={onRetry}
+                    className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-500/20"
+                  >
+                    ↻ {t('chat.retry')}
+                  </button>
+                )}
+                {onResume && (
+                  <button
+                    onClick={onResume}
+                    className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-200 hover:bg-amber-500/20"
+                  >
+                    ↩ {t('chat.resume')}
+                  </button>
+                )}
+                {onResume && resumeFiles ? (
+                  <span className="text-xs text-gray-400">{t('chat.resumeHint', { count: resumeFiles })}</span>
+                ) : null}
+              </div>
             )}
+          </div>
+        )}
+
+        {/* 用户手动停止但留有断点:不判失败,给一个轻量的「接着做」入口 */}
+        {stoppedResumable && !streaming && onResume && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+            <div className="mb-1 flex items-center gap-1.5 text-sm font-medium text-amber-200">
+              <span>■</span>
+              <span>{t('chat.stoppedTitle')}</span>
+            </div>
+            <p className="mb-2.5 text-xs leading-relaxed text-amber-100/80">{t('chat.stoppedHint')}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={onResume}
+                className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-200 hover:bg-amber-500/20"
+              >
+                ↩ {t('chat.resume')}
+              </button>
+              {resumeFiles ? (
+                <span className="text-xs text-gray-400">{t('chat.resumeHint', { count: resumeFiles })}</span>
+              ) : null}
+            </div>
           </div>
         )}
 

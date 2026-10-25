@@ -23,9 +23,9 @@
 | R2 | `forge-v2-artifacts` | `forge-v2-artifacts-staging` |
 | KV | `f6b66c90…` | `67e46b44…` |
 | 内部密钥 | Secret `agent-secret` | Secret `agent-secret-staging` |
-| LLM 密钥 | VIP 执行体:`llm-api-key`(DeepSeek);免费执行体:`llm-api-key-minimax`(MiniMax)+ `llm-api-key-free`(GLM)。**每个执行体一次绑多把 key**,后台 `model_configs.api_key_env` 按行选变量名(只存变量名,不存密钥值) | VIP 执行体:`llm-api-key-staging`(GLM)→ `LLM_API_KEY` + `LLM_API_KEY_GLM`;免费执行体:`llm-api-key-minimax-staging` → `LLM_API_KEY` + `LLM_API_KEY_MINIMAX`,另绑 `LLM_API_KEY_GLM=llm-api-key-staging` |
-| LLM 模型 | VIP `deepseek-flash`(Anthropic 方言);免费 `MiniMax-M3.1-Flash`(Anthropic 方言,`api.minimaxi.com/anthropic`) | VIP 仍用 `glm-5.3-flash`(OpenAI 兼容 + `zai`);免费 `MiniMax-M3.1-Flash`(Anthropic 方言) |
-| 用户上传图片给模型看 | **关闭**(`PI_MODEL_INPUT_IMAGE` 未设) | 开启(`PI_MODEL_INPUT_IMAGE=true`) |
+| LLM 密钥 | VIP 执行体:`llm-api-key`(DeepSeek)+ `llm-api-key-free`(GLM)+ `llm-api-key-minimax`(MiniMax);免费执行体:`llm-api-key-minimax`(MiniMax)+ `llm-api-key-free`(GLM)。**每个执行体一次绑多把 key**,后台 `model_configs.api_key_env` 按行选变量名(只存变量名,不存密钥值) | VIP 执行体:`llm-api-key-staging`(GLM)+ `llm-api-key-minimax-staging`(MiniMax);免费执行体:`llm-api-key-minimax-staging` + `llm-api-key-staging`。变量名同上 |
+| LLM 模型 | VIP `deepseek-flash`(Anthropic 方言);免费默认 `MiniMax-M3.1-Flash`(Anthropic 方言,`api.minimaxi.com/anthropic`),后台可切 `glm-5.3-flash`(bigmodel Anthropic 方言) | VIP `glm-5.3-flash`(OpenAI 兼容 + `zai`);免费 `MiniMax-M3.1-Flash`(Anthropic 方言) |
+| 用户上传图片给模型看 | 由后台 `model_configs.image_input` 决定(生产行已开;Cloud Run 不设 `PI_MODEL_INPUT_IMAGE`) | 开启(环境开关 `PI_MODEL_INPUT_IMAGE=true` + 后台行) |
 | 计费收款(MoR) | Creem **live 门店**:Secret `CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET`;`vars.CREEM_API_BASE=https://api.creem.io`;`vars.CREEM_PRODUCTS` 填 live 商品 id | Creem **测试门店**:两个 secret 加 `--env staging` 单独写,值用 test 模式;`CREEM_API_BASE=https://test-api.creem.io`;`CREEM_PRODUCTS` 填 test 商品 id |
 | 注册验证邮件 | Resend Secret `RESEND_API_KEY` + `vars.EMAIL_FROM=noreply@1forgen.site`(域名需在 Resend 后台验证) | 同左(secret 不可继承,`--env staging` 单独写) |
 | 环境标识 | 不设 `ENVIRONMENT` | `ENVIRONMENT=staging` |
@@ -72,7 +72,8 @@ npm run agent:deploy:prod                                       #    只在改�
 - **配了 `routes` 就必须显式 `workers_dev: true`**:wrangler 的规则是「配置里有 routes 时 workers.dev 默认关闭」,不写会把 `*.needle.workers.dev` 关掉,已发布链接与还没切过去的回调地址一起断。
 - **前端环境角标**走运行时下发:staging 的 `vars.ENVIRONMENT=staging` → `GET /api/auth/config` 返回 `environment` → `<EnvBadge>` 渲染琥珀色角标。生产不设该变量,回落 `production`、不渲染。
 - **Worker secret 只写不可读**:没有任何 API 或命令能把已写入的 secret 读回来(`secrets` 接口只返回名字)。换环境只能由持有原始值的人重新输入,不要承诺「把生产的复制过去」。
-- **模型的多模态能力也是环境差异**:`PI_MODEL_INPUT_IMAGE=true` 才会在 `models.json` 里声明 `input: ['text','image']`。上游网关方言不一定认 image 块,声明了却发不出去会直接 400,所以**不要为了「保持一致」把生产的这个开关打开**——先实测生产端点。
+- **模型的多模态能力也是环境差异**:模型是否声明 `input: ['text','image']` 由后台 `model_configs.image_input` 决定(逐任务覆盖 Cloud Run 的 `PI_MODEL_INPUT_IMAGE`,后者只是回落)。上游网关方言不一定认 image 块,声明了却发不出去会直接 400;2026-10-25 已实测生产 GLM(`open.bigmodel.cn/api/anthropic`)与 DeepSeek(`api.deepseek.com/anthropic`)都接受 image 块,所以生产行维持 `image_input=1`;换新供应商前仍需先实测。
+- **任务级模型参数以 `model_configs` 为准,Cloud Run env 只是回落**:`model_id` / `base_url` / `api_dialect` / `thinking_level` / `reasoning` / `image_input` / `max_tokens` / `max_run_ms` / `polish_max_ms` / `queue_concurrency` 都由后台随任务下发并覆盖 env(`agent/src/config.ts` 的 `applyModelOverride`);`api_key_env` 只决定用哪把**已绑定**的 Secret,密钥值仍来自 Cloud Run。`--timeout 3600s` 是 Cloud Run 硬上限,后台 `max_run_ms` 上限 3400s;env 的 `AGENT_MAX_RUN_MS`(1500s)只在配置行缺失/非法时兜底。
 
 ---
 

@@ -345,6 +345,11 @@ export async function runJob(
    * (index.ts 据此上报 /internal/jobs/:id/usage)。回调抛错不影响主流程。
    */
   onUsage?: (usage: RunUsage) => void,
+  /**
+   * 断点快照回调:任务运行期间周期性把当前源码树交给 Worker(存 R2),失败/停止后供「从断点继续」。
+   * 回调失败只打日志,不影响生成。
+   */
+  onCheckpoint?: (source: FileMap) => Promise<boolean>,
 ): Promise<RunResult> {
   // 冷启动期间就被停止:连工作目录都不用建
   const uiLang: UiLang = req.lang === 'en' ? 'en' : 'zh'
@@ -422,26 +427,44 @@ export async function runJob(
    * 会变成「空轮次 + 构建未改动的脚手架 + commit 成功」,用户看到的是"秒回旧页面"。
    */
   let providerError = ''
+  /** 最后一条 assistant 消息的结束原因:length = 单轮输出被 max_tokens 截断(思考吃光了额度) */
+  let lastStopReason = ''
+  /**
+   * 完整过程(逐 token 正文/思考/每次工具调用)只写 Cloud Run stdout,用于运维排查;
+   * D1 的 agent_log 只保留里程碑与告警,避免把日志当消息总线(实测会写出几万行/天)。
+   */
+  let rawBuf = ''
+  const flushRaw = () => {
+    if (!rawBuf) return
+    process.stdout.write(rawBuf.endsWith('\n') ? rawBuf : `${rawBuf}\n`)
+    rawBuf = ''
+  }
+  const raw = (text: string) => {
+    rawBuf += text
+    if (rawBuf.length > 200_000) flushRaw()
+  }
+  const rawTimer = setInterval(flushRaw, 5_000)
+  /** 本次已写入的文件(去重,用于进度里的计数) */
+  const writtenFiles = new Set<string>()
   const unsubscribe = session.subscribe((event) => {
-    // 流式日志:把模型的思考与正文逐 token 追加,前端据此实时显示 agent 在「想什么、写什么」
     if (event.type === 'message_update') {
       const ev = event.assistantMessageEvent
-      if (ev.type === 'thinking_start') log.append('\n💭 ')
-      else if (ev.type === 'thinking_delta') log.append(ev.delta)
-      else if (ev.type === 'thinking_end') log.append('\n')
+      if (ev.type === 'thinking_start') raw('\n💭 ')
+      else if (ev.type === 'thinking_delta') raw(ev.delta)
+      else if (ev.type === 'thinking_end') raw('\n')
       else if (ev.type === 'text_start') {
         textBuf = ''
-        log.append('\n')
+        raw('\n')
       } else if (ev.type === 'text_delta') {
         textBuf += ev.delta
-        log.append(ev.delta)
+        raw(ev.delta)
       } else if (ev.type === 'text_end') {
         if (textBuf.trim()) {
           summary = textBuf.trim()
           if (usedTool) summaryAfterTool = summary
         }
         textBuf = ''
-        log.append('\n')
+        raw('\n')
       }
       return
     }
@@ -449,6 +472,7 @@ export async function runJob(
       // 只关心 assistant 终态:成功消息会清掉之前 auto-retry 留下的错误
       const msg = event.message
       if (msg.role === 'assistant') {
+        lastStopReason = msg.stopReason
         providerError = msg.stopReason === 'error' ? msg.errorMessage || 'provider error' : ''
       }
       return
@@ -456,16 +480,14 @@ export async function runJob(
     if (event.type === 'tool_execution_start') {
       const args = (event.args ?? {}) as Record<string, unknown>
       pendingArgs.set(event.toolCallId, args)
-      log.append(`\n🔧 ${event.toolName}${toolArgSummary(args)}\n`)
+      raw(`\n🔧 ${event.toolName}${toolArgSummary(args)}\n`)
       return
     }
     if (event.type !== 'tool_execution_end') return
     const args = pendingArgs.get(event.toolCallId)
     pendingArgs.delete(event.toolCallId)
     usedTool = true
-    // 工具结果标记只留符号:前端 web/src/lib/agentLog.ts 按 ✓/✗ 解析出状态后,
-    // 文字由前端自己的字典渲染 —— 日志里再写一遍中文/英文反而会被正则卡住。
-    log.append(event.isError ? '   ✗\n' : '   ✓\n')
+    raw(event.isError ? '   ✗\n' : '   ✓\n')
     if (event.isError) return
     const path = writtenPath(event.toolName, args)
     if (!path) return
@@ -481,11 +503,37 @@ export async function runJob(
       })
       return
     }
-    report({ stage: 'coding', progress: t(uiLang, 'progress.writing', { file: rel }) })
+    writtenFiles.add(rel)
+    report({
+      stage: 'coding',
+      progress: t(uiLang, 'progress.writing', { file: rel, count: writtenFiles.size }),
+    })
     void readIfExists(join(workspace, rel)).then((text) => {
       if (text !== null) report({ filePreview: { path: rel, content: text.slice(0, MAX_FILE_PREVIEW) } })
     })
   })
+
+  /**
+   * 断点:每 60s 或异常收尾时快照源码树。内容没变就不重复上报(长时间思考不该产生写入),
+   * 快照失败只记日志 —— 它只是「失败后可续跑」的增强,绝不能影响主流程。
+   */
+  let checkpointBusy = false
+  let lastCheckpointHash = ''
+  const checkpointNow = async (force = false): Promise<void> => {
+    if (!onCheckpoint || checkpointBusy) return
+    checkpointBusy = true
+    try {
+      const src = await collectSource(workspace)
+      const hash = createHash('sha256').update(JSON.stringify(src)).digest('hex')
+      if (!force && hash === lastCheckpointHash) return
+      if (await onCheckpoint(src)) lastCheckpointHash = hash
+    } catch (err) {
+      console.error(`[checkpoint] ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      checkpointBusy = false
+    }
+  }
+  const checkpointTimer = onCheckpoint ? setInterval(() => void checkpointNow(), 60_000) : undefined
 
   const startedAt = Date.now()
   const remainingMs = () => config.maxRunMs - (Date.now() - startedAt)
@@ -506,7 +554,9 @@ export async function runJob(
     // 必须在构建前显式判失败,否则未改动的脚手架会被当成产物交付。
     if (providerError) throw new Error(t(uiLang, 'error.modelFailed', { msg: providerError }))
     if (sourceBefore && sourcesEqual(sourceBefore, await collectSource(workspace))) {
-      throw new Error(t(uiLang, 'error.emptyModelRun'))
+      // 区分「模型什么都没干」与「思考吃光 max_tokens、输出被截断」:
+      // 后者不是凭证/方言问题,调大该配置的 max_tokens 即可(见 docs/FORGE2.md §21.1)。
+      throw new Error(t(uiLang, lastStopReason === 'length' ? 'error.modelTruncated' : 'error.emptyModelRun'))
     }
     // 工具调用之后没有正文 → 模型没写交付说明(返回空,让 Worker 用平台自己的收尾文案兜底)
     deliverSummary = summaryAfterTool || (usedTool ? '' : summary.trim())
@@ -567,7 +617,14 @@ export async function runJob(
       }
       log.append(t(uiLang, 'log.polishEnd'))
     }
+  } catch (err) {
+    // 异常/停止:补一次断点(周期快照可能刚好处在两次之间)。成功路径不需要 —— 产物会进草稿
+    await checkpointNow(true)
+    throw err
   } finally {
+    if (checkpointTimer) clearInterval(checkpointTimer)
+    clearInterval(rawTimer)
+    flushRaw()
     signal?.removeEventListener('abort', onAbort)
     // 用量快照必须在这里取:dispose() 之后就读不到了,而失败/被停止的任务同样烧了 token 与实例时间
     try {

@@ -1,6 +1,7 @@
 import type { Env } from '../types'
 import { ACTIVE_STATUS_SQL } from './jobHelpers'
 import { markJobFailed } from './commit'
+import { deleteCheckpoint } from './checkpoints'
 import { langOfPayload, srv } from './i18n'
 
 export type JobType = 'generate' | 'chat'
@@ -92,4 +93,22 @@ export async function sweepJobs(env: Env): Promise<void> {
     .prepare(`DELETE FROM job_messages WHERE job_id NOT IN (SELECT id FROM jobs WHERE ${ACTIVE_STATUS_SQL})`)
     .run()
     .catch(() => {})
+
+  // 断点快照保留 7 天:过期后删 R2 对象并清指针。成功交付的快照在 commit 里已删,这里只会扫到
+  // 失败/停止任务。checkpoint_key 列来自增量迁移 —— 没跑迁移时查询失败,巡检整体不受影响。
+  const expired = await env.DB
+    .prepare(
+      `SELECT id, project_id FROM jobs
+       WHERE checkpoint_key IS NOT NULL AND checkpoint_at < datetime('now', '-7 days')`
+    )
+    .all<{ id: string; project_id: string }>()
+    .catch(() => null)
+  for (const row of expired?.results ?? []) {
+    await deleteCheckpoint(env, row.project_id, row.id)
+    await env.DB
+      .prepare('UPDATE jobs SET checkpoint_key = NULL, checkpoint_files = NULL, checkpoint_bytes = NULL WHERE id = ?')
+      .bind(row.id)
+      .run()
+      .catch(() => {})
+  }
 }

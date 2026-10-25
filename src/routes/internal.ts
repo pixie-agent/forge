@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { Env } from '../types'
 import { commitJob, failJobWith } from '../lib/commit'
+import { putCheckpoint } from '../lib/checkpoints'
 import { gcpCostUsd, llmCostUsd, type ModelPrice } from '../lib/pricing'
 
 /**
@@ -59,7 +60,8 @@ app.post('/jobs/:id/progress', async (c) => {
 })
 
 /**
- * 流式日志追加:agent 把 pi 的 thinking/正文/工具调用增量发来,原子追加到 jobs.agent_log。
+ * 里程碑日志追加:agent 只把关键节点(复查轮开始/结束、交付语言重问、告警)发来,
+ * 原子追加到 jobs.agent_log。完整 thinking/工具调用过程只写 Cloud Run stdout,不进 D1。
  * 用 `substr(x || ?, -N)` 保留尾部,无需读改写(并发安全);只在任务仍活动时写入。
  */
 const AGENT_LOG_MAX = 20_000
@@ -74,6 +76,49 @@ app.post('/jobs/:id/log', async (c) => {
     .bind(chunk, c.req.param('id'))
     .run()
   return c.json({ ok: true, changed: res.meta.changes })
+})
+
+/**
+ * 断点快照:agent 每 60s(以及异常收尾时)把当前源码树整份发来,存 R2。
+ * 源码本体不进 D1;这里只更新 jobs 上的指针与元信息,供「从断点继续」读取。
+ * 刻意不做 active 状态守卫:用户点「停止」时 Worker 会先把任务置 cancelled,agent 的
+ * 最后一次快照往往在这之后才到(SIGTERM 式的协作取消),那是我们最需要保留的一份。
+ * 只拒绝 succeeded:已交付的任务不需要断点(commit 已把产物写进草稿)。
+ */
+const CHECKPOINT_MAX_BYTES = 8 * 1024 * 1024
+app.post('/jobs/:id/checkpoint', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json<{ source?: unknown }>().catch(() => ({}) as { source?: unknown })
+  if (!body.source || typeof body.source !== 'object' || Array.isArray(body.source)) {
+    return c.json({ error: '源码树格式不正确' }, 400)
+  }
+  // 只收 string 值;顺手挡住异常大的快照(正常源码树远小于这个量级)
+  const source: Record<string, string> = {}
+  let totalChars = 0
+  for (const [path, content] of Object.entries(body.source as Record<string, unknown>)) {
+    if (typeof content !== 'string') continue
+    source[path] = content
+    totalChars += content.length
+    if (totalChars > CHECKPOINT_MAX_BYTES) return c.json({ error: '源码树过大' }, 413)
+  }
+  if (!Object.keys(source).length) return c.json({ ok: true, changed: 0 })
+
+  const job = await c.env.DB
+    .prepare('SELECT project_id, status FROM jobs WHERE id = ?')
+    .bind(id)
+    .first<{ project_id: string; status: string }>()
+  if (!job) return c.json({ error: '任务不存在' }, 404)
+  if (job.status === 'succeeded') return c.json({ ok: true, changed: 0 })
+
+  const meta = await putCheckpoint(c.env, job.project_id, id, source)
+  await c.env.DB
+    .prepare(
+      `UPDATE jobs SET checkpoint_key = ?, checkpoint_files = ?, checkpoint_bytes = ?, checkpoint_at = datetime('now')
+       WHERE id = ? AND status <> 'succeeded'`
+    )
+    .bind(meta.key, meta.files, meta.bytes, id)
+    .run()
+  return c.json({ ok: true, files: meta.files, bytes: meta.bytes })
 })
 
 /**
