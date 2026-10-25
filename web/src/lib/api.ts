@@ -33,8 +33,11 @@ export async function api<T>(path: string, opts: { method?: string; body?: unkno
  * 统一补 `lang`:服务端会把用户消息里的附件/连接器清单、以及任务收尾时补的 assistant 消息
  * **按这里的语言写进库**(见 Worker 侧 src/lib/i18n.ts),所以请求必须带上当前界面语言。
  */
-export function startJob(path: string, body: Record<string, unknown>): Promise<{ jobId: string }> {
-  return api<{ jobId: string }>(path, { method: 'POST', body: { ...body, lang: getActiveLang() } })
+export function startJob(
+  path: string,
+  body: Record<string, unknown>
+): Promise<{ jobId: string; message?: string }> {
+  return api<{ jobId: string; message?: string }>(path, { method: 'POST', body: { ...body, lang: getActiveLang() } })
 }
 
 const POLL_INTERVAL_MS = 2000

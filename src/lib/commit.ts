@@ -5,6 +5,7 @@ import { clearJobMessages, insertMessage } from './jobHelpers'
 import { releaseJobCredits } from './credits'
 import { langOfPayload, srv, type Lang } from './i18n'
 import { clearArtifacts, DRAFT_VERSION_NO, putArtifacts } from './artifacts'
+import { deleteCheckpoint } from './checkpoints'
 import { logEvent } from './events'
 import type { AgentRunResult, FileMap } from './agent'
 
@@ -41,7 +42,7 @@ export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunR
   // 任务到此为止:追加要求的投递队列(含附件 base64)可以整批释放了
   await clearJobMessages(db, jobId)
 
-  const payload = JSON.parse(job.payload) as { idea?: string; message?: string }
+  const payload = JSON.parse(job.payload) as { idea?: string; message?: string; resumeOf?: string }
   const prompt = String(payload.idea ?? payload.message ?? '')
   const plan = (body.plan ?? null) as Plan | null
 
@@ -76,7 +77,9 @@ export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunR
       : db.prepare("UPDATE projects SET updated_at = datetime('now') WHERE id = ?").bind(job.project_id),
   ])
 
-  // 守卫式落定:被兜底判死但回调最终到达的行允许复活交付
+  // 守卫式落定:被兜底判死但回调最终到达的行允许复活交付。
+  // 刻意不在这里写 checkpoint_key(增量迁移列):迁移没跑时会让整个 commit 失败(no such column)。
+  // 断点对象由下面的 deleteCheckpoint 清理,残留指针不影响任何查询,cron 会兜底清空。
   const claim = await db
     .prepare(
       `UPDATE jobs SET status = 'succeeded', result_version = ?, error = NULL,
@@ -86,6 +89,11 @@ export async function commitJob(env: Env, jobId: string, body: Partial<AgentRunR
     .bind(DRAFT_VERSION_NO, plan ? JSON.stringify(plan) : null, jobId)
     .run()
   if (!claim.meta.changes) return { ok: true, reason: 'already-settled' }
+
+  // 交付成功:本次断点已无用(源码树已进草稿),被续跑的旧任务断点也一并清掉。
+  // R2 删除失败只影响存储占用,由 cron 的 7 天兜底清理;绝不能让「清理」把已落定的成功变失败。
+  await deleteCheckpoint(env, job.project_id, jobId)
+  if (payload.resumeOf) await deleteCheckpoint(env, job.project_id, payload.resumeOf)
 
   const name = plan?.name ?? ''
   // 优先用 agent 的交付说明(带 Markdown 的详细回复,对话体验更好);缺失时回退到简短系统文案。
@@ -145,7 +153,8 @@ async function jobLang(env: Env, jobId: string): Promise<Lang> {
  * 手动停止落定(用户点「停止」):把活动任务置为 cancelled。
  * - 立即释放项目锁(ACTIVE_STATUS_SQL 不再命中 cancelled),用户可以马上发起新任务;
  * - 不写产物,并退还发起时冻结的积分(前端提示的「已停止(未扣除积分)」由此成立);
- * - agent 侧的协作式取消只是"尽快停手",已跑出的中间结果一并丢弃;它的用量仍会上报到 job_usage,
+ * - agent 侧的协作式取消只是"尽快停手";它收尾时会补一份断点快照(源码树进 R2),用户可「从断点继续」。
+ *   `files_preview` 刻意不清:刷新后仍能看到最后写入的文件。它的用量照常上报 job_usage,
  *   所以"用户停掉的任务花了多少钱"在后台照样看得到;
  * - 与 commit 的竞态:commit 的落定守卫是 `WHERE status IN ('pending','running')`,先取消则
  *   迟到的 commit 只会返回 already-settled,不会把已停止的任务复活成成功。
@@ -156,7 +165,7 @@ export async function cancelJob(env: Env, jobId: string): Promise<boolean> {
   const lang = await jobLang(env, jobId)
   const res = await env.DB
     .prepare(
-      `UPDATE jobs SET status = 'cancelled', error = ?, files_preview = NULL, updated_at = datetime('now')
+      `UPDATE jobs SET status = 'cancelled', error = ?, updated_at = datetime('now')
        WHERE id = ? AND status IN ('pending','running')`
     )
     .bind(srv(lang, 'job.cancelled'), jobId)

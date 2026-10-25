@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import CodeEditor from './CodeEditor'
 import DataPanel from './DataPanel'
 import RichText from './RichText'
@@ -16,8 +16,6 @@ interface Props {
   streaming: boolean
   /** 生成进行中的阶段文案(含已用时间),如"正在编写 src/App.jsx · 已 45s" */
   progressText: string
-  /** agent(pi)的流式输出:thinking/正文/工具调用,随生成实时追加 */
-  agentLog: string
   /** agent 最近写入的源文件,流式看代码用 */
   filesPreview: { path: string; content: string } | null
   project: Project | null
@@ -53,7 +51,6 @@ export default function PreviewPane({
   src,
   streaming,
   progressText,
-  agentLog,
   filesPreview,
   project,
   versions,
@@ -73,18 +70,11 @@ export default function PreviewPane({
   const t = useT()
   const [tab, setTab] = useState<'preview' | 'code' | 'data'>('preview')
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
-  const [showLog, setShowLog] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
   // 移动端:次要操作(版本切换/连接器/帮助)收进「更多」菜单,工具栏只留标签与主操作
   const [showMore, setShowMore] = useState(false)
   const [copied, setCopied] = useState(false)
   const [copiedPreview, setCopiedPreview] = useState(false)
-  const logRef = useRef<HTMLPreElement>(null)
-  // 新输出到达时贴住底部,像终端一样跟随
-  useEffect(() => {
-    const el = logRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [agentLog])
   const published = project?.status === 'published'
   /** 线上正在服务的版本号(与「当前工作版本」currentVersion 相互独立) */
   const publishedVersion = project?.published_version ?? 0
@@ -463,32 +453,6 @@ export default function PreviewPane({
         )}
       </div>
 
-      {agentLog && (
-        <div className="hidden max-h-[45%] shrink-0 flex-col border-t border-gray-800 bg-gray-950 md:flex">
-          <button
-            onClick={() => setShowLog((v) => !v)}
-            className="flex h-9 shrink-0 items-center gap-2 px-3 text-xs text-gray-400 hover:text-gray-200"
-          >
-            {streaming ? (
-              <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-            ) : (
-              <span className="h-2 w-2 rounded-full bg-gray-600" />
-            )}
-            <span className="font-medium">{t('preview.agentOutput')}</span>
-            <span className="text-gray-600">{streaming ? t('preview.logRunning') : t('preview.logDone')}</span>
-            <span className="ml-auto text-gray-600">{showLog ? t('chat.collapse') : t('preview.logExpand')}</span>
-          </button>
-          {showLog && (
-            <pre
-              ref={logRef}
-              className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words px-3 pb-3 font-mono text-xs leading-relaxed text-gray-400"
-            >
-              {agentLog}
-              {streaming && <span className="animate-pulse text-indigo-400">▋</span>}
-            </pre>
-          )}
-        </div>
-      )}
     </section>
   )
 }

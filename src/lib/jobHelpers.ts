@@ -104,19 +104,30 @@ export async function activeJobSnapshot(db: D1Database, projectId: string, userI
 }
 
 /**
- * 可续任务快照:项目最近一次任务若为失败,返回它(带着 error / 半成品 files_preview / 原始 idea),
- * 供前端还原"未完成卡片 + 重试"与半成品预览;若最近任务已完成或仍在跑则返回 null。
+ * 可续任务快照:项目最近一次任务若为失败或用户手动停止,返回它(带着 error / 半成品 files_preview /
+ * 原始 idea / 断点信息),供前端还原「未完成卡片 + 重试 / 从断点继续」;最近任务已完成或仍在跑则返回 null。
+ *
+ * 断点列来自增量迁移 schema.migrate-checkpoint.sql:没跑迁移时退回不带断点的旧查询,
+ * 只丢失「继续」能力,不影响失败卡片与重试。
  */
 export async function lastFailedJobSnapshot(db: D1Database, projectId: string, userId: string) {
+  type UnfinishedRow = SnapshotRow & { checkpoint_key?: string | null; checkpoint_files?: number | null }
+  const sql = (cols: string) =>
+    `SELECT ${cols} FROM jobs WHERE project_id = ?
+     AND EXISTS (SELECT 1 FROM projects WHERE projects.id = jobs.project_id AND projects.user_id = ?)
+     ORDER BY updated_at DESC LIMIT 1`
   const row = await db
-    .prepare(
-      `SELECT ${SNAPSHOT_COLUMNS} FROM jobs WHERE project_id = ?
-       AND EXISTS (SELECT 1 FROM projects WHERE projects.id = jobs.project_id AND projects.user_id = ?)
-       ORDER BY updated_at DESC LIMIT 1`
-    )
+    .prepare(sql(`${SNAPSHOT_COLUMNS}, checkpoint_key, checkpoint_files`))
     .bind(projectId, userId)
-    .first<SnapshotRow>()
-  return row && row.status === 'failed' ? snapshotFromRow(row) : null
+    .first<UnfinishedRow>()
+    .catch(() => db.prepare(sql(SNAPSHOT_COLUMNS)).bind(projectId, userId).first<UnfinishedRow>())
+
+  if (!row || (row.status !== 'failed' && row.status !== 'cancelled')) return null
+  return {
+    ...snapshotFromRow(row),
+    resumable: Boolean(row.checkpoint_key),
+    checkpoint_files: row.checkpoint_files ?? null,
+  }
 }
 
 export type JobSnapshot = NonNullable<Awaited<ReturnType<typeof jobSnapshot>>>

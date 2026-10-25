@@ -71,7 +71,9 @@ export function createProgressReporter(callbackBase: string, secret: string, job
 }
 
 /**
- * 流式日志:把 pi 的 thinking / 正文 / 工具调用事件累积进本地缓冲,增量 POST 到 Worker 的 /log 接口。
+ * 里程碑日志上报:runner 只把关键节点(复查轮开始/结束、交付语言重问、告警)append 进来,
+ * 增量 POST 到 Worker 的 /log 接口。pi 的逐 token thinking/正文/工具调用**不走这里** ——
+ * 那些直接写 Cloud Run stdout(运维排查用),否则会把 D1 当消息总线写爆(实测几万行/天)。
  * 串行化上报(上一次未回就不发下一批),避免 D1 侧追加乱序;stop() 会等待在途请求并把剩余缓冲补发,
  * 确保终态落定前的最后一段输出不丢。Worker 侧用 substr 保留尾部,故此处不做长度裁剪。
  */
@@ -93,7 +95,8 @@ export function createStreamLogger(callbackBase: string, secret: string, jobId: 
     } finally {
       flushing = false
     }
-    if (!stopped && sent < buf.length) void flush()
+    // 不在这里递归续发:否则每个网络往返就写一次 D1(实测 ~11 次/秒)。
+    // 后续增量交给 interval 的下一次触发,最多 800ms 一批。
   }
 
   const timer = setInterval(() => void flush(), intervalMs)
@@ -185,6 +188,30 @@ export async function reportCommit(callbackBase: string, secret: string, jobId: 
 
 export async function reportFail(callbackBase: string, secret: string, jobId: string, error: string): Promise<void> {
   await post(callbackBase, secret, jobId, 'fail', { error }).catch(() => {})
+}
+
+/**
+ * 断点快照:把当前工作目录的源码树整份上报给 Worker(存 R2)。
+ * 任务成功时由 commit 清掉;失败/被停止时保留,供用户「从断点继续」。
+ * 失败只记日志 —— 快照是增强能力,不能影响生成主流程。
+ */
+export async function reportCheckpoint(
+  callbackBase: string,
+  secret: string,
+  jobId: string,
+  source: Record<string, string>,
+): Promise<boolean> {
+  try {
+    const res = await post(callbackBase, secret, jobId, 'checkpoint', { source })
+    if (!res.ok) {
+      console.error(`[checkpoint] http ${res.status}`)
+      return false
+    }
+    return true
+  } catch (err) {
+    console.error(`[checkpoint] ${err instanceof Error ? err.message : String(err)}`)
+    return false
+  }
 }
 
 /**

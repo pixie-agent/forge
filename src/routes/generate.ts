@@ -4,6 +4,7 @@ import type { AppEnv, ConnectorGrant, ProjectRow } from '../types'
 import { requireUser } from '../lib/auth'
 import { activeJobSnapshot, lastFailedJobSnapshot, insertMessage, ACTIVE_STATUS_SQL } from '../lib/jobHelpers'
 import { dispatchAgent, type FileMap } from '../lib/agent'
+import { loadCheckpoint } from '../lib/checkpoints'
 import { attachmentMarkdown, parseAttachments, SEND_LIMITS, STEER_LIMITS, type AgentAttachment } from '../lib/attachments'
 import { resolveGrants } from '../lib/connectors/store'
 import { DRAFT_VERSION_NO } from '../lib/artifacts'
@@ -112,7 +113,9 @@ async function launchJob(
   userText: string,
   attachments?: AgentAttachment[],
   connectors?: ConnectorOptions,
-  lang: Lang = 'zh'
+  lang: Lang = 'zh',
+  /** 断点续跑:显式指定本轮的源码基线(优先于草稿/当前版本)。仅 resume 接口传 */
+  sourceOverride?: FileMap,
 ) {
   // 先解析连接器再建任务:失败也不留下一个空跑的任务;不可用的连接会被静默跳过(面板负责提示重连)
   const grants = await jobConnectorGrants(c, project, connectors ?? { disabled: [], enabled: [] })
@@ -163,7 +166,8 @@ async function launchJob(
   }
 
   const dispatch = async () => {
-    const currentFiles = type === 'chat' ? await workingSrc(c.env.DB, project.id, project.current_version) : undefined
+    const currentFiles =
+      type === 'chat' ? sourceOverride ?? (await workingSrc(c.env.DB, project.id, project.current_version)) : undefined
     const history = type === 'chat' ? await recentHistory(c.env.DB, project.id) : undefined
     await dispatchAgent(c.env, {
       jobId,
@@ -186,7 +190,7 @@ async function launchJob(
   }
   // 不 await:agent 长跑期间连接可能被掐断(524);结果经 commit 回调交付
   c.executionCtx.waitUntil(dispatch().catch((err) => console.error(`[dispatch] ${jobId.slice(0, 8)} ${err instanceof Error ? err.message : String(err)}`)))
-  return c.json({ jobId })
+  return c.json({ jobId, message: userText })
 }
 
 /**
@@ -265,7 +269,62 @@ app.post('/:id/chat', async (c) => {
   return launchJob(c, project, 'chat', { message, lang }, message, parsed.attachments, parseConnectorOptions(body.connectors), lang)
 })
 
-/** 断线/刷新恢复:活动任务(接管轮询)+ 最近一次失败任务(还原未完成卡片与半成品预览) */
+/**
+ * 从断点继续(失败 / 用户手动停止的任务)。
+ *
+ * 做什么:把该任务最后一次源码树快照读出来,作为新一轮 chat 任务的改动基线派发给 agent。
+ * agent 从断点接着改,而不是拿模板脚手架从头重写 —— 已写好的文件、已通过的构建都还在。
+ * 走 chat 而不是 generate:payload 里带 resumeOf,commit 成功时会把旧任务的快照一并清掉。
+ * 计费同普通 chat(任务发起时冻结,失败/停止如常退还)。
+ */
+app.post('/:id/resume', async (c) => {
+  const project = await ownedProject(c, c.req.param('id'))
+  if (!project) return c.json({ error: '项目不存在' }, 404)
+
+  const body = await c.req
+    .json<{ jobId?: unknown; lang?: unknown }>()
+    .catch(() => ({}) as { jobId?: unknown; lang?: unknown })
+  const jobId = String(body.jobId ?? '')
+  const lang = parseLang(body.lang)
+
+  const job = await c.env.DB
+    .prepare('SELECT id, status FROM jobs WHERE id = ? AND project_id = ?')
+    .bind(jobId, project.id)
+    .first<{ id: string; status: string }>()
+  if (!job) return c.json({ error: '任务不存在' }, 404)
+  if (job.status !== 'failed' && job.status !== 'cancelled') {
+    return c.json({ error: srv(lang, 'resume.notUnfinished') }, 409)
+  }
+
+  // 只允许续跑「项目最近一个任务」:旧断点可能远落后于后来生成的内容,拿它当基线会把新工作覆盖掉
+  const latest = await c.env.DB
+    .prepare('SELECT id FROM jobs WHERE project_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1')
+    .bind(project.id)
+    .first<{ id: string }>()
+  if (!latest || latest.id !== job.id) {
+    return c.json({ error: srv(lang, 'resume.notLatest') }, 409)
+  }
+
+  const source = await loadCheckpoint(c.env, project.id, job.id)
+  if (!source || !Object.keys(source).length) {
+    return c.json({ error: srv(lang, 'resume.noCheckpoint') }, 400)
+  }
+
+  const message = srv(lang, 'resume.message')
+  return launchJob(
+    c,
+    project,
+    'chat',
+    { message, lang, resumeOf: job.id },
+    message,
+    undefined,
+    undefined,
+    lang,
+    source,
+  )
+})
+
+/** 断线/刷新恢复:活动任务(接管轮询)+ 最近一次失败/停止任务(还原未完成卡片、半成品预览与断点续跑) */
 app.get('/:id/job/active', async (c) => {
   const userId = c.get('user').id
   const projectId = c.req.param('id')

@@ -97,11 +97,15 @@ CREATE TABLE IF NOT EXISTS jobs (
   progress       TEXT,                      -- 人读的分段进度(agent 写入)
   plan_json      TEXT,
   files_preview  TEXT,                      -- JSON:{path,content} agent 最近写入的源文件,前端实时看代码
-  agent_log      TEXT,                      -- agent 的流式输出(thinking/正文/工具调用),服务端保留尾部
+  agent_log      TEXT,                      -- agent 里程碑日志(关键节点/告警);完整过程只写 Cloud Run stdout
   error          TEXT,
   result_version INTEGER,
   model_config_id TEXT NOT NULL DEFAULT '',  -- 派发时使用的后台模型配置快照(见 schema.migrate-model-config.sql)
   channel        TEXT NOT NULL DEFAULT '',  -- '' | free | vip(见 schema.migrate-model-channel.sql)
+  checkpoint_key TEXT,                      -- R2 断点快照键 cp/<projectId>/<jobId>.json(见 schema.migrate-checkpoint.sql)
+  checkpoint_files INTEGER,                 -- 快照里的源码文件数
+  checkpoint_bytes INTEGER,                 -- 快照字节数
+  checkpoint_at  TEXT,                      -- 最后一次快照时间(cron 清理 7 天前的快照)
   started_at     TEXT,
   updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))  -- 任务总龄的计时起点(cron 据此永久判死)

@@ -73,12 +73,16 @@ export interface JobSnapshot {
   prompt: string | null
   /** agent 最近写入的源文件(路径 + 内容),流式看代码用;终态后清空 */
   files_preview: { path: string; content: string } | null
-  /** agent 的流式输出(thinking/正文/工具调用),服务端保留尾部;仅活动任务期间有值 */
+  /** agent 的里程碑日志(阶段/复查等少量关键行);完整过程在 Cloud Run 日志里,不进 D1 */
   agent_log: string | null
   plan: Plan | null
   error: string | null
   version: number | null
   elapsed: number
+  /** 是否有可读的断点快照(只有失败/手动停止的任务快照会带) */
+  resumable?: boolean
+  /** 断点快照里的源码文件数(「从断点继续」按钮旁展示) */
+  checkpoint_files?: number | null
 }
 
 /** 草稿(工作副本):生成/对话实时写入的未确认内容;点「生成新版本」才快照为正式版本 */

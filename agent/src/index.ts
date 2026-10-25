@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import {
   createProgressReporter,
   createStreamLogger,
+  reportCheckpoint,
   reportCommit,
   reportFail,
   reportUsage,
@@ -15,7 +16,7 @@ import { FifoQueue } from './queue.js'
 import { runJob } from './runner.js'
 import { t, type UiLang } from './i18n.js'
 import type { AgentSession } from '@mariozechner/pi-coding-agent'
-import type { RunAttachment, RunRequest, RunUsage, SteerMessage } from './types.js'
+import type { FileMap, RunAttachment, RunRequest, RunUsage, SteerMessage } from './types.js'
 
 const config = loadConfig()
 /**
@@ -239,6 +240,7 @@ const server = createServer((req, res) => {
         (u) => {
           usage = u
         },
+        (source) => reportCheckpoint(body.callbackBase, config.agentSecret, body.jobId, source),
       )
       await streamLog.stop()
       log(`done files=${Object.keys(result.src).length} dist=${result.manifest.files.length} plan=${result.plan?.name ?? '-'}`)
