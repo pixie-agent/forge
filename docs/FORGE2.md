@@ -475,6 +475,7 @@ DO 内部按 op 分发:`exec` / `schema` / `db.list|add|update|remove|collection
 - 测试环境(draft)= 预览页 `/p/:token/api` 写入;线上环境(live)= 发布页 `/s/:slug/api` 写入;两者互不可见。
 - KV / R2 仍是共享资源 + 前缀(`p:{projectId}:{env}:` / `appdata/{projectId}/{env}/`),与 SQLite 采用同一套"项目 × 环境"隔离口径。
 - 删除项目时 `deleteProjectAppData` 清 KV 前缀 + R2 前缀 + `destroyProjectDb`(两个环境各 `deleteAll`)。
+- 删除顺序:先在同一个 D1 batch 里按外键方向删子表(`job_messages` → `jobs` → `messages` → `versions` → `site_data` → `project_connectors` → `projects`),再清 R2/KV/DO。D1 默认开启外键(`PRAGMA foreign_keys` 恒为 1),漏删 `jobs` 会让最后一句 `DELETE FROM projects` 报 `FOREIGN KEY constraint failed`——2026-10-25 生产删除项目 500 就是这个原因。对象存储清理放在 DB 之后且失败只记日志,避免"项目还在、产物/数据已经没了"的半删状态。
 
 ### 15.5 迁移(一次性,幂等)
 
