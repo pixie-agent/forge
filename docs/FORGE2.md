@@ -422,7 +422,7 @@ SSR 让**产物应用本身**更简单(前后端合一、loader 直连 D1、无 
 - `src/lib/projectDb.ts`:每项目 × 每环境一个 Durable Object(绑定 `PROJECT_DB`,类 `ProjectDb`,`new_sqlite_classes`),实例名 `${projectId}:${env}`;承载 `/db` 文档接口(集合 → 一张固定列的表)与 owner 的 SQL 控制台(任意 DDL/DML/索引)。
 
 **前端**
-- 工作台 `PreviewPane`:`预览` 用 `/p/:token/` iframe(取代 srcDoc 单 HTML),`代码` 在生成中展示 agent 实时写入的文件、完成后展示构建产物清单,`数据`(DataPanel)含 **键值 / 对象 / SQL** 三个页签,均按测试/线上环境隔离;其中 SQL 页即 DBeaver 风格的表数据网格 + SQL 编辑器(所有表都在这里)。
+- 工作台 `PreviewPane`:`预览` 用 `/p/:token/` iframe(取代 srcDoc 单 HTML),`代码` 在生成中展示 agent 实时写入的文件、完成后展示构建产物清单,`数据`(DataPanel)含 **键值 / 对象 / SQL** 三个页签,均按测试/线上环境隔离;其中 SQL 页即 DBeaver 风格的表数据网格 + SQL 编辑器(所有表都在这里)。草稿预览令牌按 `project+version` 签发,同一草稿改完后令牌不变、iframe 的 `src` 也不变,浏览器不会自行重拉最新产物 —— 因此任务结束(`streaming` 真→假)时前端强制重挂载 iframe 一次,预览工具栏另提供「⟳ 刷新预览」按钮供手动重载。
 - 管理后台 `AdminProject`:版本详情从「单份 HTML」升级为**文件树浏览 + 逐文件源码预览**;每个版本由后台签发草稿令牌,可直接用 `/p/:token/` 预览任意历史版本。
 ## 14. 版本能力(用户侧)
 
@@ -716,6 +716,7 @@ curl -s -X PUT "$BASE/blob" -d x                           # 405(列举只允许
 
 - **生成中继续输入(steering)**:任务 `pending/running` 期间输入框不再禁用,回车/「追加」把内容投给正在执行的 agent(服务端链路见 §5.2)。输入框 placeholder 与按钮文案随状态切换:生成中显示「追加」+「■ 停止」并排,空闲时只有「发送」。追加请求失败时**输入与附件原样留在框里**,用户可直接重试;任务刚好结束(409)则退化成正常发送,不丢内容。
 - **粘贴图片**:`Cmd/Ctrl+V` 直接把剪贴板里的图片加进待发送附件,走浏览器原生 `clipboardData.items`,无额外依赖。粘贴来源常缺扩展名,`withPastedName()` 按 MIME 补一个(`粘贴图片-<ts>.jpg`),否则过不了白名单。纯文本粘贴不拦截,仍是浏览器默认行为。
+- **中文输入法回车不误发**:组词期间的 Enter 用于确认候选词,`onCompositionStart/End` 状态 + `isComposing` / `keyCode 229` / 组词收尾后的 100ms 窗口共同拦截,候选词先落进输入框;再按一次回车才发送。
 - **附件限额随状态切换**:空闲发送用 `SEND_LIMITS`(图片 2MB / 文本 256KB / 合计 4MB),生成中追加用更紧的 `STEER_LIMITS`(1MB / 128KB / 1.2MB,见 §5.2);两套常量在 `web/src/lib/attachments.ts` 与 Worker 侧 `src/lib/attachments.ts` 各写一份,以后者为准(前端只是提前拦)。工具提示里的上限文案按当前状态动态生成。
 - **对话栏宽度可调**:桌面端把右边缘的 6px 拖拽条拖动即改宽(`pointerdown` → 跟随位移 → 松手落库),双击复位。默认宽度从 380px 提到 **460px**;范围 `340–760px`,并额外受 `window.innerWidth - 360` 约束,保证预览区不被挤没。宽度存 `localStorage['forge.chatWidth']`(读写都做 `clampWidth` + try/catch,隐私模式下调宽仍生效、只是不记忆)。窄屏(`<768px`)由 `w-full` 决定,内联宽度只在桌面端生效,移动端仍是整屏 + 顶部标签切换。
 

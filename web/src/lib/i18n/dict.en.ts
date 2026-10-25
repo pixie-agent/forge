@@ -329,6 +329,8 @@ export const en: Record<DictKey, string> = {
   'preview.commitTitle': 'Save the current draft as a version; you can publish it afterwards',
   'preview.device.desktop': 'Desktop',
   'preview.device.mobile': 'Mobile',
+  'preview.refresh': 'Refresh preview',
+  'preview.refreshTitle': 'Reload the preview; it refreshes automatically when generation finishes — use this if the page still shows old content',
   'preview.publishTitle': 'Publish the current working version (creates a public link anyone can open)',
   'preview.publishSwitchTitle': 'Publish v{version} directly and switch the live version; the working version is untouched',
   'preview.switchLive': 'Switch live to v{version}',

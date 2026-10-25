@@ -334,6 +334,8 @@ export const zh = {
   'preview.commitTitle': '把当前草稿保存为一个正式版本;之后可发布上线',
   'preview.device.desktop': '桌面',
   'preview.device.mobile': '移动',
+  'preview.refresh': '刷新预览',
+  'preview.refreshTitle': '重新加载预览;生成完成后会自动刷新,如页面仍是旧内容可手动再刷',
   'preview.publishTitle': '把当前工作版本发布上线(生成公开链接,任何人可访问)',
   'preview.publishSwitchTitle': '把 v{version} 直接发布上线,切换线上版本;不改动当前工作版本',
   'preview.switchLive': '切换线上到 v{version}',
