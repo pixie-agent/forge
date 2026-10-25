@@ -13,10 +13,10 @@ UPDATE model_configs SET enabled = 0, updated_at = datetime('now') WHERE channel
 
 INSERT OR REPLACE INTO model_configs
   (id, name, channel, provider_id, base_url, api_dialect, model_id, thinking_level,
-   thinking_format, max_tokens, reasoning, image_input, design_review,
+   thinking_format, api_key_env, max_tokens, reasoning, image_input, design_review,
    max_run_ms, polish_max_ms, queue_concurrency, input_price, output_price, cache_read_price, cache_write_price, enabled)
 VALUES
   ('cfg-free-minimax-m3-1-flash-low', '免费 · MiniMax-M3.1-Flash(排队, low)', 'free', 'forge',
    'https://api.minimaxi.com/anthropic', 'anthropic-messages', 'MiniMax-M3.1-Flash', 'low',
-   '', 16384, 1, 0, 'generate',
+   '', 'LLM_API_KEY_MINIMAX', 16384, 1, 0, 'generate',
    1500000, 300000, 2, 0, 0, 0, 0, 1);

@@ -35,6 +35,8 @@ interface ConfigRow {
   model_id: string
   thinking_level: string
   thinking_format: string
+  /** 密钥环境变量名(Cloud Run Secret 绑定名),只存变量名不存密钥值 */
+  api_key_env: string
   max_tokens: number
   reasoning: number
   image_input: number
@@ -72,6 +74,7 @@ const EMPTY_FORM = {
   api_dialect: 'openai-completions',
   thinking_level: 'medium',
   thinking_format: '',
+  api_key_env: 'LLM_API_KEY',
   max_tokens: '16384',
   design_review: 'generate',
   max_run_ms: '3000000',
@@ -155,6 +158,7 @@ export default function AdminModels() {
       api_dialect: row.api_dialect,
       thinking_level: row.thinking_level,
       thinking_format: row.thinking_format,
+      api_key_env: row.api_key_env || 'LLM_API_KEY',
       max_tokens: String(row.max_tokens),
       design_review: row.design_review,
       max_run_ms: String(row.max_run_ms),
@@ -301,6 +305,9 @@ export default function AdminModels() {
                           <div>
                             {row.api_dialect} · 思考 {row.thinking_level}({thinkingFormatLabel(row.thinking_format)})
                           </div>
+                          <div className="truncate" title={row.api_key_env || 'LLM_API_KEY'}>
+                            凭证 {row.api_key_env || 'LLM_API_KEY'}
+                          </div>
                           <div>
                             输出 {row.max_tokens} · 运行上限 {secs(row.max_run_ms)} · 复查轮{' '}
                             {chineseStage(row.design_review)}
@@ -423,6 +430,25 @@ export default function AdminModels() {
                       <option value="qwen-chat-template">qwen-chat-template</option>
                       <option value="openrouter">openrouter(reasoning.effort)</option>
                     </select>
+                  </div>
+                  <div>
+                    <label className={labelClass}>凭证(执行体绑定的 Secret 变量名)</label>
+                    <input
+                      className={inputClass}
+                      list="api-key-env-options"
+                      value={form.api_key_env}
+                      onChange={(e) => setForm({ ...form, api_key_env: e.target.value })}
+                      placeholder="LLM_API_KEY"
+                    />
+                    <datalist id="api-key-env-options">
+                      <option value="LLM_API_KEY" />
+                      <option value="LLM_API_KEY_MINIMAX" />
+                      <option value="LLM_API_KEY_GLM" />
+                      <option value="LLM_API_KEY_DEEPSEEK" />
+                    </datalist>
+                    <p className="mt-1 text-[11px] text-gray-500">
+                      只填变量名,不填密钥值。执行体没绑定该变量时任务会直接失败并退款,不会再交付空脚手架。
+                    </p>
                   </div>
                   <div>
                     <label className={labelClass}>输出上限 max_tokens(思考预算从这里划)</label>
@@ -582,6 +608,9 @@ export default function AdminModels() {
                             {row.api_dialect}
                             <div>
                               {row.thinking_level} · {thinkingFormatLabel(row.thinking_format)}
+                            </div>
+                            <div className="truncate" title={row.api_key_env || 'LLM_API_KEY'}>
+                              {row.api_key_env || 'LLM_API_KEY'}
                             </div>
                             <div>{chineseStage(row.design_review)}</div>
                           </td>

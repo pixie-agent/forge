@@ -24,6 +24,12 @@ export interface AgentConfig {
     baseUrl: string
     apiKey: string
   }
+  /**
+   * 本次任务实际使用的密钥环境变量名(执行体启动时绑定的 Secret)。
+   * 默认 LLM_API_KEY,可由后台 model_configs.api_key_env 逐行覆盖 ——
+   * 同一个执行体可以同时绑定多把 key(MiniMax / GLM / DeepSeek),后台切换无需重部署。
+   */
+  apiKeyEnv: string
   /** LLM 网关的 API 方言:openai-completions(OpenAI 兼容)| anthropic-messages(Anthropic 兼容) */
   llmApi: 'openai-completions' | 'anthropic-messages' | 'openai-responses'
   /** pi 的思考级别:off | minimal | low | medium | high | xhigh(非推理模型会被 pi 自动降级) */
@@ -73,6 +79,7 @@ export function loadConfig(): AgentConfig {
       baseUrl: required('LLM_BASE_URL'),
       apiKey: required('LLM_API_KEY'),
     },
+    apiKeyEnv: 'LLM_API_KEY',
     llmApi: (process.env.PI_LLM_API ?? 'openai-completions') as AgentConfig['llmApi'],
     thinkingLevel: (process.env.PI_THINKING_LEVEL ?? 'medium') as AgentConfig['thinkingLevel'],
     modelReasoning: process.env.PI_MODEL_REASONING === 'true',
@@ -91,6 +98,11 @@ const API_DIALECTS = new Set(['openai-completions', 'anthropic-messages'])
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
 const THINKING_FORMATS = new Set(['openai', 'openrouter', 'zai', 'qwen', 'qwen-chat-template'])
 const DESIGN_REVIEWS = new Set(['off', 'generate', 'always'])
+/**
+ * 允许下发的密钥环境变量名。白名单化成「LLM_API_KEY」或「LLM_API_KEY_XXX」,
+ * 防止后台把 AGENT_SECRET 之类的非模型 Secret 发给上游网关。
+ */
+const API_KEY_ENV_RE = /^LLM_API_KEY(?:_[A-Z0-9]+)*$/
 /** Cloud Run --timeout 3600s,留 200s 给构建/收尾 */
 const MAX_RUN_MS = 3_400_000
 
@@ -117,11 +129,15 @@ export function applyModelOverride(base: AgentConfig, o?: ModelOverride): AgentC
   const maxRunMs = clamp(o.maxRunMs, base.maxRunMs, 60_000, MAX_RUN_MS)
   const designReview =
     o.designReview && DESIGN_REVIEWS.has(o.designReview) ? o.designReview : base.designReview
+  // 密钥只切换「用哪个环境变量」,密钥值始终留在 Cloud Run 的 Secret 里
+  const apiKeyEnv =
+    typeof o.apiKeyEnv === 'string' && API_KEY_ENV_RE.test(o.apiKeyEnv) ? o.apiKeyEnv : base.apiKeyEnv
   return {
     ...base,
     providerId: (typeof o.providerId === 'string' && o.providerId.trim().slice(0, 40)) || base.providerId,
     modelId,
     llm: { ...base.llm, baseUrl },
+    apiKeyEnv,
     llmApi,
     thinkingLevel,
     thinkingFormat,

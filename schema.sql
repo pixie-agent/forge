@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS model_configs (
   model_id           TEXT NOT NULL,
   thinking_level     TEXT NOT NULL DEFAULT 'medium',
   thinking_format    TEXT NOT NULL DEFAULT '',   -- pi compat.thinkingFormat;空 = 按 baseUrl 自动推断
+  api_key_env        TEXT NOT NULL DEFAULT 'LLM_API_KEY', -- 该行使用的密钥环境变量名(执行体上绑定的 Secret),不含密钥值
   max_tokens         INTEGER NOT NULL DEFAULT 16384,
   reasoning          INTEGER NOT NULL DEFAULT 1,
   image_input        INTEGER NOT NULL DEFAULT 0,

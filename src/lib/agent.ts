@@ -15,7 +15,7 @@ export interface ArtifactManifestPayload {
 
 /**
  * 本次任务的模型覆盖(来自后台 model_configs 的生效行,见 src/lib/modelConfig.ts)。
- * 只传配置,不传密钥 —— agent 仍然从 Cloud Run env 读取 LLM_API_KEY。
+ * 只传配置与凭证变量名(apiKeyEnv),不传密钥值 —— 密钥仍来自 Cloud Run 的 Secret。
  */
 export interface AgentModelOverride {
   providerId?: string
@@ -27,6 +27,12 @@ export interface AgentModelOverride {
   thinkingFormat?: 'openai' | 'openrouter' | 'zai' | 'qwen' | 'qwen-chat-template'
   /** pi Model.maxTokens */
   maxTokens?: number
+  /**
+   * 该配置使用的密钥环境变量名(执行体启动时绑定的 Secret),缺省 LLM_API_KEY。
+   * 只传变量名,不传密钥本身 —— 同一个执行体可以绑定多把 key,后台配置按行选择用哪把。
+   * 命名必须匹配 /^LLM_API_KEY(_[A-Z0-9_]+)?$/,防止把非模型密钥(如 AGENT_SECRET)发给上游。
+   */
+  apiKeyEnv?: string
   reasoning?: boolean
   imageInput?: boolean
   designReview?: 'off' | 'generate' | 'always'

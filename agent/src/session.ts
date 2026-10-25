@@ -34,7 +34,7 @@ function modelsJson(config: AgentConfig): string {
   const provider: Record<string, unknown> = {
     baseUrl: config.llm.baseUrl.replace(/\/+$/, ''),
     api: config.llmApi,
-    apiKey: 'LLM_API_KEY',
+    apiKey: config.apiKeyEnv,
     models: [model],
   }
   // 仅 OpenAI 兼容方言需要这些 compat(Anthropic 方言不认 reasoning_effort/developer 等字段)

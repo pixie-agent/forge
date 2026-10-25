@@ -82,7 +82,7 @@ export interface RunUsage {
 
 /**
  * 后台下发的模型覆盖(Worker 侧 src/lib/agent.ts 有对应副本)。
- * 只含配置,不含密钥:llm.apiKey 仍来自 Cloud Run 的 LLM_API_KEY。
+ * 只含配置,不含密钥值:密钥仍来自 Cloud Run 的 Secret,这里只选择用哪个变量(apiKeyEnv)。
  */
 export interface ModelOverride {
   providerId?: string
@@ -94,6 +94,11 @@ export interface ModelOverride {
   thinkingFormat?: 'openai' | 'openrouter' | 'zai' | 'qwen' | 'qwen-chat-template'
   /** pi Model.maxTokens */
   maxTokens?: number
+  /**
+   * 该配置使用的密钥环境变量名(执行体启动时绑定的 Secret),缺省 LLM_API_KEY。
+   * 只传变量名,不传密钥值;命名必须匹配 /^LLM_API_KEY(_[A-Z0-9]+)*$/。
+   */
+  apiKeyEnv?: string
   reasoning?: boolean
   imageInput?: boolean
   designReview?: 'off' | 'generate' | 'always'
