@@ -1,0 +1,10 @@
+# Initial maintainer. Replace with a Pixie Agent team once that team exists.
+* @white1or1black
+
+/wrangler.jsonc @white1or1black
+/schema*.sql @white1or1black
+/src/routes/auth.ts @white1or1black
+/src/routes/billing.ts @white1or1black
+/src/routes/internal.ts @white1or1black
+/agent/ @white1or1black
+/.github/ @white1or1black
