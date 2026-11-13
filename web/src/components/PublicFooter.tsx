@@ -1,9 +1,9 @@
 import { Link } from 'react-router-dom'
 import { useT } from '../lib/i18n'
-import { BUSINESS_NAME, LEGAL_ENTITY, SUPPORT_EMAIL } from '../lib/site'
+import { BUSINESS_NAME, GITHUB_URL, LEGAL_ENTITY, SUPPORT_EMAIL } from '../lib/site'
 
 /**
- * 公共页脚:价格 + 三份法务文档 + 支持邮箱。
+ * 公共页脚:价格 + 三份法务文档 + 支持邮箱 + 开源仓库。
  *
  * Creem 账户复审要求 Privacy Policy / Terms of Service 能从首页与注册页公开访问,
  * 且支持邮箱必须与店铺 business details 一致(见 `lib/site.ts`)。
@@ -36,6 +36,9 @@ export default function PublicFooter() {
           <Link to="/acceptable-use" className="hover:text-gray-200">
             {t('footer.acceptableUse')}
           </Link>
+          <a href={GITHUB_URL} target="_blank" rel="noreferrer" className="hover:text-gray-200">
+            GitHub
+          </a>
           <a href={`mailto:${SUPPORT_EMAIL}`} className="hover:text-gray-200">
             {t('footer.support')}: {SUPPORT_EMAIL}
           </a>

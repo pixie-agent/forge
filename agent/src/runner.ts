@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { promisify } from 'node:util'
 import type { AgentConfig } from './config.js'
 import type { ProgressReporter, StreamLogger } from './callback.js'
-import type { AgentSession } from '@mariozechner/pi-coding-agent'
+import type { AgentSession } from '@earendil-works/pi-coding-agent'
 import { polishPrompt, buildUserPrompt, parsePlan, deliveryNotePrompt } from './prompt.js'
 import { resolveOutputLang, localeCode, matchesLang } from './lang.js'
 import { t, type UiLang } from './i18n.js'
@@ -20,8 +20,8 @@ const execFileAsync = promisify(execFile)
 
 /** 收集源码树时跳过的目录(依赖、临时、构建产物、用户附件、连接器凭证) */
 const SKIP_DIRS = new Set(['node_modules', '.pi', '.git', 'dist', ATTACHMENT_DIR, CONNECTOR_DIR])
-/** 顶层不作为“源码”交付的文件(计划与锁文件) */
-const SKIP_ROOT_FILES = new Set(['plan.json', 'package-lock.json'])
+/** 顶层不作为“源码”交付的文件(计划文件) */
+const SKIP_ROOT_FILES = new Set(['plan.json'])
 const BUILD_TIMEOUT_MS = 5 * 60 * 1000
 const MAX_FILE_PREVIEW = 20_000
 /** 复查轮至少要有这么多剩余预算才值得跑 */
@@ -35,6 +35,9 @@ const DELIVERY_RETRY_MIN_MS = 120_000
  * (旧的生成结果里被改坏的 forge.js / index.css 等,在这里被纠正)。
  */
 const PLATFORM_FILES = [
+  'LICENSE',
+  'THIRD_PARTY_NOTICES.md',
+  'package-lock.json',
   'index.html',
   'package.json',
   'vite.config.js',
@@ -193,7 +196,7 @@ async function collectSource(workspace: string): Promise<FileMap> {
   return readIntoMap(workspace, paths)
 }
 
-/** pi 的多模态输入块(与 @mariozechner/pi-ai 的 ImageContent 结构一致) */
+/** pi 的多模态输入块(与 @earendil-works/pi-ai 的 ImageContent 结构一致) */
 type ImageBlock = { type: 'image'; data: string; mimeType: string }
 
 /**

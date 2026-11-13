@@ -33,7 +33,8 @@ export function verificationUrl(env: Env, requestUrl: string, token: string, ide
  */
 async function sendEmail(env: Env, to: string, subject: string, text: string, html: string): Promise<string> {
   if (!env.RESEND_API_KEY) throw new Error('RESEND_API_KEY 未配置')
-  const from = env.EMAIL_FROM || 'noreply@1forgen.site'
+  if (!env.EMAIL_FROM) throw new Error('EMAIL_FROM 未配置')
+  const from = env.EMAIL_FROM
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -79,7 +80,7 @@ export async function sendVerificationEmail(
  * 邮件只是通知,失败绝不影响加积分本身(调用方只统计成功/失败数)。
  */
 export async function sendCreditGrantEmail(env: Env, to: string, amount: number, balance: number): Promise<string> {
-  const base = (env.PUBLIC_BASE_URL || 'https://app.1forgen.site').replace(/\/+$/, '')
+  const base = env.PUBLIC_BASE_URL.replace(/\/+$/, '')
   const link = new URL('/', base).toString()
   const vars = { amount, balance, link }
   const subject = `${srv('zh', 'grant.subject')} · ${srv('en', 'grant.subject')}`

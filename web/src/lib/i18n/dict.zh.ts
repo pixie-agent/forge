@@ -307,6 +307,7 @@ export const zh = {
   // ---------- 工作台(页面级提示) ----------
   'ws.generateFailed': '生成失败,请重试',
   'ws.syncFailed': '生成结果同步失败,请刷新页面查看最新版本',
+  'ws.stage.connecting': '正在连接执行服务',
   'ws.stage.planning': '正在规划方案',
   'ws.stage.coding': '正在编写应用代码',
   'ws.stage.building': '正在构建应用产物',

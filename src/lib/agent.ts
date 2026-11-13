@@ -87,6 +87,11 @@ export interface AgentRunResult {
   summary?: string
 }
 
+/** Agent 已明确返回失败或无效响应:该请求已经结束,不会再有迟到的成功结果。 */
+export class AgentDispatchError extends Error {
+  override name = 'AgentDispatchError'
+}
+
 /**
  * 派发到 Cloud Run。请求在 Cloud Run 侧一直持有到 agent 跑完(请求级计费,用完即缩容)。
  * `agentUrl` 用来把免费通道送到独立执行体(便宜模型 + 进程内排队);不传则用默认 AGENT_URL。
@@ -120,9 +125,14 @@ export async function dispatchAgent(
     } catch {
       message = text.slice(0, 200)
     }
-    throw new Error(message || srv(lang, 'agent.failed', { status: res.status }))
+    throw new AgentDispatchError(message || srv(lang, 'agent.failed', { status: res.status }))
   }
-  const data = JSON.parse(text) as AgentRunResult
-  if (!data?.src || !data.dist || !data.manifest) throw new Error(srv(lang, 'agent.noArtifact'))
+  let data: AgentRunResult
+  try {
+    data = JSON.parse(text) as AgentRunResult
+  } catch {
+    throw new AgentDispatchError(srv(lang, 'agent.noArtifact'))
+  }
+  if (!data?.src || !data.dist || !data.manifest) throw new AgentDispatchError(srv(lang, 'agent.noArtifact'))
   return data
 }

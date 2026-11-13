@@ -3,16 +3,16 @@ import type { Context } from 'hono'
 import type { AppEnv, ConnectorGrant, ProjectRow } from '../types'
 import { requireUser } from '../lib/auth'
 import { activeJobSnapshot, lastFailedJobSnapshot, insertMessage, ACTIVE_STATUS_SQL } from '../lib/jobHelpers'
-import { dispatchAgent, type FileMap } from '../lib/agent'
+import { dispatchAgent, AgentDispatchError, type FileMap } from '../lib/agent'
 import { loadCheckpoint } from '../lib/checkpoints'
 import { attachmentMarkdown, parseAttachments, SEND_LIMITS, STEER_LIMITS, type AgentAttachment } from '../lib/attachments'
 import { resolveGrants } from '../lib/connectors/store'
 import { DRAFT_VERSION_NO } from '../lib/artifacts'
-import { type JobType, createJob } from '../lib/jobs'
+import { type JobType, createJob, settleJobIfStale } from '../lib/jobs'
 import { jobCost, releaseJobCredits, reserveCredits } from '../lib/credits'
 import { getModelConfigForUser, modelChannelForUser, modelOverrideOf } from '../lib/modelConfig'
 import { listSep, parseLang, srv, type Lang } from '../lib/i18n'
-import { cancelJob } from '../lib/commit'
+import { cancelJob, markJobFailed } from '../lib/commit'
 import { logEvent } from '../lib/events'
 
 const app = new Hono<AppEnv>()
@@ -188,8 +188,16 @@ async function launchJob(
       queueConcurrency: channel === 'free' ? modelConfig?.queue_concurrency : undefined,
     }, channel === 'free' ? c.env.AGENT_URL_FREE : undefined)
   }
-  // 不 await:agent 长跑期间连接可能被掐断(524);结果经 commit 回调交付
-  c.executionCtx.waitUntil(dispatch().catch((err) => console.error(`[dispatch] ${jobId.slice(0, 8)} ${err instanceof Error ? err.message : String(err)}`)))
+  // 明确的 Agent HTTP 错误(401/4xx/5xx、响应缺产物)不会再有迟到结果,立即落失败并退积分。
+  // 网络断开/524 仍可能只是 Worker 连接被掐、Agent 在后台继续跑,不能贸然判死;
+  // 这类不确定错误由心跳 + 查询时主动判死 + cron 三层兜底。
+  c.executionCtx.waitUntil(
+    dispatch().catch(async (err) => {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error(`[dispatch] ${jobId.slice(0, 8)} ${message}`)
+      if (err instanceof AgentDispatchError) await markJobFailed(c.env, jobId, message)
+    })
+  )
   return c.json({ jobId, message: userText })
 }
 
@@ -328,10 +336,12 @@ app.post('/:id/resume', async (c) => {
 app.get('/:id/job/active', async (c) => {
   const userId = c.get('user').id
   const projectId = c.req.param('id')
-  const [job, resume] = await Promise.all([
-    activeJobSnapshot(c.env.DB, projectId, userId),
-    lastFailedJobSnapshot(c.env.DB, projectId, userId),
-  ])
+  let job = await activeJobSnapshot(c.env.DB, projectId, userId)
+  if (job) {
+    await settleJobIfStale(c.env, job.id)
+    job = await activeJobSnapshot(c.env.DB, projectId, userId)
+  }
+  const resume = await lastFailedJobSnapshot(c.env.DB, projectId, userId)
   return c.json({ job, resume })
 })
 

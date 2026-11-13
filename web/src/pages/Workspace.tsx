@@ -355,13 +355,15 @@ export default function Workspace() {
     ? ''
     : job?.progress
       ? job.progress
-      : runningAction === 'chat'
-        ? t('ws.stage.chat')
-        : job?.stage === 'coding' || plan
-          ? t('ws.stage.coding')
-          : job?.stage === 'building'
-            ? t('ws.stage.building')
-            : t('ws.stage.planning')
+      : job?.status === 'pending'
+        ? t('ws.stage.connecting')
+        : runningAction === 'chat'
+          ? t('ws.stage.chat')
+          : job?.stage === 'coding' || plan
+            ? t('ws.stage.coding')
+            : job?.stage === 'building'
+              ? t('ws.stage.building')
+              : t('ws.stage.planning')
 
   useEffect(() => {
     if (!id) return

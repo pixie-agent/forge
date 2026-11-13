@@ -3,14 +3,21 @@ import { streamSSE } from 'hono/streaming'
 import type { AppEnv } from '../types'
 import { requireUser } from '../lib/auth'
 import { jobSnapshot, isTerminalStatus } from '../lib/jobHelpers'
+import { settleJobIfStale } from '../lib/jobs'
 
 /** 任务状态轮询:仅任务属主可查 */
 const app = new Hono<AppEnv>()
 app.use('*', requireUser)
 
 app.get('/:id', async (c) => {
-  const job = await jobSnapshot(c.env.DB, c.req.param('id'), c.get('user').id)
+  const id = c.req.param('id')
+  const userId = c.get('user').id
+  let job = await jobSnapshot(c.env.DB, id, userId)
   if (!job) return c.json({ error: '任务不存在' }, 404)
+  if (!isTerminalStatus(job.status)) {
+    await settleJobIfStale(c.env, id)
+    job = await jobSnapshot(c.env.DB, id, userId)
+  }
   return c.json({ job })
 })
 
@@ -24,13 +31,24 @@ app.get('/:id', async (c) => {
 app.get('/:id/events', async (c) => {
   const id = c.req.param('id')
   const userId = c.get('user').id
-  if (!(await jobSnapshot(c.env.DB, id, userId))) return c.json({ error: '任务不存在' }, 404)
+  let initial = await jobSnapshot(c.env.DB, id, userId)
+  if (!initial) return c.json({ error: '任务不存在' }, 404)
+  if (!isTerminalStatus(initial.status)) {
+    await settleJobIfStale(c.env, id)
+    initial = await jobSnapshot(c.env.DB, id, userId)
+  }
 
   return streamSSE(c, async (stream) => {
     let last = ''
     let lastSentAt = 0
+    let lastLivenessCheck = 0
     try {
       for (;;) {
+        const now = Date.now()
+        if (now - lastLivenessCheck >= 5_000) {
+          await settleJobIfStale(c.env, id)
+          lastLivenessCheck = now
+        }
         const snap = await jobSnapshot(c.env.DB, id, userId)
         if (!snap) break
         // 用长度而非整串参与指纹:files_preview/agent_log 变化频繁,长度变化即触发一次推送
@@ -43,10 +61,10 @@ app.get('/:id/events', async (c) => {
           snap.files_preview?.content.length ?? 0,
           snap.agent_log?.length ?? 0,
         ])
-        const now = Date.now()
-        if (fp !== last || now - lastSentAt > 5_000) {
+        const sentAt = Date.now()
+        if (fp !== last || sentAt - lastSentAt > 5_000) {
           last = fp
-          lastSentAt = now
+          lastSentAt = sentAt
           await stream.writeSSE({ data: JSON.stringify(snap) })
         }
         if (isTerminalStatus(snap.status)) break
