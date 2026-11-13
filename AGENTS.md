@@ -51,16 +51,16 @@ npm run agent:deploy:prod                                       #    只在改�
 
 ### 部署生产的硬门槛(脚本强制,不要绕)
 
-`npm run deploy` 的 `predeploy` 钩子 `scripts/guard-prod-deploy.mjs` 强制两条,任一不满足即中止:
+`npm run deploy`、`npm run agent:deploy:prod` 与 `npm run agent:deploy:free:prod` 都通过对应的 `pre*` 钩子执行 `scripts/guard-prod-deploy.mjs`,强制两条,任一不满足即中止:
 
 1. 当前分支必须是 `main`
 2. 工作区必须干净(无未提交改动)
 
-**不要为了部署去改守卫、`git stash` 或部分提交。** 唯一正确的路径是把改动合并到 `main`。`npm run deploy:staging` / `npm run agent:deploy:staging` 故意**不挂**守卫——未合并、未提交的改动正是要靠它验证。
+**不要为了部署去改守卫、`git stash` 或部分提交。** 唯一正确的路径是把改动合并到 `main`。`npm run deploy:staging` / `npm run agent:deploy:staging` / `npm run agent:deploy:free:staging` 故意**不挂**守卫——未合并、未提交的改动正是要靠它验证。
 
 ### 禁止自动部署生产
 
-**不要主动执行 `npm run deploy` / `npm run agent:deploy:prod`。** 先说明要发什么、影响范围,等用户明确放行(例如「发布吧」)后再执行。staging 部署不需要这道放行。
+**不要主动执行 `npm run deploy` / `npm run agent:deploy:prod` / `npm run agent:deploy:free:prod`。** 先说明要发什么、影响范围,等用户明确放行(例如「发布吧」)后再执行。staging 部署不需要这道放行。
 
 ---
 
@@ -96,13 +96,14 @@ npm run agent:deploy:prod                                       #    只在改�
 ## 5. 常用命令
 
 ```bash
-npm run typecheck               # 前后端类型检查
+npm run typecheck               # Worker + Web + Agent 类型检查
 npm run build                   # 构建 web/dist(生产与 staging 共用同一份产物)
+npm run check                   # 类型检查 + Web / Agent / 生成模板全构建
 npm run deploy                  # 生产 Worker(守卫:必须 main 且工作区干净)
 npm run deploy:staging          # staging Worker(无守卫)
-npm run agent:deploy:prod       # 生产 Cloud Run agent(VIP 通道)
+npm run agent:deploy:prod       # 生产 Cloud Run agent(VIP 通道;守卫:必须 main 且工作区干净)
 npm run agent:deploy:staging    # staging Cloud Run agent(VIP 通道)
-npm run agent:deploy:free:prod     # 生产免费通道执行体(MiniMax-M3.1-Flash + 进程内排队)
+npm run agent:deploy:free:prod     # 生产免费通道执行体(同一生产守卫 + MiniMax-M3.1-Flash + 进程内排队)
 npm run agent:deploy:free:staging  # staging 免费通道执行体
 npm run db:init:staging         # staging 库初始化(幂等)
 npm run db:migrate:google:staging

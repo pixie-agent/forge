@@ -24,11 +24,11 @@ app.route('/api/projects', projectRoutes)
 app.route('/api/projects', projectConnectorRoutes)
 app.route('/api/projects', generateRoutes)
 app.route('/api/jobs', jobRoutes)
-// 计费:价目表(公开)、账户摘要、发起结账(阶段三为骨架,结账返回 501;见 docs/FORGE2.md §20)
+// 计费:价目表(公开)、账户摘要、Creem 结账与 webhook
 app.route('/api/billing', billingRoutes)
 // 连接器 · 账号级(授权跳转与回调)
 app.route('/api/connections', connectionRoutes)
-// 管理后台(只读,独立口令鉴权):跨用户查看产物
+// 管理后台(独立口令鉴权):跨用户查看产物、用户、模型与用量
 app.route('/api/admin', adminRoutes)
 // 首页精选案例:公开只读列表 + 登录用户克隆(见 docs/FORGE2.md §23)
 app.route('/api/showcase', showcaseRoutes)

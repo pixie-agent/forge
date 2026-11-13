@@ -49,6 +49,7 @@ const MESSAGES = {
     'resume.notLatest': '该任务已不是项目最新进度,不能从它继续(避免覆盖后续生成的内容)',
     'resume.noCheckpoint': '没有可用的断点快照(可能已过期或该任务还没写入过快照)',
     // ── 任务失败/取消(写进 jobs.error,前端原样展示)──
+    'job.notStarted': '执行服务未能接收任务,请检查配置后重试',
     'job.lost': '任务执行体失联,请重试',
     'job.timeout': '任务超时未完成,请重新发起',
     'job.cancelled': '已手动停止',
@@ -100,6 +101,7 @@ const MESSAGES = {
     'resume.notLatest': 'This task is no longer the latest progress for the project, so it cannot be resumed (this avoids overwriting newer work)',
     'resume.noCheckpoint': 'No checkpoint snapshot is available (it may have expired, or the task never wrote one)',
     // ── 任务失败/取消(写进 jobs.error,前端原样展示)──
+    'job.notStarted': 'The execution service did not accept the task. Check its configuration and try again.',
     'job.lost': 'Lost contact with the execution service. Please try again.',
     'job.timeout': 'The task timed out. Please start it again.',
     'job.cancelled': 'Stopped manually',

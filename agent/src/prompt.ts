@@ -166,7 +166,7 @@ ${languageBlock(lang, mode)}
 文件权限(违反会被平台强制还原,等于白做):
 - **可自由改写**:src/App.jsx、src/components/ 下你自己新建的文件、src/pages/ 等。
 - **只允许改两行**:src/styles/tokens.css 里的 --brand 与 --accent。
-- **禁止修改**:package.json、vite.config.js、index.html、src/main.jsx、src/index.css、
+- **禁止修改**:LICENSE、THIRD_PARTY_NOTICES.md、package.json、package-lock.json、vite.config.js、index.html、src/main.jsx、src/index.css、
   src/styles/ 下除 tokens.css 外的文件、src/lib/{forge,store,motion,cx,connectors,locale}.js、src/components/ui/**。
   这些是平台资产:需要某种样式/组件时,用它们提供的 API 组合,而不是改它们。
 
@@ -233,7 +233,7 @@ export function polishPrompt(lang: OutputLang, mode: 'generate' | 'chat'): strin
       : `10. 语言:所有文案是否都是 ${name}?有没有混入中文或其它语言(脚手架里的中文示例、组件默认文案)?有就改过来。`
   return `你是本项目的设计总监。初稿已完成并通过了构建。现在做最后一轮**精修打磨**:先读回你自己写的源码(至少 src/App.jsx、你新建的组件、以及 src/styles/tokens.css),然后按下面清单逐项核对,不合格就**直接改文件**。
 
-只做精修,严格禁止:推翻整体结构、删减已有功能、改动数据接口/集合名/键名、修改平台文件(src/components/ui/**、src/lib/**、src/styles/ 除 tokens.css 外)。
+只做精修,严格禁止:推翻整体结构、删减已有功能、改动数据接口/集合名/键名、修改许可证或平台文件(LICENSE、THIRD_PARTY_NOTICES.md、package.json、package-lock.json、src/components/ui/**、src/lib/**、src/styles/ 除 tokens.css 外)。
 
 复查清单:
 1. 配色:页面是否真的用了 tokens.css 里的 --brand/--accent?有没有残留的 gray-*/slate-*/写死 hex?品牌色是否只用在重点(CTA、选中态、强调数字)而不是整页铺满?
@@ -300,7 +300,7 @@ export function chatPrompt(req: RunRequest, lang: OutputLang): string {
 修改要求:${requirement}
 
 注意:
-- 改动写回对应源文件(入口仍是 src/App.jsx),不要改动 package.json / vite.config.js / src/main.jsx 与平台文件(src/components/ui/**、src/lib/**、src/styles/ 除 tokens.css 的 --brand/--accent 外)。
+- 改动写回对应源文件(入口仍是 src/App.jsx),不要改动 LICENSE / THIRD_PARTY_NOTICES.md / package.json / package-lock.json / vite.config.js / src/main.jsx 与平台文件(src/components/ui/**、src/lib/**、src/styles/ 除 tokens.css 的 --brand/--accent 外)。
 - 新 UI **优先复用** './components/ui/index.js' 里的组件与现有语义类名;不要引入新的颜色体系、不要写 gray-*/写死 hex,保持全站视觉一致。
 - 若应用使用了 src/lib/forge.js 或 src/lib/store.js 的数据接口,保持调用方式与集合名/键名原样,不要删除相关代码;改数据逻辑时优先用新能力:db.list 的 limit/offset/q 与 total、db.count、counter.incr、blob.url/blob.list、useCollection 的 query/setQuery/hasMore/loadMore。
 - 本次**新增或修改**的文案用 ${langName(lang)} 写;已有文案保持原样(不要顺手把整站翻掉)。除非用户明确要求换语言。

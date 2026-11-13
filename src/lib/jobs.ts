@@ -8,7 +8,9 @@ export type JobType = 'generate' | 'chat'
 /** cancelled = 用户手动停止(终态,不扣积分);由 POST /api/projects/:id/cancel 落定,见 src/lib/commit.ts */
 export type JobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
-/** agent 心跳间隔 20s;超过这么久没心跳即认为执行体失联(Cold start + 首跳留足余量) */
+/** Agent 接活上限:Cloud Run 冷启动/请求排队应在此时间内完成,首个心跳会把 pending 转为 running。 */
+const AGENT_START_TIMEOUT_SECONDS = 45
+/** agent 心跳间隔 20s;超过这么久没心跳即认为执行体失联(短暂网络抖动留足余量) */
 const HEARTBEAT_TIMEOUT_SECONDS = 180
 /** 任务总龄上限:略大于 Cloud Run --timeout(3600s),平台强杀(实例消失、无 fail 回调)后靠巡检兜底判死 */
 const JOB_MAX_SECONDS = 3700
@@ -57,6 +59,24 @@ export async function createJob(
   return result.meta.changes ? id : null
 }
 
+export async function settleJobIfStale(env: Env, jobId: string): Promise<boolean> {
+  const row = await env.DB
+    .prepare(
+      `SELECT status, payload,
+         CASE WHEN created_at < datetime('now', '-${JOB_MAX_SECONDS} seconds') THEN 1 ELSE 0 END AS timed_out
+       FROM jobs WHERE id = ? AND ${ACTIVE_STATUS_SQL} AND (
+         (status = 'pending' AND created_at < datetime('now', '-${AGENT_START_TIMEOUT_SECONDS} seconds'))
+         OR (status = 'running' AND updated_at < datetime('now', '-${HEARTBEAT_TIMEOUT_SECONDS} seconds'))
+         OR created_at < datetime('now', '-${JOB_MAX_SECONDS} seconds')
+       )`
+    )
+    .bind(jobId)
+    .first<{ status: 'pending' | 'running'; payload: string | null; timed_out: number }>()
+  if (!row) return false
+  const key = row.timed_out ? 'job.timeout' : row.status === 'pending' ? 'job.notStarted' : 'job.lost'
+  return markJobFailed(env, jobId, srv(langOfPayload(row.payload), key))
+}
+
 /**
  * cron 巡检兜底(Forge 2.0)。执行体在 Cloud Run,与 Worker 无长连接,靠 agent 每 20s 一次的
  * 心跳(写 updated_at)判断存活:
@@ -66,8 +86,17 @@ export async function createJob(
  * 迟到的 commit 回调仍可复活已判死的任务交付页面(见 src/lib/commit.ts 的守卫式落定)。
  */
 export async function sweepJobs(env: Env): Promise<void> {
+  // 从未收到首个心跳:通常是地址/密钥/入口配置错误。比“执行中失联”更早暴露。
+  const unstarted = await env.DB
+    .prepare(
+      `SELECT id, payload FROM jobs
+       WHERE status = 'pending' AND created_at < datetime('now', '-${AGENT_START_TIMEOUT_SECONDS} seconds')`
+    )
+    .all<{ id: string; payload: string | null }>()
+  for (const row of unstarted.results) await markJobFailed(env, row.id, srv(langOfPayload(row.payload), 'job.notStarted'))
+
   const stale = await env.DB
-    .prepare(`SELECT id, payload FROM jobs WHERE ${ACTIVE_STATUS_SQL} AND updated_at < datetime('now', '-${HEARTBEAT_TIMEOUT_SECONDS} seconds')`)
+    .prepare(`SELECT id, payload FROM jobs WHERE status = 'running' AND updated_at < datetime('now', '-${HEARTBEAT_TIMEOUT_SECONDS} seconds')`)
     .all<{ id: string; payload: string | null }>()
   for (const row of stale.results) await markJobFailed(env, row.id, srv(langOfPayload(row.payload), 'job.lost'))
 

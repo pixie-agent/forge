@@ -15,7 +15,7 @@ import { applyModelOverride, loadConfig, type AgentConfig } from './config.js'
 import { FifoQueue } from './queue.js'
 import { runJob } from './runner.js'
 import { t, type UiLang } from './i18n.js'
-import type { AgentSession } from '@mariozechner/pi-coding-agent'
+import type { AgentSession } from '@earendil-works/pi-coding-agent'
 import type { FileMap, RunAttachment, RunRequest, RunUsage, SteerMessage } from './types.js'
 
 const config = loadConfig()

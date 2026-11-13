@@ -3,14 +3,12 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
-  AuthStorage,
   DefaultResourceLoader,
-  ModelRegistry,
+  ModelRuntime,
   SessionManager,
   createAgentSession,
-  createCodingTools,
   type AgentSession,
-} from '@mariozechner/pi-coding-agent'
+} from '@earendil-works/pi-coding-agent'
 import type { AgentConfig } from './config.js'
 import { systemPrompt } from './prompt.js'
 import { t, type UiLang } from './i18n.js'
@@ -34,7 +32,7 @@ function modelsJson(config: AgentConfig): string {
   const provider: Record<string, unknown> = {
     baseUrl: config.llm.baseUrl.replace(/\/+$/, ''),
     api: config.llmApi,
-    apiKey: config.apiKeyEnv,
+    apiKey: `$${config.apiKeyEnv}`,
     models: [model],
   }
   // 仅 OpenAI 兼容方言需要这些 compat(Anthropic 方言不认 reasoning_effort/developer 等字段)
@@ -77,12 +75,16 @@ export async function createForgeSession(
   const modelsPath = join(agentDir, 'models.json')
   await writeFile(modelsPath, modelsJson(config), 'utf8')
 
-  const authStorage = AuthStorage.create(join(agentDir, 'auth.json'))
-  const modelRegistry = ModelRegistry.create(authStorage, modelsPath)
-  const loadError = modelRegistry.getError()
+  const modelRuntime = await ModelRuntime.create({
+    authPath: join(agentDir, 'auth.json'),
+    modelsPath,
+    allowModelNetwork: false,
+    refreshOnCreate: false,
+  })
+  const loadError = modelRuntime.getError()
   if (loadError) throw new Error(t(opts.uiLang, 'error.modelsLoad', { msg: String(loadError) }))
 
-  const model = modelRegistry.find(config.providerId, config.modelId)
+  const model = modelRuntime.getModel(config.providerId, config.modelId)
   if (!model) throw new Error(t(opts.uiLang, 'error.modelMissing', { provider: config.providerId, model: config.modelId }))
 
   const loader = new DefaultResourceLoader({
@@ -100,10 +102,9 @@ export async function createForgeSession(
     cwd: workspace,
     agentDir,
     model,
-    modelRegistry,
-    authStorage,
+    modelRuntime,
     sessionManager: SessionManager.inMemory(),
-    tools: createCodingTools(workspace),
+    tools: ['read', 'bash', 'edit', 'write'],
     resourceLoader: loader,
     thinkingLevel: config.thinkingLevel,
   })

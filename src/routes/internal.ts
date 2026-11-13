@@ -51,6 +51,9 @@ app.post('/jobs/:id/progress', async (c) => {
   // 纯心跳不携带任何字段:仅触碰 updated_at,cron 据此判断执行体存活
   if (!sets.length && !body.heartbeat) return c.json({ ok: true, changed: 0 })
 
+  // 第一次合法回调即说明执行体已接活。pending 只表示“等待 Agent 接收”;后续心跳/进度统一转 running,
+  // 这样可以准确区分“从未派发成功”和“执行中暂时没有新输出”。
+  sets.push("status = 'running'")
   sets.push("updated_at = datetime('now')")
   // 只在任务仍活动时更新:终态(成功/失败)后到达的迟到回调不复活任务
   const res = await c.env.DB.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ? AND status IN ('pending','running')`)

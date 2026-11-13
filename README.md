@@ -1,87 +1,154 @@
-# Forge — 把想法锻造成可上线的网站
+# Forge
 
-基于 Cloudflare 的 AI 应用生成平台(atoms.dev 简化版):用户描述想法 → AI 两阶段「规划 → 编码」→ 生成真实可上线的单文件网站 → 一键发布 → 分享 `/s/<slug>` 公开链接。
+Forge 是由 [Pixie Agent](https://github.com/pixie-agent) 维护的 AI 应用生成与托管平台。用户用自然语言描述需求，Agent 在隔离工作区内规划、编写并构建多文件 React 应用，Cloudflare Worker 负责账号、任务、数据和发布。
 
-> **Forge 2.0(进行中)**:Agent 的实际 AI 交互(pi coding agent)已迁到 **Google Cloud Run Service**,执行完即销毁;Cloudflare 只保留编排、状态、发布与持久化。架构、决策与部署见 [docs/FORGE2.md](docs/FORGE2.md),Cloud Run 服务见 [agent/](agent/)。下文的「架构」描述的是迁移前(v1)的实现,仍作为 Cloudflare 侧各能力的说明。
+> **许可说明：**Forge 平台源码按 [PolyForm Noncommercial 1.0.0](LICENSE) 开放，仅授权非商业用途。商业部署、企业内部使用、付费集成或托管服务需要取得 [书面商业授权](COMMERCIAL-LICENSE.md)。Forge 生成应用中附带的平台模板采用 Apache-2.0，详见 `agent/template/LICENSE`。
+
+线上实例：[app.1forgen.site](https://app.1forgen.site)
 
 ## 功能
 
-- 落地页:价值主张 + 大输入框 + 示例想法
-- 邮箱密码注册/登录,注册送 20 积分,每次生成扣 1 积分
-- 工作台:左侧聊天展示规划卡片(计划项实时勾选)与进度,右侧 iframe 实时预览(桌面/移动),页面随生成逐段生长
-- 对话式迭代修改,保留版本历史
-- 一键发布,公开链接 `/s/<slug>`;CSP sandbox 隔离生成的 JS 与主站凭证
-- 项目列表(状态/删除/继续编辑)、积分余额
+- 自然语言生成和对话式修改多文件 React 应用
+- 规划、代码变更和构建进度实时推送，SSE 失败时自动回落轮询
+- 版本历史、草稿预览、一键发布和源码导出
+- D1 平台元数据、R2 构建产物、KV，以及每项目 × 每环境的 Durable Object SQLite
+- 图片与文本附件、执行中追加要求、失败断点恢复
+- 邮箱验证、Google 登录、积分和 Creem 计费
+- GA4、Stripe 等生成期连接器
+- 中文和英文用户界面，以及独立管理后台
 
-## 架构(极简:Worker + D1 + Assets)
+## 架构
 
+```text
+浏览器
+  │
+  ▼
+Cloudflare Worker（Hono）
+  ├─ Web SPA / API / SSE / 发布与预览
+  ├─ D1：账号、项目、任务、版本和计费元数据
+  ├─ R2：源码快照、构建产物、附件对象
+  ├─ KV：生成应用键值数据
+  └─ Durable Object SQLite：每项目 × 每环境的应用数据
+  │
+  │ POST /run + X-Agent-Secret
+  ▼
+Google Cloud Run Agent
+  ├─ pi coding agent
+  ├─ 一次性工作目录
+  ├─ Vite + React 模板和确定性构建
+  └─ 进度、断点、成功或失败回调
 ```
-浏览器 ──► Cloudflare Worker (单入口, Hono)
-             ├── 静态资源: Workers Assets (前端 SPA, Vite + React + Tailwind)
-             ├── /api/*   : auth / projects / generate(建任务+触发工作流) / jobs(轮询) / publish
-             ├── Workflows: 持久执行引擎,分段生成整页;step 级 checkpoint,中断自动断点续跑
-             ├── cron     : 每分钟巡检 jobs(实例 errored/丢失但行仍活动的判死解锁)
-             ├── /s/:slug : 发布的用户站点(从 D1 读 HTML 返回)
-             └── D1 (SQLite): 唯一持久层(users/sessions/projects/versions/messages)
+
+Worker 创建任务后通过 `waitUntil` 派发 Agent，不依赖到 Cloud Run 的长连接返回结果。Agent 通过受 `X-Agent-Secret` 保护的内部接口持续回调；最终 `commit` 或 `fail` 回调决定任务终态。
+
+详细设计见 [docs/FORGE2.md](docs/FORGE2.md)。首次公开仓库前按 [公开发布检查表](docs/PUBLIC_RELEASE_CHECKLIST.md) 完成组织设置和最终审查。
+
+## 目录
+
+```text
+src/                    Cloudflare Worker、API 和 Durable Object
+web/                    React 管理与用户界面
+agent/                  Cloud Run Agent
+agent/template/         复制进生成应用的 React 模板
+scripts/                部署守卫和运营脚本
+docs/                   架构、连接器和自托管文档
+schema*.sql             新库 schema 与增量迁移
+wrangler.jsonc          Pixie Agent 维护环境配置
+wrangler.example.jsonc  自托管配置模板
 ```
 
-关键取舍:
+## 环境要求
 
-- 生成产物为单 HTML 文件(几十 KB),直接存 D1 TEXT 列,不引入 R2/KV/Queues/DO
-- 生成是**后台任务 + Workflows 持久执行**:`POST generate/chat` 建 `jobs` 行并触发工作流实例(实例 id = jobId)立即返回;整页按规划的计划项**分段生成**(骨架+占位符 → 各计划项顺序生成 → 组装),每个 step 结果 checkpoint、失败自动重试、实例中断断点续跑,完成的计划项实时勾选到规划卡片。为何分段:免费版 waitUntil 约 2-4 分钟被回收、10ms CPU 撑不住流式逐 chunk 解析、网关对 200s+ 的长单请求不稳定——分段后每段 1~2 分钟,全部绕开
-- LLM 用 OpenAI 兼容接口(环境变量 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`),原生 fetch,可接 OpenAI/DeepSeek/GLM/OpenRouter 等
-- 发布用路径而非子域名,免 wildcard 证书;`/s/:slug` 加 `Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups`,生成的 JS 运行在 opaque origin,读不到主站 cookie/localStorage
-- 前端依赖仅 react + react-router-dom + vite + tailwindcss;Worker 端仅 hono
+- Node.js 22.19 或更高版本（低于 23）
+- npm 10 或更高版本
+- Cloudflare 账号和 Wrangler CLI，本地开发由项目依赖提供
+- 一个兼容 OpenAI、Anthropic Messages 或 OpenAI Responses 方言的模型服务
+- 完整部署 Agent 时需要 Google Cloud CLI 和 Cloud Run
+
+仓库包含四份独立 lockfile。安装全部依赖：
+
+```bash
+nvm use
+npm run bootstrap
+```
 
 ## 本地开发
 
-```bash
-npm install && npm --prefix web install
-npx wrangler d1 execute DB --local --file=schema.sql   # 初始化本地库
-cp .dev.vars.example .dev.vars                          # 填入任一 OpenAI 兼容 key
-npm run dev        # 终端 A:wrangler dev,http://localhost:8787
-npm run dev:web    # 终端 B:vite dev,http://localhost:5173(/api 代理到 8787)
-```
-
-浏览器访问 http://localhost:5173:注册 → 首页输入想法 → 工作台看规划卡片与流式生成 → 追加对话修改 → 发布后访问 `localhost:8787/s/<slug>` 验证。
-
-## 部署
+复制本地配置：
 
 ```bash
-npx wrangler d1 create forge            # 把输出的 database_id 填入 wrangler.jsonc
-npm run db:init:remote                  # 初始化远程 D1
-npx wrangler secret put LLM_BASE_URL    # 依次配置三个 secrets
-npx wrangler secret put LLM_API_KEY
-npx wrangler secret put LLM_MODEL
-npm run deploy                          # 构建前端并部署 Worker
-npx wrangler tail                       # 实时日志:LLM 每次尝试([llm])与任务生命周期([job])
+cp .dev.vars.example .dev.vars
+cp agent/.env.example agent/.env
 ```
 
-部署后重复本地第 4 步的公开链接验证。
+编辑两个文件，保证 Worker 和 Agent 使用相同的 `AGENT_SECRET`，并在 `agent/.env` 中配置模型地址、模型 ID 和 API key。`.dev.vars` 中的 `AGENT_URL` 与 `AGENT_URL_FREE` 都应指向 `http://localhost:8080`；顶层维护者配置已有生产免费执行体地址，只覆盖 `AGENT_URL` 会让本地免费任务误派到生产。真实配置文件已被 `.gitignore` 排除。
 
-## 进度订阅协议(SSE 优先 + 轮询兜底)
+初始化本地 D1：
 
-`POST /api/projects/:id/generate | chat` 只创建后台任务并立即返回 `{"jobId":"…"}`。
-
-进度获取是**混合模式**:
-- 优先:`GET /api/jobs/:id/events` 返回 `text/event-stream`(EventSource 直接可用),状态变化才推送,空闲期 15s 一次心跳;终态后服务端主动关流
-- 兜底:SSE 被代理/网络掐断时,前端自动降级为每 2s 轮询 `GET /api/jobs/:id`;轮询也连续失败(会话过期/持续断网)则终止订阅并提示,任务仍由服务端继续执行,刷新页面可重新接管
-- 连接断开不影响任务执行:生成由 Workflows 持久执行(step 级 checkpoint,实例中断自动断点续跑);cron 每分钟巡检,实例已 errored/丢失的任务判死解锁项目
-
-SSE `data:` 行格式(与轮询响应体一致):
-
-```
-{"id":"…","type":"generate","status":"running","stage":"coding","plan":{…},"error":null,"version":null,"elapsed":42}
+```bash
+npm run db:init:local
 ```
 
-> 思考型模型默认思维链较长,生成前会有一段「思考中」阶段;可通过 `LLM_THINKING`(JSON,原样透传,如 `{"type":"enabled","effort":"low"}`)调节,LLM 网关偶发瞬时 401/5xx 已内置一次自动重试。
+分别启动三个进程：
 
-## 升级路径(当前明确不做)
+```bash
+# 终端 A：Agent，http://localhost:8080
+npm run dev:agent
 
-> 设计细节、取舍依据与扩展路线的完整版见 [docs/DESIGN.md](docs/DESIGN.md)。
+# 终端 B：Worker，http://localhost:8787
+npm run dev
 
-- 子域名发布(`slug.example.com`,需 wildcard 证书/自定义域)或 Workers for Platforms 多租户
-- Workers AI 内置模型,免去外部 key
-- 多智能体编排、可视化编辑器、Stripe 支付、广告投放、SEO 自动化
-- 代码导出 GitHub、图片上传、团队协作
-- 生成产物从 D1 迁移到 R2 + KV 缓存,发布走 Queues 异步
+# 终端 C：Web，http://localhost:5173
+npm run dev:web
+```
+
+访问 `http://localhost:5173`。发布页和预览页由 Worker 提供，应通过 `http://localhost:8787/s/<slug>/` 或 `/p/<token>/` 验证。
+
+新建本地数据库时，如果没有配置 Resend 或 Google OAuth，邮箱注册会创建待验证账号但无法收到邮件。仅限本地开发，可以在注册后手动完成验证并补充试用积分：
+
+```bash
+npx wrangler d1 execute DB --local --command="UPDATE users SET email_verified = 1, credits = 20 WHERE email = 'you@example.com'"
+```
+
+替换邮箱后重新登录。不要对远程数据库使用这个开发命令。
+
+## 校验
+
+```bash
+npm run check
+```
+
+该命令检查 Worker、Web 和 Agent 类型，并构建 Web、Agent 和生成应用模板。GitHub Actions 在 `main`、`staging` 和所有 pull request 上执行同一命令。
+
+## 自托管
+
+不要直接使用仓库中的 Pixie Agent 生产资源配置。请从模板开始创建自己的 Cloudflare 和 Google Cloud 资源：
+
+```bash
+cp wrangler.example.jsonc wrangler.jsonc
+```
+
+替换模板中的 D1、KV、R2、Agent URL、公开 URL 和邮件配置，然后设置所需 secrets。完整步骤和安全边界见 [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)。
+
+## 安全边界
+
+- Worker 与 Agent 双向请求使用共享的 `X-Agent-Secret`。
+- 生成页面使用不带 `allow-same-origin` 的 CSP sandbox，无法读取 Forge 主站 cookie。
+- 发布应用的数据 API 不读取 Forge 登录 cookie，适合公开站点数据，不应存放机密信息。
+- 管理后台只有设置 `ADMIN_PASSWORD` 后才启用。
+- `.dev.vars`、`.env`、云凭据、本地数据库和 `.wrangler/` 不得提交。
+
+漏洞请按 [SECURITY.md](SECURITY.md) 私下报告，不要公开提交利用细节或凭据。
+
+## 贡献
+
+请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。变更记录见 [CHANGELOG.md](CHANGELOG.md)。外部代码贡献在合并前需要完成 Pixie Agent 的贡献者许可安排，以便项目同时提供非商业源码许可和单独的商业授权。
+
+## 许可证
+
+- Forge 平台：[PolyForm Noncommercial License 1.0.0](LICENSE)
+- 商业使用：[COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)
+- 生成应用模板：[Apache License 2.0](agent/template/LICENSE)
+- 第三方组件：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+
+公开源代码不代表获得商业使用权，也不授予 Forge 或 Pixie Agent 商标权。

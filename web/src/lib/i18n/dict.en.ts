@@ -302,6 +302,7 @@ export const en: Record<DictKey, string> = {
   // ---------- workspace (page-level notices) ----------
   'ws.generateFailed': 'Generation failed, please try again',
   'ws.syncFailed': 'Could not sync the result. Refresh the page to see the latest version.',
+  'ws.stage.connecting': 'Connecting to the execution service',
   'ws.stage.planning': 'Planning the approach',
   'ws.stage.coding': 'Writing the app code',
   'ws.stage.building': 'Building the app artifacts',
