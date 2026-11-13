@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible Forge defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include secrets, private user content, or unredacted production data. Report vulnerabilities through SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Forge commit
+      placeholder: git rev-parse HEAD
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [Web, Cloudflare Worker, Cloud Run Agent, Generated application template, Documentation, Deployment]
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or screenshots
+      description: Remove credentials, personal data, project tokens, and customer content.

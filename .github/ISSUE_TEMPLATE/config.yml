@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: mailto:security@1forgen.site
+    about: Report vulnerabilities privately; do not open a public issue.
+  - name: Commercial licensing
+    url: mailto:support@1forgen.site
+    about: Request written authorization for commercial use.

@@ -1,0 +1,8 @@
+Forge
+Copyright 2026 Pixie Agent.
+
+Forge platform code is made available under the PolyForm Noncommercial License 1.0.0. Commercial use requires a separate written license from Pixie Agent.
+
+The generated-application template under agent/template/ is licensed separately under Apache-2.0.
+
+Forge includes and depends on third-party software distributed under separate licenses. See THIRD_PARTY_NOTICES.md and the package lockfiles. No Forge license grants rights to third-party trademarks, including provider names and logos.

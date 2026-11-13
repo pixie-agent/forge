@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    groups: { worker-dependencies: { patterns: ["*"] } }
+  - package-ecosystem: npm
+    directory: /web
+    schedule: { interval: weekly }
+    groups: { web-dependencies: { patterns: ["*"] } }
+  - package-ecosystem: npm
+    directory: /agent
+    schedule: { interval: weekly }
+    groups: { agent-dependencies: { patterns: ["*"] } }
+  - package-ecosystem: npm
+    directory: /agent/template
+    schedule: { interval: weekly }
+    groups: { template-dependencies: { patterns: ["*"] } }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: monthly }
+  - package-ecosystem: docker
+    directory: /agent
+    schedule: { interval: monthly }
