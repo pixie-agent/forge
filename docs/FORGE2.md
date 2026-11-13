@@ -1,5 +1,7 @@
 # Forge 2.0 设计:Cloudflare 编排 + Cloud Run 跑 Agent
 
+> 本文同时记录 Pixie Agent 维护环境的历史决策和实例配置,不是自托管部署模板。外部部署请从 [`wrangler.example.jsonc`](../wrangler.example.jsonc) 和 [`docs/SELF_HOSTING.md`](SELF_HOSTING.md) 开始,不得复用本文中的资源名、ID、域名或服务地址。
+
 > 目标:把「Agent 实际跟 AI 交互的过程」从 Cloudflare Worker 里拿出来,放进一个**有文件系统、能跑命令、执行完即销毁**的环境(Google Cloud Run Service),其余能力(前端、鉴权、任务状态、进度订阅、发布、站点数据)全部沿用 Cloudflare。旧线上服务(生产 Worker `forge` / 本仓库历史 `forge-v2` 语义)不受影响。
 
 ## 1. 为什么是 Cloud Run Service,不是 Cloud Functions
@@ -55,6 +57,8 @@ Cloud Run 请求级计费(便宜、用完即缩)要求**请求在跑时 CPU 才�
 
 复用现有 `jobs` 表的 `stage/progress/plan_json/files_preview/agent_log` 字段,以及 `/api/jobs/:id`、`/api/jobs/:id/events`。
 
+- **接活状态与及早失败**:建单后先保持 `status=pending`,前端明确显示「正在连接执行服务」;Agent 第一次 heartbeat/progress 回调会原子地把状态转成 `running`。明确的 `/run` 非 2xx 或无效响应立即把任务置失败并退还积分。若没有明确响应,任务查询、SSE 和 cron 都会主动检查:pending 创建 45s 后仍无首跳即判「执行服务未接收」,running 超过 180s 无心跳才判失联。这样本地 `wrangler dev` 即使不跑 scheduled cron,用户保持页面或刷新时也不会无限等待。
+
 - Cloud Run 订阅 pi 的事件:
   - `agent_start` → `stage=planning`,`progress=正在规划方案`
   - 首次写 `plan.json` → 回填 `plan_json`(前端规划卡片)
@@ -79,14 +83,14 @@ Cloud Run 请求级计费(便宜、用完即缩)要求**请求在跑时 CPU 才�
 
 ## 5. Agent 形态(pi coding agent)
 
-- 容器内安装 `@mariozechner/pi-coding-agent`,用其 **SDK**(`createAgentSession`)嵌入,不 fork pi。
+- 容器内安装 `@earendil-works/pi-coding-agent@^1.5.0`,用其 **SDK**(`createAgentSession`)嵌入,不 fork pi。旧的 `@mariozechner/*` scope 已弃用且存在无修复版本的安全公告,源码开放准备时已迁移到维护中的 scope。
 - 自定义 provider 用 `models.json` 声明,指向现有网关(`LLM_BASE_URL/LLM_API_KEY/LLM_MODEL`)。**网关方言由 `PI_LLM_API` 决定**:`openai-completions`(默认,OpenAI 兼容)/ `anthropic-messages`(Anthropic 兼容)/ `openai-responses`。
 - **当前生产实际值(2026-10-17 实测,以 Cloud Run 服务的 env 为准)**:`LLM_BASE_URL=https://api.deepseek.com/anthropic`、`LLM_MODEL=deepseek-flash`、`PI_LLM_API=anthropic-messages`、`PI_PROVIDER_ID=forge`、`PI_MODEL_REASONING=true`——即走 DeepSeek 的 **Anthropic 协议**端点,不是 OpenAI 兼容端点。文档里早先写的 GLM/`zai` 组合(`PI_THINKING_LEVEL/PI_THINKING_FORMAT=zai/PI_SUPPORTS_DEVELOPER_ROLE=…`)是**过期值**,仅在使用相应 OpenAI 兼容网关时才需要。
 - 其余调优开关(见 `agent/src/config.ts`):`PI_THINKING_LEVEL`(off…xhigh)、`PI_MODEL_REASONING`(模型是否声明支持推理)、`PI_THINKING_FORMAT`(openai|zai|qwen|qwen-chat-template)、`PI_SUPPORTS_DEVELOPER_ROLE` / `PI_SUPPORTS_REASONING_EFFORT`(默认 true;网关不认 `developer` 角色时置 false 走 system)、`PI_MODEL_INPUT_IMAGE`(默认 false;置 true 才声明模型支持图片输入,见 §5.1)。
 - 工具集:`createCodingTools(workspace)`(read/bash/write/edit),`sessionManager: inMemory`,每次 job 全新会话、全新工作目录 → 用完即弃。
 - System prompt 用 `DefaultResourceLoader({ systemPrompt })` 注入:约定产出**多文件 React 应用**(Vite+Tailwind、响应式、无外图、真实文案、`src/lib/forge.js` 数据接口);**文案语言跟随用户需求正文**(见 §17.8),不再写死中文。
   2026-10-17 起 system prompt 扩展为「设计契约 + 组件目录 + 数据层 + 状态覆盖 + 自检清单」(约 23 KB),核心是把**设计系统**与**组件 API** 写成模型可直接照抄的词汇表 —— 参见 §17。
-- **平台自有文件强制还原**:`restorePlatformFiles()` 把 `index.html` / `package.json` / `vite.config.js` / `src/main.jsx` / `src/index.css` / `src/lib/*` / `src/components/ui/**` / `src/styles/**` 从模板覆盖回工作目录,在两个时机各做一次——① agent 动手前(连平台目录一起重建,清掉上一版源码里的漂移);② 每一轮 agent 结束、构建前(只覆盖、不删除,保留模型新增的文件)。唯一例外是 `src/styles/tokens.css` —— 模型按 `plan.palette` 选色的那个文件,任何时候都保留。这样 chat 版源码或模型自身的漂移都不可能改坏脚手架契约、设计系统或后端 SDK,也不会进入产物与源码树。
+- **平台自有文件强制还原**:`restorePlatformFiles()` 把 `LICENSE` / `THIRD_PARTY_NOTICES.md` / `package.json` / `package-lock.json` / `index.html` / `vite.config.js` / `src/main.jsx` / `src/index.css` / `src/lib/*` / `src/components/ui/**` / `src/styles/**` 从模板覆盖回工作目录,在两个时机各做一次——① agent 动手前(连平台目录一起重建,清掉上一版源码里的漂移);② 每一轮 agent 结束、构建前(只覆盖、不删除,保留模型新增的文件)。唯一例外是 `src/styles/tokens.css` —— 模型按 `plan.palette` 选色的那个文件,任何时候都保留。这样 chat 版源码或模型自身的漂移都不可能改坏脚手架契约、设计系统或后端 SDK,也不会进入产物与源码树。
 - `generate`:先写 `plan.json`(→ 前端规划卡片),再按计划实现 `src/` 下的 React 组件。
 - `chat`:Worker 把当前源码树放进 dispatch 载荷,Cloud Run 预写入工作目录,提示"只按要求改"。
 - 结束前平台侧执行 `vite build`,收集源码树 + 构建产物 + 清单回传(见 §13.7);generate 还会在构建通过后再跑一轮设计复查(见 §17.4)。
@@ -524,7 +528,7 @@ npm run deploy:staging                            # 构建前端 + 部署 Worker
 ```
 
 - 环境名即 Worker 名:`env.staging.name = "forge-v2-staging"`,遵循官方 `<顶层名>-<环境名>` 规则。
-- **生产部署守卫**:`npm run deploy` 带 `predeploy` 钩子(`scripts/guard-prod-deploy.mjs`),两道检查,任一不满足即中止:**(1) 当前分支必须是 `main`**;**(2) 工作区必须干净**(无未提交改动)。即生产只允许从「已验收并已提交的 main」部署。staging **故意不挂**该守卫,任何分支都能发到测试环境,用 `npm run deploy:staging`。
+- **生产部署守卫**:`npm run deploy`、`npm run agent:deploy:prod` 与 `npm run agent:deploy:free:prod` 都通过对应的 `pre*` 钩子执行 `scripts/guard-prod-deploy.mjs`,两道检查,任一不满足即中止:**(1) 当前分支必须是 `main`**;**(2) 工作区必须干净**(无未提交改动)。即 Worker 与两类 Agent 的生产部署都只允许来自「已验收并已提交的 main」。staging 命令故意不挂守卫。
 - `npm run deploy` 显式写成 `wrangler deploy --env=""`,在多环境配置下明确指向顶层(生产),避免 wrangler 的裸 `deploy` 交互警告。
 
 ### 16.3 Google Cloud 侧(同项目内独立 Cloud Run 服务)
@@ -554,7 +558,7 @@ npm run deploy:staging                            # 构建前端 + 部署 Worker
 
 ### 16.6 状态与注意
 
-- **staging Google 登录已启用(2026-10-17)**:`GET /api/auth/config` = `{"google":true,"environment":"staging"}`。做法是在同一 OAuth 客户端(项目 `sixth-impulse-286413`,ID `323709989821-17kuk1ul970tl0sp16gsk4csli6peljm`)追加回调 URI `https://forge-v2-staging.needle.workers.dev/api/auth/google/callback`,再给 staging Worker 写入 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`(与生产同值)。校验:`GET /api/auth/google` 302 → `accounts.google.com/v3/signin/identifier`,无 `redirect_uri_mismatch`,说明 client + 回调白名单都生效。
+- **staging Google 登录已启用(2026-10-17)**:`GET /api/auth/config` = `{"google":true,"environment":"staging"}`。做法是在自有 OAuth 客户端追加 `${STAGING_PUBLIC_BASE_URL}/api/auth/google/callback`,再给 staging Worker 单独写入 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`。校验 `GET /api/auth/google` 能正常 302 到 Google 且无 `redirect_uri_mismatch`,说明 client + 回调白名单都生效。
 - ⚠️ **Worker secret 只写不可读**:生产那两个值无法被任何环境「读取后复制」。wrangler 实际写入方式一直是 `printf '%s' "$值" | npx wrangler secret put …`(日志里 `secretSource: stdin` / `isInteractive: false`,见 `~/Library/Preferences/.wrangler/logs/`),所以 shell 历史里查不到值——换新环境时只能由**持有原始 secret 的人**再输入一次,或给该环境另建一个 OAuth 客户端。
 - staging D1 里留有本次 E2E 的 1 用户 / 1 项目 / 1 版本(测试环境,可保留或按需清)。
 
@@ -583,7 +587,7 @@ npm run agent:deploy:prod       # 只在改了 agent/ 时需要
 要点:
 
 - **`main` 是「可上线」基线**:`main` 上的每个提交都应该是已验收、可随时部署的;不直接在 `main 上攒未验证的改动。
-- **守卫只拦生产**:`npm run deploy` 前置检查「分支 = main」+「工作区干净」(`scripts/guard-prod-deploy.mjs`)。`npm run deploy:staging` / `agent:deploy:staging` 不加任何守卫——未提交、未合并的改动正是要靠它验证。
+- **守卫只拦生产**:`npm run deploy`、`agent:deploy:prod`、`agent:deploy:free:prod` 都前置检查「分支 = main」+「工作区干净」(`scripts/guard-prod-deploy.mjs`)。`npm run deploy:staging` / `agent:deploy:staging` / `agent:deploy:free:staging` 不加任何守卫——未提交、未合并的改动正是要靠它验证。
 - **staging 与 main 共用同一份 `web/dist` 和 `agent/` 源码**:所以「代码在 staging 上跑通」不能靠构建期差异,环境差异只允许来自 §16.2/§16.3 的配置(绑定、`ENVIRONMENT`、Cloud Run 服务名与规格)。任何「只在某一环境生效」的行为都必须用运行时配置表达。
 - **前端环境角标**(§16.4)就是这条纪律的护栏:在 `app-staging.1forgen.site` 看到琥珀色 `STAGING`,在 `app.1forgen.site` 看到干净顶栏。
 
@@ -603,9 +607,11 @@ npm run agent:deploy:prod       # 只在改了 agent/ 时需要
 
 依赖是**预装在镜像里**的,模型不需要(也不允许)装包:`lucide-react`(图标)、`motion`(动效);`package.json` / `vite.config.js` / `Dockerfile` 的脚本契约不变。
 
-文件与体积(纯文本 ≈ 45 KB,`src/` 全量 ≈ 108 KB):
+关键文件:
 
 ```
+LICENSE / THIRD_PARTY_NOTICES.md  模板 Apache-2.0 许可与依赖完整说明,随源码与 dist 交付
+package-lock.json                 模板精确依赖树,随源码导出
 src/index.css                     4 行,只 import 三层样式(模型别删)
 src/styles/tokens.css             ★ 模型唯一允许改的文件:--brand / --accent 两行
 src/styles/theme.css              @theme inline 把 token 桥成语义工具类 + 关键帧/工具类
@@ -1233,3 +1239,30 @@ npm run db:migrate:showcase:remote
 - 首页卡片没有截图服务:封面是 `/s/:slug/` 的实时 iframe(`loading="lazy"`),代价是访客滚到卡片附近时
   会加载该生成应用的资源与数据接口(每张卡一次)。若以后要压流量,可给卡片加 IntersectionObserver
   只挂载可视区域内的 1–2 个,或另接截图链路;需要真实缩略图时必须另建(本方案只是实时预览)。
+
+## 24. 源码开放与自托管边界(2026-11-03)
+
+仓库由 GitHub Organization **Pixie Agent** 公开维护,采用「源码可见 + 非商业授权」而非 OSI 定义的开源模式:
+
+- Worker、Web、Agent 与其余平台代码适用 **PolyForm Noncommercial 1.0.0**;个人、教育、研究及其他非商业用途按 `LICENSE` 授权,商业部署、企业内部使用、托管服务、付费集成等须另签书面商业许可证(`COMMERCIAL-LICENSE.md`)。
+- `agent/template/` 会随源码导出进入用户生成的应用,所以单独采用 **Apache-2.0**。模板内的 `LICENSE`、`THIRD_PARTY_NOTICES.md` 与 `package-lock.json` 会被 `copyTemplate()` 一并复制并由 `restorePlatformFiles()` 防止模型改写,最终进入源码树与下载 ZIP;Vite 构建还会把许可证与 notices 复制进 `dist`,随发布产物提供。这保证用户可独立使用自己的生成应用,不把平台的非商业限制传递给产物。
+- 第三方依赖保持各自许可证;根 `THIRD_PARTY_NOTICES.md` 只做入口,精确版本以四份 lockfile 为准。分发 Cloud Run 镜像时还要扫描 Node/Debian 与模板 `node_modules`。
+- 外部代码贡献在 CLA 机制落地前可以评审但不合并,避免外部贡献的版权阻断 Pixie Agent 的商业再授权。公开协作规则见 `CONTRIBUTING.md`、`SECURITY.md` 与 `.github/`。
+
+公共自托管入口是 `wrangler.example.jsonc` 与 `docs/SELF_HOSTING.md`;仓库当前的 `wrangler.jsonc` 仍是 Pixie Agent 维护环境的运行配置。资源 ID、服务 URL、商品 ID 和 Analytics token 不是 secret,但自托管者不得复用。真正的 secret 只允许放 Cloudflare secrets、Google Secret Manager、被忽略的 `.dev.vars` 或 `agent/.env`。
+
+本地统一入口:
+
+- `npm run bootstrap`:按四份 lockfile 安装 Worker / Web / Agent / 模板依赖;
+- `npm run dev:agent`:加载 `agent/.env`,并把本地模板路径转换成绝对路径;
+- 本地 `.dev.vars` 必须把 `AGENT_URL` 与 `AGENT_URL_FREE` 都显式指向 `http://localhost:8080`;顶层 `wrangler.jsonc` 已有生产 `AGENT_URL_FREE`,不覆盖会让免费任务误派到生产执行体;
+- `npm run check`:Worker + Web + Agent 类型检查,再构建 Web、Agent 与模板;
+- GitHub Actions 对 `main`、`staging` 和 PR 执行同一 `check`。
+
+为避免 fork 在邮件配置缺失时继续冒用 1forgen 身份,Resend 发信现在同时要求 `RESEND_API_KEY` 与 `EMAIL_FROM`;到账通知只使用必填的 `PUBLIC_BASE_URL`,不再回落到 `app.1forgen.site`。未配置邮件时仍沿用原有降级语义:账号可落库,接口返回发送失败并允许重试。
+
+Agent 依赖从已弃用的 `@mariozechner/pi-coding-agent@0.66.1` 迁到 `@earendil-works/pi-coding-agent@^1.5.0`;保持 SDK 嵌入方式不变,并清除了旧 scope 在 npm audit 中报告的运行时漏洞。生产发布前仍须执行 `npm run check`,Agent 改动先在 staging 验证。
+
+Forge Agent 本地启动改为先编译 TypeScript、再执行 `dist/index.js`;Node 的 strip-types 不会把源码中的 `.js` import 映射到 `.ts`,直接跑 `src/index.ts` 会报 `ERR_MODULE_NOT_FOUND`。
+
+Cloud Run 镜像三阶段都固定 `node:22.22.1-bookworm-slim`,依赖安装均改用 `npm ci` 锁定依赖树,最终进程以镜像内置的非 root `node` 用户运行;工作区仍只写 `/tmp/forge-agent`,模板目录只读复用。Docker 构建必须继续保留 `.dockerignore` / `.gcloudignore` 对宿主 `node_modules` 的排除。

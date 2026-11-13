@@ -1,3 +1,4 @@
+import { copyFile, mkdir } from 'node:fs/promises'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -23,8 +24,21 @@ function htmlLang() {
   }
 }
 
+function includeLicenseFiles() {
+  return {
+    name: 'forge-license-files',
+    async closeBundle() {
+      await mkdir('dist', { recursive: true })
+      await Promise.all([
+        copyFile('LICENSE', 'dist/LICENSE'),
+        copyFile('THIRD_PARTY_NOTICES.md', 'dist/THIRD_PARTY_NOTICES.md'),
+      ])
+    },
+  }
+}
+
 export default defineConfig({
   base: './',
-  plugins: [react(), tailwindcss(), htmlLang()],
+  plugins: [react(), tailwindcss(), htmlLang(), includeLicenseFiles()],
   build: { outDir: 'dist', emptyOutDir: true },
 })

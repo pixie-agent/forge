@@ -1,52 +1,88 @@
-# forge-agent(Cloud Run Service)
+# Forge Agent
 
-Forge 2.0 的 **Agent 执行体**:用 [pi coding agent](https://github.com/badlogic/pi-mono) 在隔离工作目录里写单文件网站。一次 HTTP 请求(`POST /run`)承载一个 job 的完整生命周期,请求结束实例缩容到 0 —— 临时、用完即销毁。
+Forge Agent 是运行在 Google Cloud Run 上的执行体。它使用 [pi coding agent](https://github.com/earendil-works/pi) 在一次性工作目录内生成或修改多文件 React 应用，执行平台侧 Vite 构建，再将进度、断点和最终产物回调给 Cloudflare Worker。
 
-其余一切(前端、鉴权、任务状态、进度订阅、发布、持久化)都在 Cloudflare 侧,见 [../docs/FORGE2.md](../docs/FORGE2.md)。
+Forge Web、账号、任务状态、计费、持久化和发布都在仓库根目录的 Cloudflare Worker 中。完整架构见 [`../docs/FORGE2.md`](../docs/FORGE2.md)。
 
 ## 接口
 
-- `GET /health` → `{ ok: true }`
-- `POST /run`(头 `X-Agent-Secret`)body 见 `src/types.ts` `RunRequest`,成功返回 `{ html, plan? }`,失败返回非 2xx `{ error }`。
-- 执行期间向 `{callbackBase}/internal/jobs/:id/progress` 推送 `{ stage?, progress?, plan?, htmlPreview? }`。
+- `GET /health`：公开健康检查，返回 `{ "ok": true }`。
+- `POST /run`：执行一次任务，必须携带与 Worker 相同的 `X-Agent-Secret`。
 
-## 本地跑
+请求体类型见 `src/types.ts` 的 `RunRequest`。Agent 会向请求中的 `callbackBase` 回调：
+
+- 进度和心跳
+- 执行中追加要求与取消状态巡检
+- 源码断点快照
+- 模型用量
+- 最终 `commit` 或 `fail`
+
+HTTP 请求体上限为 24 MiB。任务运行预算由环境变量提供默认值，并可由 Worker 下发的模型配置逐任务覆盖，最大为 3400 秒。
+
+## 本地运行
+
+从仓库根目录安装全部依赖：
 
 ```bash
-cp .env.example .env            # 填 AGENT_SECRET / LLM_*
-set -a && . ./.env && set +a
-npm install
-npm run dev                     # node --experimental-strip-types src/index.ts
-curl -s localhost:8080/health
+npm run bootstrap
+cp agent/.env.example agent/.env
 ```
 
-## 部署到 Cloud Run
+编辑 `agent/.env`，至少配置：
+
+```text
+AGENT_SECRET=与根目录 .dev.vars 相同的值
+LLM_BASE_URL=模型接口地址
+LLM_MODEL=模型 ID
+LLM_API_KEY=模型密钥
+WORKSPACE_TEMPLATE_DIR=./template
+```
+
+从根目录启动：
 
 ```bash
-gcloud run deploy forge-agent \
-  --source agent \
-  --region asia-northeast1 \
-  --timeout 3600 --concurrency 1 \
-  --min-instances 0 --max-instances 5 \
-  --cpu 1 --memory 1Gi \
-  --set-env-vars LLM_BASE_URL=...,LLM_MODEL=...,PI_PROVIDER_ID=forge \
-  --set-secrets LLM_API_KEY=llm-api-key:latest,AGENT_SECRET=agent-secret:latest
+npm run dev:agent
+curl -s http://localhost:8080/health
 ```
 
-要点:
+`npm run dev:agent` 会加载 `agent/.env`，并将模板目录转换为绝对路径。也可以进入 `agent/` 后直接运行 `npm run dev`。
 
-- `--concurrency 1`:一实例一请求,隔离彻底、用完即销毁(也最适合请求级计费)。
-- `--timeout 3600`:Cloud Run 单请求上限(60 分钟);后台 `max_run_ms` 最大配到 3400s,留构建余量。
-- `--min-instances 0`:空闲缩到 0,不常驻。
-- 出网只用于调 LLM 网关与回调(小体积 JSON),流量成本可忽略;主要成本是请求时长。
+## 构建
 
-## 结构
+```bash
+npm run typecheck
+npm run build
+```
 
-| 文件 | 职责 |
+根目录的 `npm run check` 同时验证 Worker、Web、Agent 和模板。
+
+## Cloud Run
+
+通用部署要求：
+
+- Node.js 22.19+ 容器（当前固定 `22.22.1-bookworm-slim`）
+- 请求超时 3600 秒
+- `AGENT_MAX_RUN_MS` 或任务级 `max_run_ms` 小于 Cloud Run 超时
+- VIP 执行体通常使用 `--concurrency 1`
+- 模型密钥和 `AGENT_SECRET` 通过 Secret Manager 注入
+- `WORKSPACE_ROOT` 指向可写的临时目录
+
+维护者专用部署参数位于根 `package.json`。自托管者不应复用其中的服务名、项目或 secret 名；请参阅 [`../docs/SELF_HOSTING.md`](../docs/SELF_HOSTING.md)。
+
+当前维护者部署允许未认证网络访问，但 `/run` 仍执行共享密钥校验。自托管环境应在可行时增加 Cloud Run IAM、受控 ingress、速率限制和异常调用告警。
+
+## 目录
+
+| 路径 | 职责 |
 | --- | --- |
-| `src/index.ts` | HTTP 服务:`/run`、`/health`、密钥校验 |
-| `src/runner.ts` | 单 job:建工作目录 → 跑 pi → 收集 `index.html` / `plan.json` |
-| `src/session.ts` | 装配 pi `AgentSession`(自定义 OpenAI 兼容 provider + 编码工具) |
-| `src/prompt.ts` | system / user 提示词、plan.json 解析、HTML 提取 |
-| `src/callback.ts` | 进度回调(字段级节流、fire-and-forget) |
-| `src/config.ts` | 环境变量解析 |
+| `src/index.ts` | HTTP、鉴权、请求校验和进程内队列 |
+| `src/runner.ts` | 工作目录、附件、pi 会话、构建、复查和产物收集 |
+| `src/session.ts` | pi provider 与编码工具装配 |
+| `src/prompt.ts` | 系统提示词、生成、修改和复查提示词 |
+| `src/callback.ts` | 进度、心跳、巡检、断点和终态回调 |
+| `src/config.ts` | 环境变量与任务级模型配置合并 |
+| `template/` | 预装依赖并复制到每个生成项目的 React 模板 |
+
+## 许可
+
+Agent 平台代码适用仓库根目录的 PolyForm Noncommercial 1.0.0。`template/` 会进入用户导出项目，因此单独采用 Apache-2.0。

@@ -1,46 +1,36 @@
-# 任一 OpenAI 兼容服务均可,复制为 .dev.vars 后填写:
-#   OpenAI  : https://api.openai.com/v1                模型如 gpt-4o-mini
-#   DeepSeek: https://api.deepseek.com/v1              模型如 deepseek-chat
-#   GLM     : https://open.bigmodel.cn/api/paas/v4     模型如 glm-4-flash
-LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_API_KEY=sk-your-key
-LLM_MODEL=deepseek-chat
-# 可选:思考型模型(如 GLM 5.x,始终思考且较慢)的思维链控制,JSON 原样透传:
-#LLM_THINKING={"type":"enabled","effort":"low"}
-# GLM 追求速度的组合(零思考,首字 ~1s):
-#LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
-#LLM_MODEL=glm-4.5-air
-#LLM_THINKING={"type":"disabled"}
+# Cloudflare Worker 本地变量。复制为 .dev.vars 后填写。
+# 真实文件已被 .gitignore 排除，不要提交。
 
-# ── Forge 2.0:Agent 执行环境(Google Cloud Run)──
-# 注意:上面 LLM_* 现在归 agent 用(部署在 Cloud Run),Worker 本身不再直接调模型
-# Cloud Run agent service 地址(本地开发可指向本地跑的 agent,如 http://localhost:8080)
+# 本地 Cloud Run Agent 地址
 AGENT_URL=http://localhost:8080
-# Worker 对外基址(下发给 agent 用于进度回调)
+# 本地免费和 VIP 通道都必须显式指向本地 Agent；否则会继承 wrangler.jsonc 的生产 AGENT_URL_FREE
+AGENT_URL_FREE=http://localhost:8080
+
+# Worker 对外基址，Agent 用它回调进度和最终产物
 PUBLIC_BASE_URL=http://localhost:8787
-# 与 agent 共享的内部密钥(双向 X-Agent-Secret 校验);Cloud Run 侧同名
-AGENT_SECRET=dev-agent-secret
 
-# ── 管理后台(独立口令,与普通用户体系隔离)──
-# 线上用 `npx wrangler secret put ADMIN_PASSWORD` 配置;未设置则 /admin 与 /api/admin/* 不可用
-ADMIN_PASSWORD=dev-admin-password
+# 与 agent/.env 中 AGENT_SECRET 使用相同的随机值
+AGENT_SECRET=replace-with-a-long-random-local-secret
 
-# ── Google 登录(OAuth 2.0 + OIDC,可选)──
-# 在 Google Cloud Console「API 和服务 → 凭据」创建「OAuth 客户端 ID(Web 应用)」,
-# 「已获授权的重定向 URI」填:http://localhost:8787/api/auth/google/callback(线上换成 PUBLIC_BASE_URL 域名)。
-# 线上用 `npx wrangler secret put GOOGLE_CLIENT_ID` / `... GOOGLE_CLIENT_SECRET`;
-# 未配置则登录页不显示 Google 按钮,仅保留邮箱/密码登录。
-# GOOGLE_CLIENT_ID=xxxxxxxxxxxx.apps.googleusercontent.com
-# GOOGLE_CLIENT_SECRET=GOCSPX-xxxxxxxxxxxxxxxx
+# 管理后台可选。未设置时 /admin 不可用
+#ADMIN_PASSWORD=replace-with-a-long-random-admin-password
 
-# ── 多文件产物(Forge 2.0 §13)──
-# R2(ARTIFACTS)与 KV(APPDATA)绑定在 wrangler.jsonc;本地由 wrangler 自动模拟,无需在此配置。
-# 线上首次搭建:npx wrangler r2 bucket create forge-v2-artifacts
-#              npx wrangler kv namespace create forge-v2-appdata → 把 id 填进 wrangler.jsonc
+# Google OAuth 可选
+#GOOGLE_CLIENT_ID=xxxxxxxxxxxx.apps.googleusercontent.com
+#GOOGLE_CLIENT_SECRET=replace-me
 
-# ── STAGING 环境(见 docs/FORGE2.md 的 STAGING 章节)──
-# 远端资源不复用本地文件:staging 的 Worker secrets 用
-#   npx wrangler secret put AGENT_SECRET --env staging     (其余同名同理)
-# 只有当你要用 `wrangler dev --env staging` 在本地连 staging 的绑定调试时,才需要 .dev.vars.staging。
-# 注意:该文件一旦存在就会**完全替代** .dev.vars(不会合并回落),所以必须写全量键值。
-# ENVIRONMENT=staging
+# 邮件验证可选。未设置 RESEND_API_KEY 时注册仍建号，但无法发送验证邮件
+#RESEND_API_KEY=replace-me
+#EMAIL_FROM=noreply@example.com
+
+# 连接器凭证加密可选。使用 32 字节以上随机值
+#CONNECTOR_KEK=replace-me
+
+# Creem 计费可选
+#CREEM_API_KEY=replace-me
+#CREEM_WEBHOOK_SECRET=replace-me
+
+# 本地环境标记可选；生产不设置
+#ENVIRONMENT=development
+
+# R2、KV、D1 和 Durable Object 由 wrangler.jsonc 的本地模拟器提供，无需在此配置。

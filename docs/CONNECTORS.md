@@ -325,10 +325,10 @@ chip 永远带权限徽标:`只读` / `可写`。
 
 ## 11. 待用户在平台侧完成的配置(v0 依赖)
 
-1. **Google Cloud Console**:在现有 OAuth 客户端(`sixth-impulse-286413`,ID `323709989821-17kuk1ul970tl0sp16gsk4csli6peljm`)追加回调 URI
-   - `https://app-staging.1forgen.site/api/connections/ga4/callback`(staging)
-   - `https://app.1forgen.site/api/connections/ga4/callback`(生产)
-   - 旧的 workers.dev 回调留着不删也行,但 2026-10-19 起 `PUBLIC_BASE_URL` 已切到 `app*.1forgen.site`,真正生效的是上面两条。
+1. **Google Cloud Console**:在自有 OAuth 客户端中追加当前部署的两个回调 URI
+   - `${STAGING_PUBLIC_BASE_URL}/api/connections/ga4/callback`(staging)
+   - `${PRODUCTION_PUBLIC_BASE_URL}/api/connections/ga4/callback`(生产)
+   - 旧回调只有在仍有调用方时才保留;实际生效地址由各环境 `PUBLIC_BASE_URL` 决定。
 2. **启用 Google Analytics Data API**(`analyticsdata.googleapis.com`)—— 不启用则生成期读数为 403。
 3. `CONNECTOR_KEK` 在两个环境各写一次(`wrangler secret put`,值只需随机 32 字节,**换掉即所有连接需重新授权**)。
 4. 若 `analytics.readonly` 触发 Google 的敏感 scope 审核:未验证应用仅限测试用户可用 —— 影响范围只在"谁能连",不影响生成链路。
@@ -337,8 +337,8 @@ chip 永远带权限徽标:`只读` / `可写`。
 
 ## 12. 一手依据
 
-- pi 无 MCP(项目自述):`agent/node_modules/@mariozechner/pi-coding-agent/README.md:446`
-- 扩展 API:`agent/node_modules/@mariozechner/pi-coding-agent/dist/core/extensions/types.d.ts:311,913`
+- pi 不启用 MCP:以 `@earendil-works/pi-coding-agent` 对应版本的上游文档为准,本项目也没有注册 MCP 工具。
+- 扩展 API:以 `@earendil-works/pi-coding-agent` 导出的类型与上游文档为准,不要引用未跟踪的 `node_modules` 固定行号。
 - 生成应用当前后端能力仅 `db|kv|blob`:`src/lib/appdata.ts:285`
 - 发布页沙箱 CSP:`src/routes/serve.ts:16`
 - 运行时注入:`src/lib/artifacts.ts` 的 `injectRuntime()`
