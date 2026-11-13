@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 生产部署前置守卫(`npm run deploy` 的 predeploy 钩子)。两条硬性要求,任一不满足即中止:
+// 所有生产部署入口的前置守卫(`npm run deploy`、`agent:deploy:prod`、`agent:deploy:free:prod`)。
 //
 //   1) 当前分支必须是 main。
 //      分支模型:staging 分支开发测试 → 验证通过合并到 main → 从 main 上线。
@@ -9,8 +9,8 @@
 //      起因:2026-10-14 那次移动端适配是从工作区直接构建部署上线的,仓库里没有对应提交,
 //      线上跑的东西和 git 对不上,事后无法 diff / 回滚。生产只允许从「已提交」的代码部署。
 //
-// staging 环境部署(`npm run deploy:staging`)故意**不**走这个守卫:测试环境存在的意义
-// 就是先验证还没合并的改动,所以任何分支都可以往 staging 部署。
+// staging 环境部署(`deploy:staging`、`agent:deploy:staging`、`agent:deploy:free:staging`)
+// 故意**不**走这个守卫:测试环境存在的意义就是先验证还没合并的改动,所以任何分支都可以往 staging 部署。
 //
 // 想绕过?不要改这个文件。要么把改动合并到 main,要么用 `npm run deploy:staging` 发到测试环境。
 import { execSync } from 'node:child_process'

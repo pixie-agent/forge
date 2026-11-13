@@ -1,16 +1,35 @@
 {
-  "name": "forge",
+  "name": "@pixie-agent/forge",
+  "version": "0.1.0",
   "private": true,
+  "description": "Source-available AI application generation and hosting platform",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pixie-agent/forge.git"
+  },
+  "homepage": "https://github.com/pixie-agent/forge#readme",
+  "bugs": {
+    "url": "https://github.com/pixie-agent/forge/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0 <23",
+    "npm": ">=10"
+  },
+  "packageManager": "npm@10.9.4",
   "type": "module",
   "scripts": {
+    "bootstrap": "npm ci && npm --prefix web ci && npm --prefix agent ci && npm --prefix agent/template ci",
+    "check": "npm run typecheck && npm run build && npm --prefix agent run build && npm --prefix agent/template run build",
     "dev": "mkdir -p web/dist && ([ -f web/dist/index.html ] || printf '<!doctype html><title>Forge</title>' > web/dist/index.html) && wrangler dev",
     "dev:web": "npm --prefix web run dev",
+    "dev:agent": "set -a && . ./agent/.env && set +a && WORKSPACE_TEMPLATE_DIR=\"$PWD/agent/template\" npm --prefix agent run dev",
     "build": "npm --prefix web run build",
     "deploy": "npm run build && wrangler deploy --env=\"\"",
     "predeploy": "node scripts/guard-prod-deploy.mjs",
     "deploy:prod": "npm run deploy",
     "deploy:staging": "npm run build && wrangler deploy --env staging",
-    "typecheck": "tsc --noEmit && npm --prefix web run typecheck",
+    "typecheck": "tsc --noEmit && npm --prefix web run typecheck && npm --prefix agent run typecheck",
     "db:init:local": "wrangler d1 execute DB --local --file=schema.sql",
     "db:init:remote": "wrangler d1 execute DB --remote --file=schema.sql",
     "db:init:staging": "wrangler d1 execute DB --remote --env staging --file=schema.sql",
@@ -49,8 +68,10 @@
     "db:migrate:checkpoint:staging": "yes | wrangler d1 execute DB --remote --env staging --file=schema.migrate-checkpoint.sql",
     "creem:seed:test": "node scripts/creem-seed-products.mjs",
     "creem:seed:live": "CREEM_ENV=live node scripts/creem-seed-products.mjs",
+    "preagent:deploy:prod": "node scripts/guard-prod-deploy.mjs",
     "agent:deploy:prod": "gcloud run deploy forge-agent --source agent --region us-central1 --timeout 3600 --concurrency 1 --min-instances 0 --max-instances 5 --cpu 1 --memory 1Gi --allow-unauthenticated --set-env-vars LLM_BASE_URL=https://api.deepseek.com/anthropic,LLM_MODEL=deepseek-flash,PI_LLM_API=anthropic-messages,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,AGENT_MAX_RUN_MS=1500000,WORKSPACE_ROOT=/tmp/forge-agent --set-secrets LLM_API_KEY=llm-api-key:latest,LLM_API_KEY_DEEPSEEK=llm-api-key:latest,LLM_API_KEY_GLM=llm-api-key-free:latest,LLM_API_KEY_MINIMAX=llm-api-key-minimax:latest,AGENT_SECRET=agent-secret:latest",
     "agent:deploy:staging": "gcloud run deploy forge-agent-staging --source agent --region us-central1 --timeout 3600 --concurrency 1 --min-instances 0 --max-instances 1 --cpu 1 --memory 1Gi --allow-unauthenticated --set-env-vars LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4,LLM_MODEL=glm-5.3-flash,PI_LLM_API=openai-completions,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,PI_THINKING_FORMAT=zai,PI_SUPPORTS_DEVELOPER_ROLE=false,PI_MODEL_INPUT_IMAGE=true,AGENT_MAX_RUN_MS=1500000,WORKSPACE_ROOT=/tmp/forge-agent --set-secrets LLM_API_KEY=llm-api-key-staging:latest,LLM_API_KEY_GLM=llm-api-key-staging:latest,LLM_API_KEY_MINIMAX=llm-api-key-minimax-staging:latest,AGENT_SECRET=agent-secret-staging:latest",
+    "preagent:deploy:free:prod": "node scripts/guard-prod-deploy.mjs",
     "agent:deploy:free:prod": "gcloud run deploy forge-agent-free --source agent --region us-central1 --timeout 3600 --concurrency 8 --no-cpu-throttling --min-instances 0 --max-instances 1 --cpu 1 --memory 1Gi --allow-unauthenticated --set-env-vars LLM_BASE_URL=https://api.minimaxi.com/anthropic,LLM_MODEL=MiniMax-M3.1-Flash,PI_LLM_API=anthropic-messages,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,AGENT_MAX_RUN_MS=1500000,AGENT_QUEUE_CONCURRENCY=2,WORKSPACE_ROOT=/tmp/forge-agent --set-secrets LLM_API_KEY=llm-api-key-minimax:latest,LLM_API_KEY_MINIMAX=llm-api-key-minimax:latest,LLM_API_KEY_GLM=llm-api-key-free:latest,AGENT_SECRET=agent-secret:latest",
     "agent:deploy:free:staging": "gcloud run deploy forge-agent-free-staging --source agent --region us-central1 --timeout 3600 --concurrency 8 --no-cpu-throttling --min-instances 0 --max-instances 1 --cpu 1 --memory 1Gi --allow-unauthenticated --set-env-vars LLM_BASE_URL=https://api.minimaxi.com/anthropic,LLM_MODEL=MiniMax-M3.1-Flash,PI_LLM_API=anthropic-messages,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,PI_MODEL_INPUT_IMAGE=true,AGENT_MAX_RUN_MS=1500000,AGENT_QUEUE_CONCURRENCY=2,WORKSPACE_ROOT=/tmp/forge-agent --set-secrets LLM_API_KEY=llm-api-key-minimax-staging:latest,LLM_API_KEY_MINIMAX=llm-api-key-minimax-staging:latest,LLM_API_KEY_GLM=llm-api-key-staging:latest,AGENT_SECRET=agent-secret-staging:latest"
   },

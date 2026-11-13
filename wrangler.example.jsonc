@@ -1,0 +1,92 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "forge-self-hosted",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-05",
+  "workers_dev": true,
+
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS"
+  },
+
+  // Replace every resource ID before remote deployment.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "forge-self-hosted",
+      "database_id": "REPLACE_WITH_PRODUCTION_D1_ID"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ARTIFACTS",
+      "bucket_name": "forge-self-hosted-artifacts"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "APPDATA",
+      "id": "REPLACE_WITH_PRODUCTION_KV_ID"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "PROJECT_DB", "class_name": "ProjectDb" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ProjectDb"] }
+  ],
+
+  // Secrets such as AGENT_SECRET, ADMIN_PASSWORD, OAuth credentials,
+  // RESEND_API_KEY, Creem keys, and CONNECTOR_KEK must use `wrangler secret put`.
+  "vars": {
+    "AGENT_URL": "https://REPLACE_WITH_PRODUCTION_AGENT_URL",
+    "PUBLIC_BASE_URL": "https://REPLACE_WITH_PRODUCTION_WORKER_URL",
+    "EMAIL_FROM": "noreply@example.com",
+    "CREEM_API_BASE": "https://api.creem.io",
+    "CREEM_PRODUCTS": "{}",
+    "WEB_ANALYTICS_TOKEN": ""
+  },
+
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+
+  "env": {
+    "staging": {
+      "name": "forge-self-hosted-staging",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "forge-self-hosted-staging",
+          "database_id": "REPLACE_WITH_STAGING_D1_ID"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "ARTIFACTS",
+          "bucket_name": "forge-self-hosted-artifacts-staging"
+        }
+      ],
+      "kv_namespaces": [
+        {
+          "binding": "APPDATA",
+          "id": "REPLACE_WITH_STAGING_KV_ID"
+        }
+      ],
+      // Bindings do not inherit into Wrangler environments. Keep this copy.
+      "durable_objects": {
+        "bindings": [{ "name": "PROJECT_DB", "class_name": "ProjectDb" }]
+      },
+      "vars": {
+        "AGENT_URL": "https://REPLACE_WITH_STAGING_AGENT_URL",
+        "PUBLIC_BASE_URL": "https://REPLACE_WITH_STAGING_WORKER_URL",
+        "ENVIRONMENT": "staging",
+        "EMAIL_FROM": "noreply@example.com",
+        "CREEM_API_BASE": "https://test-api.creem.io",
+        "CREEM_PRODUCTS": "{}",
+        "WEB_ANALYTICS_TOKEN": ""
+      }
+    }
+  }
+}

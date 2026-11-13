@@ -1,17 +1,27 @@
 {
-  "name": "forge-agent",
+  "name": "@pixie-agent/forge-agent",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Forge 2.0 agent runtime: runs the pi coding agent inside Google Cloud Run, one job per request",
+  "description": "Forge agent runtime: runs the pi coding agent inside Google Cloud Run",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pixie-agent/forge.git",
+    "directory": "agent"
+  },
+  "engines": {
+    "node": ">=22.19.0 <23",
+    "npm": ">=10"
+  },
   "scripts": {
-    "dev": "node --experimental-strip-types src/index.ts",
+    "dev": "npm run build && node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.66.1"
+    "@earendil-works/pi-coding-agent": "^1.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

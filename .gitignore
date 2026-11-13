@@ -1,9 +1,28 @@
 node_modules/
 web/dist/
 .wrangler/
-# 本地变量文件:.dev.vars 与按环境的 .dev.vars.staging 都不入库
+# Local configuration and credentials
 .dev.vars*
 !.dev.vars.example
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+.npmrc
+*credentials*.json
+*service-account*.json
+
+# Local databases and exports
+*.sqlite
+*.sqlite-*
+*.db
+*.dump
+*.sql.gz
 *.log
 
 # Cloud Run agent service
