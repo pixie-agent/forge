@@ -93,7 +93,7 @@ export default function Billing() {
         ) : (
           <div className="space-y-6 sm:space-y-8">
             {/* 余额 */}
-            <section className="rounded-2xl border border-gray-800 bg-gradient-to-br from-indigo-500/10 to-fuchsia-500/5 p-4 sm:p-5">
+            <section className="rounded-lg border border-gray-800 bg-indigo-500/5 p-4 sm:p-5">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
                 <div>
                   <p className="text-xs uppercase tracking-wide text-gray-400">{t('billing.balance')}</p>

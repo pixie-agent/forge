@@ -77,15 +77,15 @@ export default function Landing() {
       <PublicHeader />
 
       <main className="mx-auto w-full max-w-3xl flex-1 px-4 pb-12 pt-8 text-center sm:pb-20 sm:pt-20">
-        <h1 className="text-3xl font-bold leading-tight sm:text-5xl">
+        {/* Atelier:标题上方一道短金线,serif 大标题 + 金色斜体高亮 */}
+        <div className="mx-auto mb-7 h-0.5 w-11 bg-indigo-600" aria-hidden="true" />
+        <h1 className="font-serif text-4xl font-medium leading-[1.12] tracking-[-0.01em] sm:text-6xl">
           {t('landing.heroPrefix')}
-          <span className="bg-gradient-to-r from-indigo-400 to-fuchsia-400 bg-clip-text text-transparent">
-            {t('landing.heroHighlight')}
-          </span>
+          <em className="italic text-indigo-300">{t('landing.heroHighlight')}</em>
         </h1>
-        <p className="mt-4 text-gray-400">{t('landing.subtitle')}</p>
+        <p className="mx-auto mt-5 max-w-xl leading-relaxed text-gray-400">{t('landing.subtitle')}</p>
 
-        <div className="mt-10 rounded-2xl border border-gray-800 bg-gray-900 p-4 text-left shadow-xl">
+        <div className="mt-10 rounded-lg border border-gray-800 bg-gray-900 p-4 text-left shadow-sm transition-colors focus-within:border-indigo-500">
           <textarea
             className="min-h-[120px] w-full resize-none bg-transparent px-2 py-1 text-base outline-none placeholder:text-gray-600"
             placeholder={t('landing.placeholder')}
@@ -102,7 +102,7 @@ export default function Landing() {
             <button
               onClick={() => start()}
               disabled={busy || !idea.trim()}
-              className="w-full rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40 sm:w-auto sm:py-2"
+              className="w-full rounded-md bg-indigo-600 px-6 py-2.5 text-sm font-medium tracking-[0.04em] text-white transition-colors hover:bg-indigo-500 disabled:opacity-40 sm:w-auto sm:py-2"
             >
               {busy ? t('landing.creating') : t('landing.start')}
             </button>
@@ -119,7 +119,7 @@ export default function Landing() {
                 setIdea(value)
                 start(value)
               }}
-              className="shrink-0 whitespace-nowrap rounded-full border border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:border-indigo-500 hover:text-indigo-300"
+              className="shrink-0 whitespace-nowrap rounded-sm px-0.5 pb-0.5 text-xs text-gray-400 underline decoration-gray-600 underline-offset-4 transition-colors hover:text-indigo-300 hover:decoration-indigo-500 sm:px-1"
             >
               {t(key)}
             </button>
@@ -129,7 +129,7 @@ export default function Landing() {
         {/* 精选案例:后台勾选 + 打标签后才出现;未登录点克隆会带上案例 id 去登录 */}
         {showcase.length > 0 && (
           <section className="mt-12 border-t border-gray-800 pt-10 sm:mt-16 sm:pt-12">
-            <h2 className="text-xl font-semibold sm:text-2xl">{t('landing.showcaseTitle')}</h2>
+            <h2 className="font-serif text-xl font-medium sm:text-2xl">{t('landing.showcaseTitle')}</h2>
             <p className="mx-auto mt-2 max-w-xl text-sm text-gray-400">{t('landing.showcaseSubtitle')}</p>
             <div className="mt-5 grid gap-3 text-left sm:mt-6 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3">
               {showcase.map((item) => (
@@ -185,7 +185,7 @@ export default function Landing() {
 
         {/* 公开价格:Creem 复审要求注册前就能看到充值包与订阅的价格 */}
         <section className="mt-12 border-t border-gray-800 pt-10 sm:mt-16 sm:pt-12">
-          <h2 className="text-xl font-semibold sm:text-2xl">{t('pricing.title')}</h2>
+          <h2 className="font-serif text-xl font-medium sm:text-2xl">{t('pricing.title')}</h2>
           <p className="mx-auto mt-2 max-w-xl text-sm text-gray-400">{t('pricing.subtitle')}</p>
           <div className="mt-5 rounded-2xl border border-gray-800 bg-gray-900/40 p-4 text-left sm:mt-6 sm:p-6">
             <PricingSection />

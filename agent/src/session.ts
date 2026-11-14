@@ -28,6 +28,23 @@ function modelsJson(config: AgentConfig): string {
     contextWindow: 200_000,
     maxTokens: config.maxTokens,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    // ZAI(GLM) 的 effort 只认 low/high/max:把 pi 的档位映射过去。
+    // 新版 pi 把 compat.reasoningEffortMap 换成了模型级 thinkingLevelMap(旧字段被静默忽略,
+    // 'medium' 会原样发给网关 → GLM 400「该模型始终思考,不支持关闭思考」)。
+    // off 映射到 'low':GLM 始终思考,不支持关闭(其余档位无映射 → 按 pi 默认回落)。
+    ...(config.thinkingFormat === 'zai'
+      ? {
+          thinkingLevelMap: {
+            off: 'low',
+            minimal: 'low',
+            low: 'low',
+            medium: 'high',
+            high: 'high',
+            xhigh: 'max',
+            max: 'max',
+          },
+        }
+      : {}),
   }
   const provider: Record<string, unknown> = {
     baseUrl: config.llm.baseUrl.replace(/\/+$/, ''),
@@ -42,10 +59,6 @@ function modelsJson(config: AgentConfig): string {
       supportsReasoningEffort: config.supportsReasoningEffort,
     }
     if (config.thinkingFormat) compat.thinkingFormat = config.thinkingFormat
-    // ZAI(GLM)的 effort 只认 low/high/max,把 pi 的档位映射过去(见 v1 代码注释:disabled 会 400)
-    if (config.thinkingFormat === 'zai') {
-      compat.reasoningEffortMap = { minimal: 'low', low: 'low', medium: 'high', high: 'high', xhigh: 'max' }
-    }
     provider.compat = compat
   }
   return JSON.stringify({

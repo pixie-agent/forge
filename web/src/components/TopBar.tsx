@@ -21,7 +21,7 @@ export default function TopBar() {
     <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-gray-800 bg-gray-950 px-2.5 sm:px-4">
       <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
         <Link to="/projects" className="flex shrink-0 items-center gap-2 font-semibold text-gray-100">
-          <span className="h-2.5 w-2.5 rounded-sm bg-gradient-to-br from-indigo-400 to-fuchsia-500" />
+          <span className="h-2.5 w-2.5 rounded-sm bg-indigo-400" />
           Forge
         </Link>
         <EnvBadge />

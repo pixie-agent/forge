@@ -117,7 +117,7 @@ export default function Login() {
       <div className="flex flex-1 items-center justify-center px-3 py-6 sm:px-4">
         <div className="w-full max-w-sm rounded-2xl border border-gray-800 bg-gray-900 p-5 sm:p-6">
         <div className="mb-6 flex items-center gap-2 font-semibold">
-          <span className="h-2.5 w-2.5 rounded-sm bg-gradient-to-br from-indigo-400 to-fuchsia-500" />
+          <span className="h-2.5 w-2.5 rounded-sm bg-indigo-400" />
           Forge
           <EnvBadge />
           <span className="ml-auto">
