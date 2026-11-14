@@ -1,10 +1,10 @@
-# Initial maintainer. Replace with a Pixie Agent team once that team exists.
-* @white1or1black
+# Code ownership: the maintainers team reviews everything by default.
+* @pixie-agent/maintainers
 
-/wrangler.jsonc @white1or1black
-/schema*.sql @white1or1black
-/src/routes/auth.ts @white1or1black
-/src/routes/billing.ts @white1or1black
-/src/routes/internal.ts @white1or1black
-/agent/ @white1or1black
-/.github/ @white1or1black
+/wrangler.jsonc @pixie-agent/maintainers
+/schema*.sql @pixie-agent/maintainers
+/src/routes/auth.ts @pixie-agent/maintainers
+/src/routes/billing.ts @pixie-agent/maintainers
+/src/routes/internal.ts @pixie-agent/maintainers
+/agent/ @pixie-agent/maintainers
+/.github/ @pixie-agent/maintainers
