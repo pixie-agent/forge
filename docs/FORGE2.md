@@ -1,172 +1,172 @@
-# Forge 2.0 设计:Cloudflare 编排 + Cloud Run 跑 Agent
+# Forge 2.0 Design: Cloudflare Orchestration + Cloud Run for the Agent
 
-> 本文同时记录 Pixie Agent 维护环境的历史决策和实例配置,不是自托管部署模板。外部部署请从 [`wrangler.example.jsonc`](../wrangler.example.jsonc) 和 [`docs/SELF_HOSTING.md`](SELF_HOSTING.md) 开始,不得复用本文中的资源名、ID、域名或服务地址。
+> This document records both the historical decisions and the instance configuration of the Pixie Agent maintenance environment; it is not a self-hosting deployment template. For external deployments, start from [`wrangler.example.jsonc`](../wrangler.example.jsonc) and [`docs/SELF_HOSTING.md`](SELF_HOSTING.md); do not reuse the resource names, IDs, domains, or service addresses in this document.
 
-> 目标:把「Agent 实际跟 AI 交互的过程」从 Cloudflare Worker 里拿出来,放进一个**有文件系统、能跑命令、执行完即销毁**的环境(Google Cloud Run Service),其余能力(前端、鉴权、任务状态、进度订阅、发布、站点数据)全部沿用 Cloudflare。旧线上服务(生产 Worker `forge` / 本仓库历史 `forge-v2` 语义)不受影响。
+> Goal: take "the process where the Agent actually interacts with the AI" out of the Cloudflare Worker and put it into an environment that **has a filesystem, can run commands, and is destroyed after execution** (a Google Cloud Run Service), while everything else (frontend, auth, job status, progress subscriptions, publishing, site data) stays on Cloudflare. The old production service (production Worker `forge` / the historical `forge-v2` semantics in this repo's history) is unaffected.
 
-## 1. 为什么是 Cloud Run Service,不是 Cloud Functions
+## 1. Why a Cloud Run Service, not Cloud Functions
 
-| 维度 | Cloud Functions | Cloud Run Service |
+| Dimension | Cloud Functions | Cloud Run Service |
 | --- | --- | --- |
-| 能否跑命令 / 有文件系统 | Gen2 可以,但运行模型是"函数",不适合长驻的 agent 循环 | **可以**,容器内任意命令;`/tmp` 可写,自定义镜像 |
-| 自定义二进制(pi CLI / node / git) | 受限 | **完全自由**(自定义 Dockerfile) |
-| 执行时长 | 有上限,长任务需拆 | 请求超时**最高 60 分钟**,一次请求跑完整个生成 |
-| 临时、用完即销毁 | 是 | **是**(缩容到 0;`--min-instances=0`) |
-| 出网流量计费 | 有免费额度后按量 | 同类,出网按 GiB 计费(见 §7) |
+| Can run commands / has a filesystem | Gen2 can, but the execution model is a "function", unsuitable for a long-lived agent loop | **Yes**: arbitrary commands in the container; `/tmp` writable, custom image |
+| Custom binaries (pi CLI / node / git) | Restricted | **Completely free** (custom Dockerfile) |
+| Execution duration | Capped; long tasks must be split | Request timeout **up to 60 minutes**; one request runs an entire generation |
+| Ephemeral, destroyed after use | Yes | **Yes** (scales to 0; `--min-instances=0`) |
+| Egress traffic billing | Pay per use after a free quota | Same; egress billed per GiB (see §7) |
 
-结论:**用 Cloud Run Service**。一次生成 = 一次 HTTP 请求,请求结束实例缩容到 0,天然"临时、执行完即销毁"。
+Conclusion: **use a Cloud Run Service**. One generation = one HTTP request; when the request ends the instance scales to 0, which is naturally "ephemeral, destroyed after execution".
 
-## 2. 职责边界(定下来的事)
+## 2. Responsibility Boundaries (decided)
 
-- **Cloudflare Worker `forge-v2`**(新项目空间、新 D1):前端 Assets、`/api/auth`、`/api/projects`、`/api/jobs`(SSE + 轮询)、`/s/:slug` 发布、`/api/site` 站点数据、**任务派发(`waitUntil`)+ 内部回调 + cron 心跳巡检**。**不跑任何 LLM 调用。**
-- **Google Cloud Run Service `forge-agent`**:唯一的 AI 交互执行体。用 **pi coding agent** 在隔离工作目录里写代码(有 `read/write/edit/bash` 工具),再在平台侧 `vite build`,把源码树与构建产物交回。
-- **边界规则**:产物落库、版本、积分、消息等**持久化与权限逻辑只留在 Cloudflare**;Cloud Run 只回传原始产物(`src`/`dist`/`manifest`/`plan`)与进度。
+- **Cloudflare Worker `forge-v2`** (new project space, new D1): frontend Assets, `/api/auth`, `/api/projects`, `/api/jobs` (SSE + polling), `/s/:slug` publishing, `/api/site` site data, **job dispatch (`waitUntil`) + internal callbacks + cron heartbeat inspection**. **Runs no LLM calls at all.**
+- **Google Cloud Run Service `forge-agent`**: the sole AI-interaction executor. Uses the **pi coding agent** to write code in an isolated working directory (with `read/write/edit/bash` tools), then runs `vite build` on the platform side and hands the source tree plus build artifacts back.
+- **Boundary rule**: persistence of artifacts, versions, credits, messages, and all **permission logic stay on Cloudflare only**; Cloud Run only returns raw artifacts (`src`/`dist`/`manifest`/`plan`) and progress.
 
-## 3. 数据流
+## 3. Data Flow
 
 ```
-浏览器 ──POST /api/projects/:id/generate──► Worker(建 job=pending,立即返回 {jobId})
+Browser ──POST /api/projects/:id/generate──► Worker (create job=pending, return {jobId} immediately)
                                              │
-                        waitUntil 中异步 dispatch(不阻塞响应,断开也无妨)
-                                             │  POST https://forge-agent/run(X-Agent-Secret)
+                        async dispatch inside waitUntil (does not block the response; disconnection is fine)
+                                             │  POST https://forge-agent/run (X-Agent-Secret)
                                              ▼
-                                   Cloud Run 实例(每 job 一个,一次请求持有到跑完)
-                                     ├─ 建 /tmp/workspace/<jobId>,写入现状(chat 时带当前源码树)
-                                     ├─ 起 pi AgentSession(自定义 provider 指向 OpenAI 兼容网关)
-                                     ├─ 事件流 → POST {PUBLIC_BASE_URL}/internal/jobs/:id/progress  (进度/规划/当前文件预览 + 心跳)
-                                     ├─ 结束前 vite build 出 dist
-                                     └─ 结束 → POST /internal/jobs/:id/commit(成功,回传 src/dist/manifest/plan)
-                                                   或 POST /internal/jobs/:id/fail(失败,回传 error)
-                                     ← 巡检 GET /internal/jobs/:id/state(每 5s,用户停止时自行 abort,见 §4)
+                                   Cloud Run instance (one per job; one request held until the run finishes)
+                                     ├─ Create /tmp/workspace/<jobId>, write current state (chat carries the current source tree)
+                                     ├─ Start a pi AgentSession (custom provider pointing at the OpenAI-compatible gateway)
+                                     ├─ Event stream → POST {PUBLIC_BASE_URL}/internal/jobs/:id/progress  (progress/plan/current file preview + heartbeat)
+                                     ├─ Before finishing, vite build produces dist
+                                     └─ On finish → POST /internal/jobs/:id/commit (success, returns src/dist/manifest/plan)
+                                                   or POST /internal/jobs/:id/fail (failure, returns error)
+                                     ← Inspection GET /internal/jobs/:id/state (every 5s; agent aborts on its own when the user stops, see §4)
                                              │
-                       commit 回调里:写版本、乐观锁推 current_version、补 assistant 消息、扣积分(幂等)
+                       In the commit callback: write the version, optimistic-lock push of current_version, append the assistant message, deduct credits (idempotent)
                                              ▼
-浏览器 ──SSE/轮询 /api/jobs/:id──► 读 D1 里的状态(Worker 只是把状态推给前端)
-           └─ 停止 → POST /api/projects/:id/cancel ──► Worker 当场置 cancelled(立刻解锁项目)
+Browser ──SSE/polling /api/jobs/:id──► reads the status from D1 (the Worker merely pushes the status to the frontend)
+           └─ Stop → POST /api/projects/:id/cancel ──► Worker sets cancelled on the spot (project unlocks immediately)
 ```
 
-### 为什么不用 Workflow 保持 HTTP 请求打开
+### Why not use Workflows to hold the HTTP request open
 
-Cloud Run 请求级计费(便宜、用完即缩)要求**请求在跑时 CPU 才分配**,所以对 Cloud Run 的那次 HTTP 请求要一直握住到 agent 跑完。曾用 Workflow 的 step 来握(见 git 历史),但 step 超时上限覆盖不了长生成,还多一层编排状态。关键观察:**Cloudflare 对 Worker 的出站请求会超时掐断(524),但掐断不影响 Cloud Run 继续跑**——Cloud Run 只要 handler 未返回就持续执行并保持 CPU。于是:
+Cloud Run's request-based billing (cheap, scales away when idle) requires that **CPU is allocated only while a request is running**, so the HTTP request to Cloud Run must be held until the agent finishes. We once used Workflow steps to hold it (see git history), but the step timeout ceiling cannot cover long generations, and it adds another layer of orchestration state. Key observation: **Cloudflare's outbound requests from the Worker get cut off on timeout (524), but the cutoff does not affect Cloud Run continuing to run** — as long as the handler has not returned, Cloud Run keeps executing and holds CPU. Therefore:
 
-- Worker 侧:`generate`/`chat` 在 `waitUntil` 中发起 `POST /run`,**不等待、不阻塞**对浏览器的响应;连接被掐断也无所谓。
-- Cloud Run 侧:一次 `/run` 请求 = 一个 job 的完整生命周期,`--timeout=3600`、`--concurrency=1`(一请求一实例语义)。
-- 交付以 **commit / fail 回调**为准(不依赖 HTTP 响应体);派发失败或实例异常由 cron 心跳巡检兜底判死。
+- Worker side: `generate`/`chat` fire `POST /run` inside `waitUntil`, **without waiting for or blocking** the response to the browser; the connection being cut doesn't matter.
+- Cloud Run side: one `/run` request = the full lifecycle of one job, `--timeout=3600`, `--concurrency=1` (one request per instance semantics).
+- Delivery is governed by the **commit / fail callbacks** (not the HTTP response body); dispatch failures or instance anomalies are caught dead by the cron heartbeat inspection.
 
-## 4. 进度协议
+## 4. Progress Protocol
 
-复用现有 `jobs` 表的 `stage/progress/plan_json/files_preview/agent_log` 字段,以及 `/api/jobs/:id`、`/api/jobs/:id/events`。
+Reuses the existing `jobs` table's `stage/progress/plan_json/files_preview/agent_log` fields, plus `/api/jobs/:id` and `/api/jobs/:id/events`.
 
-- **接活状态与及早失败**:建单后先保持 `status=pending`,前端明确显示「正在连接执行服务」;Agent 第一次 heartbeat/progress 回调会原子地把状态转成 `running`。明确的 `/run` 非 2xx 或无效响应立即把任务置失败并退还积分。若没有明确响应,任务查询、SSE 和 cron 都会主动检查:pending 创建 45s 后仍无首跳即判「执行服务未接收」,running 超过 180s 无心跳才判失联。这样本地 `wrangler dev` 即使不跑 scheduled cron,用户保持页面或刷新时也不会无限等待。
+- **Acceptance state and failing early**: after the job is created, `status=pending` is kept and the frontend explicitly shows "connecting to the execution service"; the Agent's first heartbeat/progress callback atomically transitions the status to `running`. A clear `/run` non-2xx or invalid response immediately marks the job failed and refunds credits. If there is no clear response, job queries, SSE, and cron all proactively check: pending with no first callback 45s after creation is judged "execution service never accepted"; running with no heartbeat for over 180s is judged lost. This way, even when local `wrangler dev` doesn't run the scheduled cron, users keeping the page open or refreshing won't wait forever.
 
-- Cloud Run 订阅 pi 的事件:
-  - `agent_start` → `stage=planning`,`progress=正在规划方案`
-  - 首次写 `plan.json` → 回填 `plan_json`(前端规划卡片)
-  - 写/改源文件 → `stage=coding`,`progress=正在编写 {path} · 已修改 {count} 个文件`,并把该文件内容作为 `files_preview`(前端「代码」页随写随看)
-  - 结束前的 `vite build` → `stage=building`,`progress=正在构建应用产物`
-  - **设计复查轮**(仅 generate,见 §17.4):初稿构建通过后,同一会话再跑一轮「设计总监复查与打磨」→ `stage` **仍是 `coding`**、`progress=正在做设计总监复查与打磨`(再构建时回到 `building`/`正在重新构建应用产物`),并在 `agent_log` 追加一行里程碑。**不新增 stage**:`src/routes/internal.ts` 的 stage 白名单是 `planning|coding|building`,加新值只会被静默忽略,收益不匹配。
-  - `message_update`(thinking/正文的逐 token 增量)+ `tool_execution_start/end` → **只写 Cloud Run stdout**(5s 一批,运维用 `gcloud logging read` 排查);**不再进 D1**。D1 的 `agent_log` 只保留里程碑(复查轮开始/结束、交付语言重问等)与告警,前端也只展示「阶段 + 当前文件 + 已改动文件数」这几个关键节点 —— 曾经把逐 token 日志当消息总线写,实测产生 3.6 万次 `POST /log`、7.3 万行 D1 写入/天,用户根本不看。
-- 回调走 Worker 内部接口(`X-Agent-Secret` 校验),只允许字段级更新,不碰状态机:
-  - `POST /internal/jobs/:id/progress`:进度 / 规划 / 当前文件预览 / 心跳
-  - `POST /internal/jobs/:id/log`:里程碑日志增量;**原子追加** `agent_log = substr(COALESCE(agent_log,'') || ?, -20000)` 保留尾部,免读改写;agent 侧按 ~800ms 串行 flush,终态前 `stop()` 补发剩余。**不要在 flush 完成后立刻递归续发**,否则每个网络往返就写一次 D1(实测 ~11 次/秒)。
-  - `POST /internal/jobs/:id/checkpoint`:源码树断点快照(见下)
-  - `GET /internal/jobs/:id/state`:只读 `{status, cancelled, messages}`,给 agent 的取消巡检 + 追加要求取件用(见 §5.2)
-- **断点快照 / 失败续跑**:agent 每 60s(源码树 SHA-256 有变化才发)以及异常收尾时上传整棵源码树;Worker 存 R2 `cp/<projectId>/<jobId>.json`,`jobs` 上只记 `checkpoint_key/checkpoint_files/checkpoint_bytes/checkpoint_at`,源码不进 D1。任务成功 commit 时删除本次断点(连同 payload `resumeOf` 指向的旧任务断点);失败/停止保留 7 天,由 cron 巡检清理。`POST /api/projects/:id/resume` 把快照读出来,作为新一轮 `chat` 任务的 `currentFiles` 基线派发 —— agent 在已写好的文件上继续,而不是拿模板脚手架从头重写。
-- 任务的**终态**只由 `commit` / `fail` 回调落定(幂等):成功才补 assistant 消息 + 扣积分;失败/判死不扣。回调带守卫(`WHERE status IN ('pending','running')`),迟到回调不复活已判死任务,但「判死后又收到 commit」的迟到成功仍可复活交付。
-- **手动停止(协作式取消)**:第 4 个终态 `cancelled`。Worker 无法反向杀掉 Cloud Run 的在途请求,所以分两段:
-  - **Worker 侧立即**:`POST /api/projects/:id/cancel`(用户鉴权)→ `cancelJob()` 把活动任务置 `cancelled`、补一条 assistant 消息。`ACTIVE_STATUS_SQL` 不含 `cancelled`,**项目锁当场释放**(不必再等心跳超时,这是"停止"最实际的价值)。不扣积分、不写版本。
-  - **agent 侧尽力**:`GET /internal/jobs/:id/state` 只回 `{status, cancelled}`;agent 每 5s 轮一次(`startJobWatcher`,带 `X-Agent-Secret`,同一次巡检顺带取追加要求,见 §5.2),看到 `cancelled` 就 `AbortController.abort()` 中断当前 pi 轮次,`runJob` 各阶段后 `throwIfCancelled()`。**本轮产物不进草稿,但会在异常收尾时强制写一次断点快照** —— 用户可点「从断点继续」接着做,不再整个丢弃。
-  - 竞态:先取消则迟到的 commit 被守卫拦成 `already-settled`(不会复活成成功);cancel 请求赶上 commit 已过守卫的瞬间,可能草稿已更新但任务显示 cancelled——极小窗口,产物仍是完整可用的,不做处理。
-  - 前端:任务进行中把「发送」换成「■ 停止」(`ChatPanel`);服务端落定后由 SSE 推 `cancelled`,`Workspace.settle` 清掉规划卡/执行路径(避免定格成"三步全打勾"的假成功),**保留最后写入的文件预览**;随后拉一次 `/job/active`,有断点就在对话里给「已停止,可从断点继续」卡片。
-  - 响应延迟:用户可见的"已停止"是即时的;Cloud Run 侧真正收手与最后一份快照最多晚 5s(巡检间隔),所以前端查断点时等 3s。
-- 前端 `subscribeJob` 走 SSE(`/api/jobs/:id/events`),指纹含 `files_preview/agent_log` 的长度变化 → 每次追加都会推送一份最新快照。
+- Cloud Run subscribes to pi's events:
+  - `agent_start` → `stage=planning`, `progress=正在规划方案`
+  - First write of `plan.json` → fills back `plan_json` (frontend plan card)
+  - Writing/modifying source files → `stage=coding`, `progress=正在编写 {path} · 已修改 {count} 个文件`, and the file's content becomes `files_preview` (frontend "Code" tab updates as files are written)
+  - `vite build` before finishing → `stage=building`, `progress=正在构建应用产物`
+  - **Design review round** (generate only, see §17.4): after the first draft builds successfully, the same session runs another round of "design-director review and polish" → `stage` **remains `coding`**, `progress=正在做设计总监复查与打磨` (when rebuilding it returns to `building`/`正在重新构建应用产物`), and a milestone line is appended to `agent_log`. **No new stage**: the stage whitelist in `src/routes/internal.ts` is `planning|coding|building`; adding a new value would just be silently ignored, and the payoff doesn't justify it.
+  - `message_update` (per-token increments of thinking/body) + `tool_execution_start/end` → **written only to Cloud Run stdout** (batched every 5s; ops use `gcloud logging read` for troubleshooting); **no longer goes into D1**. D1's `agent_log` keeps only milestones (review round start/end, delivery-language re-ask, etc.) and alerts; the frontend shows only "stage + current file + number of files changed" — these key nodes. We once used per-token logs as a message bus, which in practice produced 36k `POST /log` calls and 73k D1 write rows per day that users never looked at.
+- Callbacks go through the Worker's internal endpoints (validated with `X-Agent-Secret`), allowing only field-level updates, never touching the state machine:
+  - `POST /internal/jobs/:id/progress`: progress / plan / current file preview / heartbeat
+  - `POST /internal/jobs/:id/log`: milestone log increments; **atomic append** `agent_log = substr(COALESCE(agent_log,'') || ?, -20000)` keeps the tail, avoiding read-modify-write; the agent side serially flushes at ~800ms intervals and `stop()` flushes the remainder before the final state. **Do not immediately re-issue recursively after a flush completes**, otherwise D1 gets written once per network round trip (measured ~11 times/second).
+  - `POST /internal/jobs/:id/checkpoint`: source tree checkpoint snapshot (see below)
+  - `GET /internal/jobs/:id/state`: read-only `{status, cancelled, messages}`, used for the agent's cancellation inspection + steering pickup (see §5.2)
+- **Checkpoint snapshots / resume after failure**: the agent uploads the whole source tree every 60s (only when the tree's SHA-256 changed) and during exceptional shutdowns; the Worker stores it in R2 at `cp/<projectId>/<jobId>.json`, and `jobs` records only `checkpoint_key/checkpoint_files/checkpoint_bytes/checkpoint_at` — source code never enters D1. On a successful commit the checkpoint for this run is deleted (along with the checkpoint of the older job referenced by the payload's `resumeOf`); on failure/stop it is kept 7 days and cleaned up by cron inspection. `POST /api/projects/:id/resume` reads the snapshot out and dispatches it as the `currentFiles` baseline of a new `chat` round — the agent continues on the files already written instead of rewriting everything from the template scaffold.
+- The job's **terminal state** is settled only by the `commit` / `fail` callbacks (idempotent): success alone appends the assistant message + deducts credits; failure/judged-dead does not. Callbacks carry a guard (`WHERE status IN ('pending','running')`), so a late callback cannot resurrect a job already judged dead, but a late success ("commit arriving after it was judged dead") can still resurrect and deliver.
+- **Manual stop (cooperative cancellation)**: the 4th terminal state, `cancelled`. The Worker cannot kill an in-flight Cloud Run request in reverse, so it is split into two segments:
+  - **Worker side immediately**: `POST /api/projects/:id/cancel` (user-authenticated) → `cancelJob()` sets the active job to `cancelled` and appends an assistant message. `ACTIVE_STATUS_SQL` does not include `cancelled`, so **the project lock is released on the spot** (no need to wait for a heartbeat timeout — this is the most practical value of "stop"). No credit deduction, no version written.
+  - **Agent side best-effort**: `GET /internal/jobs/:id/state` returns only `{status, cancelled}`; the agent polls every 5s (`startJobWatcher`, with `X-Agent-Secret`; the same inspection also picks up steering input, see §5.2). On seeing `cancelled` it calls `AbortController.abort()` to interrupt the current pi round, and `runJob` calls `throwIfCancelled()` after each phase. **This round's output does not enter the draft, but a checkpoint snapshot is force-written during exceptional shutdown** — the user can click "Resume from checkpoint" to continue, instead of losing everything.
+  - Races: if cancellation happens first, the late commit is blocked by the guard as `already-settled` (it will not resurrect as success); if a cancel request lands in the instant a commit has already passed the guard, the draft may be updated while the job shows cancelled — an extremely small window; the artifact is still complete and usable, and it is not handled.
+  - Frontend: while a job is running, "Send" is replaced by "■ Stop" (`ChatPanel`); once the server settles, SSE pushes `cancelled` and `Workspace.settle` clears the plan card/execution path (avoiding freezing into a fake success of "all three steps checked"), **keeping the last written file preview**; it then fetches `/job/active` once, and if a checkpoint exists shows a "Stopped; you can resume from checkpoint" card in the conversation.
+  - Response latency: the user-visible "stopped" is immediate; on the Cloud Run side the actual wind-down and the last snapshot can lag by up to 5s (the inspection interval), so the frontend waits 3s when querying the checkpoint.
+- The frontend's `subscribeJob` uses SSE (`/api/jobs/:id/events`); the fingerprint includes length changes of `files_preview/agent_log` → every append pushes a fresh snapshot.
 
-## 5. Agent 形态(pi coding agent)
+## 5. Agent Form (pi coding agent)
 
-- 容器内安装 `@earendil-works/pi-coding-agent@^1.5.0`,用其 **SDK**(`createAgentSession`)嵌入,不 fork pi。旧的 `@mariozechner/*` scope 已弃用且存在无修复版本的安全公告,源码开放准备时已迁移到维护中的 scope。
-- 自定义 provider 用 `models.json` 声明,指向现有网关(`LLM_BASE_URL/LLM_API_KEY/LLM_MODEL`)。**网关方言由 `PI_LLM_API` 决定**:`openai-completions`(默认,OpenAI 兼容)/ `anthropic-messages`(Anthropic 兼容)/ `openai-responses`。
-- **当前生产实际值(2026-10-17 实测,以 Cloud Run 服务的 env 为准)**:`LLM_BASE_URL=https://api.deepseek.com/anthropic`、`LLM_MODEL=deepseek-flash`、`PI_LLM_API=anthropic-messages`、`PI_PROVIDER_ID=forge`、`PI_MODEL_REASONING=true`——即走 DeepSeek 的 **Anthropic 协议**端点,不是 OpenAI 兼容端点。文档里早先写的 GLM/`zai` 组合(`PI_THINKING_LEVEL/PI_THINKING_FORMAT=zai/PI_SUPPORTS_DEVELOPER_ROLE=…`)是**过期值**,仅在使用相应 OpenAI 兼容网关时才需要。
-- 其余调优开关(见 `agent/src/config.ts`):`PI_THINKING_LEVEL`(off…xhigh)、`PI_MODEL_REASONING`(模型是否声明支持推理)、`PI_THINKING_FORMAT`(openai|zai|qwen|qwen-chat-template)、`PI_SUPPORTS_DEVELOPER_ROLE` / `PI_SUPPORTS_REASONING_EFFORT`(默认 true;网关不认 `developer` 角色时置 false 走 system)、`PI_MODEL_INPUT_IMAGE`(默认 false;置 true 才声明模型支持图片输入,见 §5.1)。
-- 工具集:`createCodingTools(workspace)`(read/bash/write/edit),`sessionManager: inMemory`,每次 job 全新会话、全新工作目录 → 用完即弃。
-- System prompt 用 `DefaultResourceLoader({ systemPrompt })` 注入:约定产出**多文件 React 应用**(Vite+Tailwind、响应式、无外图、真实文案、`src/lib/forge.js` 数据接口);**文案语言跟随用户需求正文**(见 §17.8),不再写死中文。
-  2026-10-17 起 system prompt 扩展为「设计契约 + 组件目录 + 数据层 + 状态覆盖 + 自检清单」(约 23 KB),核心是把**设计系统**与**组件 API** 写成模型可直接照抄的词汇表 —— 参见 §17。
-- **平台自有文件强制还原**:`restorePlatformFiles()` 把 `LICENSE` / `THIRD_PARTY_NOTICES.md` / `package.json` / `package-lock.json` / `index.html` / `vite.config.js` / `src/main.jsx` / `src/index.css` / `src/lib/*` / `src/components/ui/**` / `src/styles/**` 从模板覆盖回工作目录,在两个时机各做一次——① agent 动手前(连平台目录一起重建,清掉上一版源码里的漂移);② 每一轮 agent 结束、构建前(只覆盖、不删除,保留模型新增的文件)。唯一例外是 `src/styles/tokens.css` —— 模型按 `plan.palette` 选色的那个文件,任何时候都保留。这样 chat 版源码或模型自身的漂移都不可能改坏脚手架契约、设计系统或后端 SDK,也不会进入产物与源码树。
-- `generate`:先写 `plan.json`(→ 前端规划卡片),再按计划实现 `src/` 下的 React 组件。
-- `chat`:Worker 把当前源码树放进 dispatch 载荷,Cloud Run 预写入工作目录,提示"只按要求改"。
-- 结束前平台侧执行 `vite build`,收集源码树 + 构建产物 + 清单回传(见 §13.7);generate 还会在构建通过后再跑一轮设计复查(见 §17.4)。
-- 新增调优开关:`AGENT_DESIGN_REVIEW`(`off|generate|always`,默认 `generate`;`generate` = 只在从零生成时跑复查轮)、`AGENT_POLISH_MAX_MS`(复查轮时长上限,默认 300000)。**默认值写在代码里,不显式声明也生效**;复查轮用的是「总预算剩余时间」与 `AGENT_POLISH_MAX_MS` 的较小值,剩余不足 30s 时自动跳过。
+- Installs `@earendil-works/pi-coding-agent@^1.5.0` inside the container and embeds it via its **SDK** (`createAgentSession`); no fork of pi. The old `@mariozechner/*` scope is deprecated and has unfixable security advisories; it was migrated to the maintained scope when the source-available preparation happened.
+- The custom provider is declared via `models.json`, pointing at the existing gateway (`LLM_BASE_URL/LLM_API_KEY/LLM_MODEL`). **The gateway dialect is determined by `PI_LLM_API`**: `openai-completions` (default, OpenAI-compatible) / `anthropic-messages` (Anthropic-compatible) / `openai-responses`.
+- **Current actual production values (measured 2026-10-17; the Cloud Run service's env is authoritative)**: `LLM_BASE_URL=https://api.deepseek.com/anthropic`, `LLM_MODEL=deepseek-flash`, `PI_LLM_API=anthropic-messages`, `PI_PROVIDER_ID=forge`, `PI_MODEL_REASONING=true` — i.e., DeepSeek's **Anthropic protocol** endpoint, not the OpenAI-compatible endpoint. The GLM/`zai` combination written earlier in the docs (`PI_THINKING_LEVEL/PI_THINKING_FORMAT=zai/PI_SUPPORTS_DEVELOPER_ROLE=…`) is **outdated** and only needed with the corresponding OpenAI-compatible gateway.
+- Remaining tuning switches (see `agent/src/config.ts`): `PI_THINKING_LEVEL` (off…xhigh), `PI_MODEL_REASONING` (whether the model declares reasoning support), `PI_THINKING_FORMAT` (openai|zai|qwen|qwen-chat-template), `PI_SUPPORTS_DEVELOPER_ROLE` / `PI_SUPPORTS_REASONING_EFFORT` (default true; set false to route via system when the gateway doesn't recognize the `developer` role), `PI_MODEL_INPUT_IMAGE` (default false; only when true does the model declare image input support, see §5.1).
+- Toolset: `createCodingTools(workspace)` (read/bash/write/edit), `sessionManager: inMemory`; each job gets a fresh session and a fresh working directory → discarded after use.
+- The system prompt is injected via `DefaultResourceLoader({ systemPrompt })`: it stipulates a **multi-file React app** (Vite+Tailwind, responsive, no external images, real copy, `src/lib/forge.js` data interface); **the copy language follows the body of the user's request** (see §17.8), no longer hardcoded to Chinese.
+  Starting 2026-10-17 the system prompt was extended to "design contract + component catalog + data layer + state coverage + self-check checklist" (~23 KB); the core is writing the **design system** and **component API** as a vocabulary the model can copy directly — see §17.
+- **Mandatory restoration of platform-owned files**: `restorePlatformFiles()` overwrites `LICENSE` / `THIRD_PARTY_NOTICES.md` / `package.json` / `package-lock.json` / `index.html` / `vite.config.js` / `src/main.jsx` / `src/index.css` / `src/lib/*` / `src/components/ui/**` / `src/styles/**` back into the working directory from the template, at two moments — ① before the agent starts (rebuilding the platform directories together, wiping drift from the previous version's source); ② after each agent round and before build (overwrite only, no deletion, preserving files the model added). The sole exception is `src/styles/tokens.css` — the file where the model picks colors per `plan.palette`; it is preserved at all times. This way neither chat-version source drift nor the model's own drift can break the scaffold contract, the design system, or the backend SDK, and none of it enters the artifacts or the source tree.
+- `generate`: first writes `plan.json` (→ frontend plan card), then implements the React components under `src/` per the plan.
+- `chat`: the Worker puts the current source tree into the dispatch payload; Cloud Run pre-writes it into the working directory and prompts "change only what the request asks".
+- Before finishing, the platform side runs `vite build` and returns the collected source tree + build artifacts + manifest (see §13.7); generate also runs a design review round after the build passes (see §17.4).
+- New tuning switches: `AGENT_DESIGN_REVIEW` (`off|generate|always`, default `generate`; `generate` = run the review round only for from-scratch generation), `AGENT_POLISH_MAX_MS` (upper bound on the review round's duration, default 300000). **The defaults live in code and take effect even when not explicitly declared**; the review round uses the smaller of "remaining total budget" and `AGENT_POLISH_MAX_MS`, and is skipped automatically when less than 30s remains.
 
-### 5.1 用户附件(图片 / 文本文件)
+### 5.1 User Attachments (images / text files)
 
-用户提需求(首次 `generate` 与后续 `chat`)时可以随消息上传参考材料,让模型"看着图/文档"改。
+When submitting a request (initial `generate` and later `chat`), the user can upload reference material along with the message so the model can "look at the image/document" while editing.
 
-链路:`ChatPanel` 选文件 → 本地校验 + 转 base64 → `POST /api/projects/:id/{generate,chat}` 的 `attachments` 字段 → Worker 权威校验 → 随本次 dispatch 内联到 Cloud Run 的 `/run` 载荷 → agent 落盘 + 把图片作为多模态输入交给模型。
+Flow: `ChatPanel` picks files → local validation + base64 conversion → the `attachments` field of `POST /api/projects/:id/{generate,chat}` → authoritative validation on the Worker → inlined into the Cloud Run `/run` payload for this dispatch → agent writes to disk + hands images to the model as multimodal input.
 
-| 项 | 规则 | 权威判定位置 |
+| Item | Rule | Authoritative enforcement location |
 | --- | --- | --- |
-| 类型 | 图片 `png/jpg/jpeg/webp/gif`;文本 `txt/md/csv/json/js/jsx/ts/tsx/html/css/py/go/java/sql/yml/yaml/xml` | `src/lib/attachments.ts`(前端 `web/src/lib/attachments.ts` 只是提前拦) |
-| 单个大小 | 图片 ≤ **2MB**(与生成应用 `blob.put` 上限一致);文本 ≤ **256KB** | 同上 |
-| 数量 / 合计 | 单条消息 ≤ **3 个**,合计(解码后)≤ **4MB** | 同上 |
+| Type | Images `png/jpg/jpeg/webp/gif`; text `txt/md/csv/json/js/jsx/ts/tsx/html/css/py/go/java/sql/yml/yaml/xml` | `src/lib/attachments.ts` (the frontend `web/src/lib/attachments.ts` only pre-filters) |
+| Single size | Images ≤ **2MB** (same as the generated app's `blob.put` cap); text ≤ **256KB** | Same as above |
+| Count / total | ≤ **3** per message, total (after decoding) ≤ **4MB** | Same as above |
 
-- **不落库**:附件字节不走 D1(单条 4MB 会撑爆行/语句上限),也不进 `jobs.payload`。用户消息文本末尾追加一行 `📎 附件 N 个:…` 作为持久痕迹,真实字节只活在这一条消息的 dispatch 里。**推论:失败后「一键重试」只重发文本,附件需要重传。**
-- **agent 侧两种用法**:图片「落盘 + 内联」双份——内联(`session.prompt(text, { images })`,pi 的 `ImageContent`)保证模型第一眼就看见;同时写入工作目录 `.attachments/1-<原名>`,需要时还能自己 `read`。文本附件只落盘,由提示词里的清单引导模型 `read`。
-- `.attachments/` 进了 `runner.ts` 的 `SKIP_DIRS` → 不进 `collectSource` 的源码树,也不进构建产物、不会被 `restoreFromMap` 误删。
-- **图片输入按环境开关 + 后台行**:`models.json` 声明 `input: ['text','image']` 需要后台 `model_configs.image_input=1`(逐任务下发),Cloud Run 的 `PI_MODEL_INPUT_IMAGE=true` 只是回落。上游网关方言不一定认 image 块——声明了却发不出去会直接 400,所以新供应商要先实测。staging(GLM,OpenAI 兼容)已开;生产 DeepSeek / GLM 的 Anthropic 端点已在 2026-10-25 实测接受 image 块,后台生产行 `image_input=1` 生效(Cloud Run env 不设)。
-- 请求体上限:`agent/src/index.ts` 的 `MAX_BODY_BYTES` 从 2MB 提到 24MB(chat 源码树 + 4MB 附件的 base64 ≈ 5.4MB,留一倍余量);Cloud Run 单请求上限 32MB。
+- **Never persisted**: attachment bytes do not go into D1 (4MB per message would blow the row/statement limits) nor into `jobs.payload`. A line `📎 附件 N 个:…` is appended to the end of the user message text as a persistent trace; the real bytes live only in this one message's dispatch. **Corollary: after a failure, "one-click retry" resends only the text; attachments must be re-uploaded.**
+- **Two usages on the agent side**: images get both "write to disk + inline" — inline (`session.prompt(text, { images })`, pi's `ImageContent`) guarantees the model sees them at first glance; they are also written to the working directory as `.attachments/1-<original name>`, so the agent can still `read` them itself when needed. Text attachments are only written to disk; a checklist in the prompt guides the model to `read` them.
+- `.attachments/` is in `runner.ts`'s `SKIP_DIRS` → it does not enter `collectSource`'s source tree, does not enter build artifacts, and will not be mistakenly deleted by `restoreFromMap`.
+- **Image input gated by environment switch + admin row**: declaring `input: ['text','image']` in `models.json` requires the admin-side `model_configs.image_input=1` (delivered per job); Cloud Run's `PI_MODEL_INPUT_IMAGE=true` is only the fallback. Upstream gateway dialects do not necessarily accept image blocks — declaring it but failing to send results in an immediate 400, so new providers must be tested first. Staging (GLM, OpenAI-compatible) is enabled; the production DeepSeek / GLM Anthropic endpoints were measured on 2026-10-25 to accept image blocks, and the production admin row's `image_input=1` is in effect (Cloud Run env unset).
+- Request body cap: `MAX_BODY_BYTES` in `agent/src/index.ts` was raised from 2MB to 24MB (chat source tree + 4MB attachments base64 ≈ 5.4MB, leaving 2x headroom); Cloud Run's single-request cap is 32MB.
 
-### 5.2 生成过程中追加要求(steering)
+### 5.2 Steering (additional requests during generation)
 
-用户不必等这一轮跑完:任务进行中还能继续打字、粘贴图片,内容即时投给**正在执行**的 agent,不用排队等下一个任务。
+The user doesn't have to wait for the current round to finish: while a job is running they can keep typing and pasting images, and the content is delivered immediately to the **currently executing** agent — no queuing for the next job.
 
-链路:`ChatPanel`(生成中输入框保持可用,回车 = 「追加」)→ `POST /api/projects/:id/steer` → 落 `job_messages` 投递队列 → agent 每 5s 的巡检 `GET /internal/jobs/:id/state` 取走并标 `consumed_at` → pi 的 `session.steer()` 注入。
+Flow: `ChatPanel` (input stays usable during generation; Enter = "append") → `POST /api/projects/:id/steer` → written to the `job_messages` delivery queue → the agent's 5s inspection `GET /internal/jobs/:id/state` picks it up and marks `consumed_at` → injected via pi's `session.steer()`.
 
-- **只投递,不改状态机**:steer 不碰 `jobs` 的任何字段,任务照跑。内容同时作为一条 `user` 消息写进 `messages`(对话记录里顺序与时间都对,用户立刻看到)。§4 的巡检因此从「只查 cancelled」扩展成「cancelled + 未消费的追加要求」,一次请求两件事。
-- **用 pi 原生 steer**:`session.steer(text, { images })` 在当前工具调用轮结束后、下一次 LLM 调用前生效,one-at-a-time 逐个消费 → **不会打断正在跑的命令**,不是「插话即中断」。图片走多模态内联;文本附件内联进 steer 文本(追加路径没有落盘环节)。
-- **会话就绪前先缓冲**:拷模板 + 建 pi 会话有十几秒空窗,这期间到达的追加要求先进内存队列,`runJob` 的 `onSession` 回调拿到 session 后补投,不丢消息。
-- **限额比首次提交更紧**(整行要塞进 D1):图片 ≤ **1MB**、文本 ≤ **128KB**、合计 ≤ **1.2MB**(base64 约 1.6MB,`job_messages` 单行上限 2MB 留余量);见 `src/lib/attachments.ts` 的 `STEER_LIMITS`。
-- **临时文件,任务落定即释放**:`job_messages` 只在任务 `pending/running` 期间存在;`commit` / `fail` / `cancelled` 三条终态路径都调 `clearJobMessages()` 整批删掉(含附件 base64),cron `sweepJobs` 再兜底清孤儿行。**推论:历史任务取不回「当时的追加附件」**——它本来就不该活过这一轮;对话记录里只留 `📎 附件 N 个` 这行痕迹。
-- **任务刚好结束**:steer 对非活动任务返回 409,前端退化成正常发送(直接开新任务),不让用户白打一段话。
-- 前端:`Cmd/Ctrl+V` 粘贴图片走浏览器原生剪贴板能力(无额外依赖),空闲与生成中共用同一套附件校验,只是限额随状态切换;生成中「发送」按钮变「追加」,旁边仍是「■ 停止」。
+- **Delivery only, never touches the state machine**: steer does not touch any `jobs` field; the job keeps running. The content is also written into `messages` as a `user` message (order and timestamps in the conversation history are both correct; the user sees it immediately). §4's inspection is thereby extended from "check cancelled only" to "cancelled + unconsumed steering input" — two things in one request.
+- **Uses pi's native steer**: `session.steer(text, { images })` takes effect after the current tool-call round ends and before the next LLM call, consuming one at a time → **it does not interrupt a running command**; it is not "interrupt on interjection". Images go through multimodal inlining; text attachments are inlined into the steer text (the steer path has no write-to-disk step).
+- **Buffered before the session is ready**: copying the template + creating the pi session leaves a window of a dozen-plus seconds; steering arriving during that window first goes into an in-memory queue, and `runJob`'s `onSession` callback delivers it once it has the session — no message loss.
+- **Limits are tighter than the initial submission** (the whole row must fit in D1): images ≤ **1MB**, text ≤ **128KB**, total ≤ **1.2MB** (base64 ≈ 1.6MB, headroom under `job_messages`' 2MB per-row cap); see `STEER_LIMITS` in `src/lib/attachments.ts`.
+- **Temporary files, released when the job settles**: `job_messages` exists only while the job is `pending/running`; all three terminal paths — `commit` / `fail` / `cancelled` — call `clearJobMessages()` to delete the whole batch (including attachment base64), and cron's `sweepJobs` cleans up orphan rows as a backstop. **Corollary: the steering attachments of a historical job cannot be recovered** — they were never meant to outlive that round; the conversation history keeps only the `📎 附件 N 个` trace line.
+- **Job just ended**: steer on a non-active job returns 409, and the frontend degrades to a normal send (starting a new job directly) so the user doesn't type for nothing.
+- Frontend: `Cmd/Ctrl+V` pastes images via the browser's native clipboard capability (no extra dependencies); the same attachment validation is shared between idle and generating states, with only the limits switching by state; during generation the "Send" button becomes "Append", with "■ Stop" still next to it.
 
-## 6. 安全
+## 6. Security
 
-- Worker → Cloud Run:请求头 `X-Agent-Secret`(共享密钥)。Cloud Run 可设 `--no-allow-unauthenticated` + 由 Worker 带 Google OIDC token 进一步收紧(路线图)。
-- Cloud Run → Worker:`X-Agent-Secret` 校验;`/internal/*` 不挂用户鉴权中间件、不读 cookie。
-- 生成的页面仍走 `/s/:slug` 的 CSP `sandbox`,opaque origin,读不到主站凭证(不变)。
-- Agent 工作目录与网络:容器内除 LLM 网关与回调用例外网可后续用 VPC egress 限制(路线图)。
+- Worker → Cloud Run: request header `X-Agent-Secret` (shared secret). Cloud Run can additionally set `--no-allow-unauthenticated` + have the Worker carry a Google OIDC token to tighten further (roadmap).
+- Cloud Run → Worker: `X-Agent-Secret` validation; `/internal/*` does not mount the user-auth middleware and does not read cookies.
+- Generated pages still go through `/s/:slug`'s CSP `sandbox`, opaque origin, unable to read main-site credentials (unchanged).
+- Agent working directory and network: egress from the container to anything other than the LLM gateway and callbacks can later be restricted with VPC egress (roadmap).
 
-## 7. 成本(Cloud Run)
+## 7. Cost (Cloud Run)
 
-- **每月免费额度**:Cloud Run 有永久免费层(约每月 18 万 vCPU·秒 + 36 万 GiB·秒 + 100 万请求,区域/口径以官方为准),小规模够用;超出按用量计费。
-- **出网流量**:Cloud Run 对**出站到互联网的数据传输按 GiB 收费**(有少量免费出网额度),入网免费;同区域内网互通不计费。Agent 主要"出网"是调 LLM 网关与回调,都是小体积 JSON,流量成本可忽略;真正成本是 vCPU/内存的**请求时长**。
-- 省钱关键:请求级计费 + `--min-instances=0` + `--concurrency=1` + 生成完立刻响应结束 → 实例随即缩容到 0。
+- **Monthly free quota**: Cloud Run has a permanent free tier (roughly 180k vCPU·seconds + 360k GiB·seconds + 1M requests per month; regions/definitions per official docs), enough for small scale; beyond that it's pay-per-use.
+- **Egress traffic**: Cloud Run charges **per GiB for data transferred outbound to the internet** (with a small free egress quota); ingress is free, and same-region internal traffic is not billed. The agent's main "egress" is calling the LLM gateway and callbacks — all small JSON, so traffic cost is negligible; the real cost is vCPU/memory **request duration**.
+- Key to saving money: request-based billing + `--min-instances=0` + `--concurrency=1` + the response ending immediately after generation → the instance scales to 0 right away.
 
-## 8. 新增/改动清单
+## 8. Additions/Changes List
 
-新增(Cloud Run 侧,`agent/`):
-- `index.ts`(HTTP:`POST /run`、`GET /health`)、`runner.ts`(pi 会话 + 事件→进度 + 平台自有文件还原 + 用户附件落盘/多模态输入 + 平台侧构建 + 设计复查轮回滚 + `AbortSignal` 协作式取消 + 周期断点快照)、`session.ts`(模型/工具装配)、`prompt.ts`(system / `POLISH_PROMPT` / generate / chat)、`attachments.ts`(附件落盘命名与提示词清单,见 §5.1)、`callback.ts`(进度/心跳/里程碑日志/断点/commit/fail + `startJobWatcher`:一次 5s 巡检同时做协作式取消与追加要求取件,见 §5.2)、`config.ts`;`template/`(预装依赖的 Vite+React 脚手架 + 设计系统,见 §17)、`Dockerfile`、`package.json`、`tsconfig.json`。
+New (Cloud Run side, `agent/`):
+- `index.ts` (HTTP: `POST /run`, `GET /health`), `runner.ts` (pi session + events→progress + platform-owned file restoration + user attachments to disk/multimodal input + platform-side build + design-review round rollback + `AbortSignal` cooperative cancellation + periodic checkpoint snapshots), `session.ts` (model/tool assembly), `prompt.ts` (system / `POLISH_PROMPT` / generate / chat), `attachments.ts` (attachment disk naming and prompt checklist, see §5.1), `callback.ts` (progress/heartbeat/milestone log/checkpoint/commit/fail + `startJobWatcher`: one 5s inspection doing both cooperative cancellation and steering pickup, see §5.2), `config.ts`; `template/` (Vite+React scaffold with preinstalled dependencies + design system, see §17), `Dockerfile`, `package.json`, `tsconfig.json`.
 
-改动(Cloudflare 侧):
-- `src/workflow.ts`:**已删除**(用 `waitUntil` 异步 dispatch + 回调替代持久编排)。
-- `src/routes/internal.ts`(新):进度 / commit / fail 回调,以及取消巡检 + 追加要求取件用的 `GET /jobs/:id/state`。
-- `src/lib/agent.ts`(新):dispatch 载荷构造 + 调用 Cloud Run。
-- `src/lib/attachments.ts`(新):对话附件的类型白名单 / 大小与数量上限 / base64 校验(与生成应用 `blob` 的 2MB 上限对齐),见 §5.1;另含生成中追加(steer)的独立限额 `STEER_LIMITS`,见 §5.2。
-- `src/lib/commit.ts`(新):commit / fail 回调落定终态(写版本、扣积分、补消息),以及手动停止落定 `cancelJob()`(置 `cancelled`,立即解锁项目);三条终态路径都清掉 `job_messages` 投递队列。
-- `src/lib/jobs.ts`:心跳式状态 + cron 巡检判死;`JobStatus` 含第 4 个终态 `cancelled`;`sweepJobs` 兜底清孤儿 `job_messages` 行。
-- `src/lib/jobHelpers.ts`:任务快照查询 + `clearJobMessages()`(见 §5.2)。
-- `src/routes/generate.ts`:`waitUntil` 异步 dispatch;`POST /:id/cancel`(用户手动停止);`POST /:id/steer`(生成中追加要求,见 §5.2)。
-- `schema.sql` / `schema.migrate-steer.sql`:`job_messages` 投递队列表(见 §5.2)。
-- `web/src/lib/attachments.ts`、`web/src/components/ChatPanel.tsx`、`web/src/pages/Workspace.tsx`:附件选择/粘贴与限额、生成中追加、对话栏可拖拽调宽(见 §5.2、§18)。
-- `src/types.ts`:`Env` 增加 `AGENT_URL`、`AGENT_SECRET`、`PUBLIC_BASE_URL`(可选 `AGENT_DISPATCH_TIMEOUT_MS` 等);移除 Workflow 类型。
-- `src/index.ts`:挂载 `/internal`,移除 Workflow 导出与 cron 改为任务巡检。
-- `wrangler.jsonc` / `.dev.vars.example`:新增变量(Worker 名保持 `forge-v2`;D1 建议另建 `forge-v2` 隔离数据)。
-- `src/lib/prompts.ts`、`src/lib/llm.ts`:Worker 侧不再被 workflow 使用;`llm.ts` 保留给可能的轻量用途,`prompts.ts` 的约束文案迁到 `agent/src/prompt.ts`。
+Changes (Cloudflare side):
+- `src/workflow.ts`: **deleted** (replaced by `waitUntil` async dispatch + callbacks instead of durable orchestration).
+- `src/routes/internal.ts` (new): progress / commit / fail callbacks, plus `GET /jobs/:id/state` for cancellation inspection + steering pickup.
+- `src/lib/agent.ts` (new): dispatch payload construction + calling Cloud Run.
+- `src/lib/attachments.ts` (new): conversation attachment type whitelist / size and count caps / base64 validation (aligned with the generated app's 2MB `blob` cap), see §5.1; also contains the separate `STEER_LIMITS` for mid-generation steering, see §5.2.
+- `src/lib/commit.ts` (new): settles terminal states from commit / fail callbacks (write version, deduct credits, append message), and settles manual stops via `cancelJob()` (sets `cancelled`, unlocks the project immediately); all three terminal paths clear the `job_messages` delivery queue.
+- `src/lib/jobs.ts`: heartbeat-style status + cron inspection declaring death; `JobStatus` includes the 4th terminal state `cancelled`; `sweepJobs` cleans up orphan `job_messages` rows as a backstop.
+- `src/lib/jobHelpers.ts`: job snapshot queries + `clearJobMessages()` (see §5.2).
+- `src/routes/generate.ts`: `waitUntil` async dispatch; `POST /:id/cancel` (user manual stop); `POST /:id/steer` (mid-generation steering, see §5.2).
+- `schema.sql` / `schema.migrate-steer.sql`: `job_messages` delivery queue table (see §5.2).
+- `web/src/lib/attachments.ts`, `web/src/components/ChatPanel.tsx`, `web/src/pages/Workspace.tsx`: attachment picking/pasting and limits, mid-generation steering, draggable-resize conversation pane (see §5.2, §18).
+- `src/types.ts`: `Env` gains `AGENT_URL`, `AGENT_SECRET`, `PUBLIC_BASE_URL` (optionally `AGENT_DISPATCH_TIMEOUT_MS` etc.); Workflow types removed.
+- `src/index.ts`: mounts `/internal`; Workflow export removed and cron changed to job inspection.
+- `wrangler.jsonc` / `.dev.vars.example`: new variables (Worker name stays `forge-v2`; D1 recommended to be a new isolated `forge-v2` database).
+- `src/lib/prompts.ts`, `src/lib/llm.ts`: no longer used by the workflow on the Worker side; `llm.ts` is kept for possible lightweight uses, and `prompts.ts`' constraint copy moved to `agent/src/prompt.ts`.
 
-## 9. 全新环境搭建(与旧服务完全隔离)
+## 9. Building a Brand-New Environment (fully isolated from the old service)
 
-原则:**本项目的资源全部新建,不复用线上 `forge` 的 Worker / D1 / secrets / Workflow,也不复用既有的 Cloud Run 服务。** 旧服务只读不动。
+Principle: **all resources for this project are created fresh; do not reuse the online `forge`'s Worker / D1 / secrets / Workflow, and do not reuse existing Cloud Run services.** The old service is read-only and untouched.
 
-### 9.1 Cloudflare(新项目空间)
+### 9.1 Cloudflare (new project space)
 
 ```bash
 # 1) 新建独立 D1,把输出的 database_id 填进 wrangler.jsonc
@@ -186,23 +186,23 @@ npx wrangler secret put AGENT_SECRET     # 与 Cloud Run 侧同名同值
 npm run deploy                            # 构建前端 + 部署 Worker(名:forge-v2)
 ```
 
-> `wrangler.jsonc` 里 `database_id` 现在是占位符 `REPLACE_WITH_FORGE_V2_D1_ID`,**必须先 `d1 create` 再替换**,否则部署报错——这是刻意的,防止误用旧库。
-> Worker 名 `forge-v2` 为全新命名,不会覆盖线上 `forge`(v2 已不再注册 Workflow)。
+> The `database_id` in `wrangler.jsonc` is currently the placeholder `REPLACE_WITH_FORGE_V2_D1_ID`; you **must run `d1 create` first and then replace it**, otherwise deployment errors out — this is intentional, to prevent accidentally using the old database.
+> The Worker name `forge-v2` is a brand-new name and will not overwrite the online `forge` (v2 no longer registers a Workflow).
 
-**Google 登录(可选,与邮箱/密码登录共存)**:在 Google Cloud Console →「API 和服务 → 凭据」创建「OAuth 客户端 ID(Web 应用)」,「已获授权的重定向 URI」填 `${PUBLIC_BASE_URL}/api/auth/google/callback`(本地为 `http://localhost:8787/api/auth/google/callback`),再把客户端 ID/密钥存为 Worker secrets:`npx wrangler secret put GOOGLE_CLIENT_ID`、`npx wrangler secret put GOOGLE_CLIENT_SECRET`——两者缺一即不启用,登录页只保留邮箱/密码。老库需执行一次 `schema.migrate-google.sql`(`npm run db:migrate:google:remote`)新增 `users.google_sub`;全新安装的 `schema.sql` 已含。流程:前端「使用 Google 登录」→ `GET /api/auth/google`(state 随机数存 HttpOnly cookie 防 CSRF,`idea` 随 state 透传)→ Google 授权页 → `GET /api/auth/google/callback` 用 code 换 `id_token`,按 `sub` 找账号;找不到再按邮箱命中**同一账号**并回填 `google_sub`(邮箱/密码账号与 Google 合并,历史数据与积分保留),都没有才新建(无密码,`password_hash` 存空串)。
+**Google login (optional, coexists with email/password login)**: in Google Cloud Console → "APIs & Services → Credentials", create an "OAuth client ID (Web application)"; put `${PUBLIC_BASE_URL}/api/auth/google/callback` in "Authorized redirect URIs" (locally `http://localhost:8787/api/auth/google/callback`), then store the client ID/secret as Worker secrets: `npx wrangler secret put GOOGLE_CLIENT_ID` and `npx wrangler secret put GOOGLE_CLIENT_SECRET` — if either is missing the feature is disabled and the login page keeps only email/password. Old databases need to run `schema.migrate-google.sql` once (`npm run db:migrate:google:remote`) to add `users.google_sub`; a fresh install of `schema.sql` already includes it. Flow: frontend "Sign in with Google" → `GET /api/auth/google` (a random state stored in an HttpOnly cookie against CSRF, with `idea` passed through alongside the state) → Google authorization page → `GET /api/auth/google/callback` exchanges the code for `id_token` and looks up the account by `sub`; if not found, it matches the **same account** by email and fills back `google_sub` (the email/password account merges with Google; historical data and credits are preserved); only if neither matches does it create a new account (no password, `password_hash` stored as an empty string).
 
-**修改 / 设置密码(2026-10-22)**:登录态下 `POST /api/auth/password`(`currentPassword?` + `newPassword`),前端入口是顶栏邮箱 → `/account`。已有密码的账号必须提供当前密码;纯 Google 账号(`password_hash` 为空串)没有当前密码,可直接设置,设置后即可用邮箱 + 密码登录同一账号。改密成功会**吊销该用户全部旧会话**并给当前请求换发新 cookie,其他设备需重新登录。没有「忘记密码」邮件重置流程。
+**Change / set password (2026-10-22)**: while logged in, `POST /api/auth/password` (`currentPassword?` + `newPassword`); the frontend entry is the top-bar email → `/account`. Accounts with an existing password must provide the current password; pure Google accounts (`password_hash` an empty string) have no current password and can set one directly, after which they can log in to the same account with email + password. A successful password change **revokes all of that user's old sessions** and issues a fresh cookie for the current request; other devices must log in again. There is no "forgot password" email reset flow.
 
-**邮箱验证(注册必过,2026-10-21)**:注册**不再发积分、不建会话**,只落 `users.email_verified = 0` 并发送一次性验证链接;点链接(`/verify?token=…`)验证成功后才置 1、发放 `SIGNUP_CREDITS` 并自动登录。验证邮件走 **Resend**(免费档 3,000 封/月、100 封/天,无需付费订阅;超出后按量付费),Worker 用 `fetch` 调 `https://api.resend.com/emails`,密钥是 Worker secret `RESEND_API_KEY`(两套环境各写一次),发件地址是 `vars.EMAIL_FROM=noreply@1forgen.site`。前提是在 Resend 后台 **验证发件域名 `1forgen.site`**(添加 DKIM/SPF 等 DNS 记录,Cloudflare DNS 下几分钟生效);未验证时 API 返回 403 `The domain is not verified`。老库执行 `npm run db:migrate:email:remote`(staging 用 `…:email:staging`),新增 `users.email_verified` 与 `email_verifications` 表。
-- token 只存 SHA-256(`src/lib/email.ts`),库泄露也拿不到可用链接;有效期 24h,重发即让旧链接失效。
-- 发信失败不阻断建号(`verificationSent=false`),前端显示待验证面板并允许立即重发(不受 60s 冷却限制)。
-- 限流:同账号 60s 冷却 + 24h 5 封;同 IP 1h 20 次(**注册与重发共用**)。
-- Google 登录返回的邮箱视为已验证:待验证账号走 Google 登录直接转正并补发注册积分,不重复发。
-- 生产/测试共用同一个发送域名与账号额度(不是环境差异);发件人显示名 staging 为 `Forge Staging`。
+**Email verification (required for signup, 2026-10-21)**: signup **no longer grants credits or creates a session**; it only sets `users.email_verified = 0` and sends a one-time verification link; only after clicking the link (`/verify?token=…`) and verifying successfully is it set to 1, `SIGNUP_CREDITS` granted, and auto-login performed. Verification email goes through **Resend** (free tier 3,000 emails/month, 100 emails/day, no paid subscription needed; pay-per-use beyond that); the Worker calls `https://api.resend.com/emails` with `fetch`, the key is the Worker secret `RESEND_API_KEY` (written once per environment), and the sender address is `vars.EMAIL_FROM=noreply@1forgen.site`. Prerequisite: **verify the sending domain `1forgen.site`** in Resend's console (add DKIM/SPF DNS records; takes effect within minutes under Cloudflare DNS); when unverified the API returns 403 `The domain is not verified`. Old databases run `npm run db:migrate:email:remote` (staging uses `…:email:staging`), adding `users.email_verified` and the `email_verifications` table.
+- Tokens are stored only as SHA-256 (`src/lib/email.ts`); a database leak yields no usable links; validity is 24h, and resending invalidates the old link.
+- Send failure does not block account creation (`verificationSent=false`); the frontend shows a pending-verification panel and allows immediate resend (not subject to the 60s cooldown).
+- Rate limits: 60s cooldown per account + 5 per 24h; 20 per hour per IP (**shared by signup and resend**).
+- Emails returned by Google login are treated as verified: a pending-verification account that logs in via Google is promoted directly and granted the signup credits, without sending again.
+- Production/testing share the same sending domain and account quota (not an environment difference); the staging sender display name is `Forge Staging`.
 
-### 9.2 Google Cloud(新 Cloud Run 服务)
+### 9.2 Google Cloud (new Cloud Run service)
 
-先把项目与区域定下来(本次实际部署:`PROJECT_ID=sixth-impulse-286413`、`REGION=us-central1`),然后:
+First settle the project and region (this deployment used `PROJECT_ID=sixth-impulse-286413`, `REGION=us-central1`), then:
 
 ```bash
 gcloud config set project $PROJECT_ID
@@ -229,32 +229,32 @@ gcloud run deploy forge-agent \
   --set-secrets LLM_API_KEY=llm-api-key:latest,AGENT_SECRET=agent-secret:latest
 ```
 
-> 换用 OpenAI 兼容网关时,把 `PI_LLM_API` 改回 `openai-completions`,并按需加 `PI_SUPPORTS_DEVELOPER_ROLE=false` / `PI_THINKING_FORMAT=zai|qwen` 等(见 §5)。
-> **图片输入要显式开**:`PI_MODEL_INPUT_IMAGE=true` 才会声明模型支持图片、把用户上传的图内联给模型(见 §5.1)。staging(GLM,OpenAI 兼容)的 `agent:deploy:staging` 已加;**生产(DeepSeek Anthropic 方言)故意没加**——要开之前先用一张图实测该端点接受 image 块,否则会整轮 400。
-> `AGENT_MAX_RUN_MS` 必须 **小于** Cloud Run `--timeout`(两者都按毫秒/秒口径核对):env 默认 1500s,后台 `model_configs.max_run_ms` 可配到 3400s,VIP 的 `--timeout 3600`。注意 `max_run_ms` 只约束模型主循环,构建与复查轮在其后发生,所以后台校验刻意留了 200s 余量,不要把它配到贴着 3600s。设太小会让正常的多文件生成被自身超时掐死(staging 初版设 300s 即踩过:一个真实 generate 需要 ~6.5 分钟)。
-> 生成质量相关的两个开关(`AGENT_DESIGN_REVIEW=generate`、`AGENT_POLISH_MAX_MS=300000`)不必写进 `--set-env-vars`:代码里有同样的默认值,部署脚本不声明也不影响行为(见 §5、§17.4)。
+> When switching to an OpenAI-compatible gateway, change `PI_LLM_API` back to `openai-completions` and add `PI_SUPPORTS_DEVELOPER_ROLE=false` / `PI_THINKING_FORMAT=zai|qwen` etc. as needed (see §5).
+> **Image input must be enabled explicitly**: only with `PI_MODEL_INPUT_IMAGE=true` does the model declare image support and get user-uploaded images inlined (see §5.1). Staging's (GLM, OpenAI-compatible) `agent:deploy:staging` already sets it; **production (DeepSeek Anthropic dialect) deliberately does not** — before enabling it, test with a real image that the endpoint accepts image blocks, otherwise the whole round 400s.
+> `AGENT_MAX_RUN_MS` must be **smaller than** Cloud Run's `--timeout` (verify both in ms/s terms): env default 1500s, admin-side `model_configs.max_run_ms` can go up to 3400s, VIP's `--timeout 3600`. Note `max_run_ms` only bounds the model's main loop; the build and review round happen after it, so the admin-side validation deliberately leaves 200s of headroom — don't set it flush against 3600s. Setting it too small lets a normal multi-file generation be killed by its own timeout (staging's initial 300s hit exactly this: a real generate takes ~6.5 minutes).
+> The two generation-quality switches (`AGENT_DESIGN_REVIEW=generate`, `AGENT_POLISH_MAX_MS=300000`) don't need to go into `--set-env-vars`: the code has the same defaults, and behavior is unaffected if the deploy script doesn't declare them (see §5, §17.4).
 
-部署完把服务 URL 填回 `wrangler.jsonc` 的 `AGENT_URL`,把 Worker 的对外域填进 `PUBLIC_BASE_URL`,再 `npm run deploy` 一次。
+After deployment, put the service URL back into `wrangler.jsonc`'s `AGENT_URL`, put the Worker's public domain into `PUBLIC_BASE_URL`, then run `npm run deploy` once more.
 
-> ⚠️ **镜像构建上下文必须排除宿主的 `node_modules`**(2026-10-17 踩坑,已修):`agent/Dockerfile` 的 template 阶段用 `npm install` 装脚手架依赖,而 `gcloud run deploy --source agent` 会把 `agent/` 整个当上下文——包括本地 `agent/template/node_modules`(macOS,≈118 MB、7872 个文件)。
-> 它一旦被 `COPY template/ ./` 拷进镜像,就会**覆盖容器内正确的 Linux 安装**:macOS 的 `node_modules/.bin/vite` 是相对软链 `../vite/bin/vite.js`,在上下文传输中被解引用成普通文件 `.bin/vite`,入口路径随即错位,`import('../dist/node/cli.js')` 解析成 `node_modules/dist/node/cli.js` → `ERR_MODULE_NOT_FOUND`,表现为**每次 generate 都在「构建应用产物」阶段失败**。
-> 修法有三层,缺一不可:① `agent/.dockerignore` 写 `**/node_modules`(旧写法 `node_modules` 只匹配根层,**不匹配 `template/node_modules`**);② `agent/.gcloudignore` 显式排除 `template/node_modules`(顺带把上传量从 23434 个文件降到 39 个);③ Dockerfile 改成先 `COPY template/ ./` 再 `rm -rf node_modules && npm install`,即使有残留也以容器内安装为准。改完用 `gcloud meta list-files-for-upload agent | grep -c template/node_modules` 应得 `0`。
+> ⚠️ **The image build context must exclude the host's `node_modules`** (pitfall hit 2026-10-17, fixed): the template stage of `agent/Dockerfile` uses `npm install` to install scaffold dependencies, while `gcloud run deploy --source agent` sends the whole `agent/` as context — including local `agent/template/node_modules` (macOS, ≈118 MB, 7872 files).
+> Once copied into the image by `COPY template/ ./`, it **overwrites the correct Linux installation inside the container**: macOS's `node_modules/.bin/vite` is a relative symlink `../vite/bin/vite.js`, which gets dereferenced into a plain file `.bin/vite` during context transfer; the entry path then misaligns, `import('../dist/node/cli.js')` resolves to `node_modules/dist/node/cli.js` → `ERR_MODULE_NOT_FOUND`, manifesting as **every generate failing at the "building app artifacts" stage**.
+> The fix has three layers, all required: ① `agent/.dockerignore` lists `**/node_modules` (the old form `node_modules` matches only the root level and **does not match `template/node_modules`**); ② `agent/.gcloudignore` explicitly excludes `template/node_modules` (which also cut the upload from 23434 files to 39); ③ the Dockerfile was changed to `COPY template/ ./` first and then `rm -rf node_modules && npm install`, so even with leftovers the in-container installation wins. After the change, `gcloud meta list-files-for-upload agent | grep -c template/node_modules` should yield `0`.
 
-### 9.3 需要哪些 GCP 权限
+### 9.3 Which GCP Permissions Are Needed
 
-**(a) 执行部署的人 / CI 服务账户** —— 用 `--source` 部署会用到 Cloud Build + Artifact Registry + 一个临时 GCS staging bucket,最小角色集:
+**(a) The person / CI service account doing deployment** — deploying with `--source` uses Cloud Build + Artifact Registry + a temporary GCS staging bucket; minimal role set:
 
-| 角色 | 用途 |
+| Role | Purpose |
 | --- | --- |
-| `roles/run.admin` | 创建/更新 Cloud Run 服务 |
-| `roles/iam.serviceAccountUser` | 把运行时 SA 绑到 Cloud Run 服务上 |
-| `roles/cloudbuild.builds.editor` | Cloud Build 构建镜像 |
-| `roles/artifactregistry.writer` | 推送镜像到 Artifact Registry |
-| `roles/storage.objectAdmin` | Cloud Build 的临时 staging bucket 读写 |
-| `roles/secretmanager.admin` | 创建/更新 secret(仅首次需要,可用 `secretVersionAdder` 收窄) |
-| `roles/serviceusage.serviceUsageAdmin` | 启用上面那批 API(仅首次需要) |
+| `roles/run.admin` | Create/update the Cloud Run service |
+| `roles/iam.serviceAccountUser` | Bind the runtime SA to the Cloud Run service |
+| `roles/cloudbuild.builds.editor` | Cloud Build builds images |
+| `roles/artifactregistry.writer` | Push images to Artifact Registry |
+| `roles/storage.objectAdmin` | Read/write Cloud Build's temporary staging bucket |
+| `roles/secretmanager.admin` | Create/update secrets (needed only the first time; can be narrowed to `secretVersionAdder`) |
+| `roles/serviceusage.serviceUsageAdmin` | Enable the batch of APIs above (needed only the first time) |
 
-授权示例:
+Authorization example:
 
 ```bash
 for r in run.admin iam.serviceAccountUser cloudbuild.builds.editor \
@@ -265,225 +265,226 @@ for r in run.admin iam.serviceAccountUser cloudbuild.builds.editor \
 done
 ```
 
-> 开发期图省事可直接给 `roles/editor`(覆盖上表大部分),但生产建议按上表收窄。
+> During development, for convenience you can just grant `roles/editor` (covers most of the table above), but for production it's recommended to narrow to the table above.
 
-**(b) Cloud Run 运行时服务账户**(容器自身) —— 只有读密钥需要:
+**(b) The Cloud Run runtime service account** (the container itself) — only reading secrets requires it:
 
-| 角色 | 用途 |
+| Role | Purpose |
 | --- | --- |
-| `roles/secretmanager.secretAccessor` | 读 `--set-secrets` 注入的 `LLM_API_KEY` / `AGENT_SECRET` |
+| `roles/secretmanager.secretAccessor` | Read `LLM_API_KEY` / `AGENT_SECRET` injected via `--set-secrets` |
 
-若用默认计算 SA,执行一次:
+If using the default compute SA, run once:
 ```bash
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')-compute@developer.gserviceaccount.com" \
   --role="roles/secretmanager.secretAccessor"
 ```
 
-**(c) Cloudflare Worker 调用 Cloud Run** —— 现在用共享密钥(`X-Agent-Secret`),Cloud Run 允许未认证访问即可,**不需要任何 GCP IAM**。
+**(c) Cloudflare Worker calling Cloud Run** — currently uses a shared secret (`X-Agent-Secret`); Cloud Run just needs to allow unauthenticated access, so **no GCP IAM is needed at all**.
 
-> 可选收紧(路线图):建一个调用方 SA 带 `roles/run.invoker`,Worker 换取其 ID token 调用。代价是 Worker 侧要管理该 SA 的凭据,当前不做。
+> Optional tightening (roadmap): create a caller SA with `roles/run.invoker` and have the Worker exchange for its ID token to call. The cost is that the Worker side must manage that SA's credentials; not done for now.
 
-### 9.4 回滚
+### 9.4 Rollback
 
-- Worker 回退版本(`wrangler rollback`)即可;Cloud Run 独立无状态,回退 = 部署上一镜像。
+- Roll the Worker back a version (`wrangler rollback`); Cloud Run is independent and stateless — rollback = deploy the previous image.
 
-## 10. 明确不做(路线图)
+## 10. Explicitly Not Doing (roadmap)
 
-- **显式的「失败断点续跑」**:交给 coding agent 自身在单次执行内重试/续写;v1 的 `sections_json` 断点复用机制在 v2 废弃(不再写该字段,"失败后续聊续跑"入口自然失效)。
-- 多 agent 编排 / 子代理;pi 扩展与技能市场。
-- ~~生成产物迁 R2(仍存 D1 TEXT)~~ → 已转为**计划项**,见 §13(多文件产物的源码树与构建产物走 R2)。
-- Cloud Run 侧做 D1 直连或本地库:持久化一律回 CF。
-- OIDC 双向鉴权、VPC egress 白名单、`--min-instances>0` 常驻预热。
-- **积分计费**:海外预付(一次性充值包 + 按月订阅)。阶段一~四已落地 —— 用量计量、积分账本、冻结结算、多语言(中/英)、计费界面、**接 Creem(MoR)收款 + webhook 发积分**(见 §20)。
+- **Explicit "resume from failure checkpoint"**: left to the coding agent itself to retry/continue within a single execution; v1's `sections_json` checkpoint reuse mechanism is deprecated in v2 (the field is no longer written, so the "continue after failure" entry point naturally becomes inert).
+- Multi-agent orchestration / sub-agents; pi extensions and a skills marketplace.
+- ~~Move artifacts to R2 (still stored as D1 TEXT)~~ → now a **planned item**, see §13 (multi-file artifacts' source tree and build artifacts go to R2).
+- D1 direct connection or a local database on the Cloud Run side: all persistence returns to CF.
+- OIDC mutual auth, VPC egress allowlist, `--min-instances>0` warm standby.
+- **Credit billing**: overseas prepayment (one-time top-up packs + monthly subscriptions). Phases one through four are done — usage metering, credit ledger, freeze settlement, multilingual (zh/en), billing UI, **Creem (MoR) payment integration + webhook credit grants** (see §20).
 
-## 11. 当前部署状态(已跑通)
+## 11. Current Deployment Status (working end-to-end)
 
-| 组件 | 值 |
+| Component | Value |
 | --- | --- |
-| Cloudflare Worker | `forge-v2` → `https://app.1forgen.site`(Custom Domain,2026-10-19 起;`forge-v2.needle.workers.dev` 保留) |
-| D1 | `forge-v2`(`6fd724ad-b430-4d2b-9eae-6353c6dbde56`) |
-| Cloud Run Service | `forge-agent`(us-central1)→ `https://forge-agent-323709989821.us-central1.run.app` |
-| GCP 项目 | `sixth-impulse-286413`(项目号 `323709989821`) |
-| 运行时 SA | 默认计算 SA `323709989821-compute@developer.gserviceaccount.com` |
-| 镜像 | `us-central1-docker.pkg.dev/sixth-impulse-286413/cloud-run-source-deploy/forge-agent` |
-| 规格 | 1 vCPU / 1GiB,`--timeout=3600 --concurrency=1 --min-instances=0` |
-| Secrets | `llm-api-key` → `LLM_API_KEY`;`agent-secret` → `AGENT_SECRET`(Secret Manager,经 `--set-secrets` 注入) |
-| Worker Secrets | `AGENT_SECRET`;可选 `ADMIN_PASSWORD`(后台口令)、`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`(Google 登录,缺一即不启用) |
-| R2 | `forge-v2-artifacts`(绑定 `ARTIFACTS`):构建产物 `p/{projectId}/v/{versionNo}/*` 与生成应用上传对象 |
-| KV | `forge-v2-appdata`(绑定 `APPDATA`):生成应用键值存储,键 `p:{projectId}:{env}:{key}` |
-| Durable Object | `PROJECT_DB`(类 `ProjectDb`):生成应用的文档数据 + owner SQL 控制台,每项目 × 每环境一个独立 SQLite 实例,名 `${projectId}:${env}` |
+| Cloudflare Worker | `forge-v2` → `https://app.1forgen.site` (Custom Domain, since 2026-10-19; `forge-v2.needle.workers.dev` kept) |
+| D1 | `forge-v2` (`6fd724ad-b430-4d2b-9eae-6353c6dbde56`) |
+| Cloud Run Service | `forge-agent` (us-central1) → `https://forge-agent-323709989821.us-central1.run.app` |
+| GCP project | `sixth-impulse-286413` (project number `323709989821`) |
+| Runtime SA | Default compute SA `323709989821-compute@developer.gserviceaccount.com` |
+| Image | `us-central1-docker.pkg.dev/sixth-impulse-286413/cloud-run-source-deploy/forge-agent` |
+| Spec | 1 vCPU / 1GiB, `--timeout=3600 --concurrency=1 --min-instances=0` |
+| Secrets | `llm-api-key` → `LLM_API_KEY`; `agent-secret` → `AGENT_SECRET` (Secret Manager, injected via `--set-secrets`) |
+| Worker Secrets | `AGENT_SECRET`; optional `ADMIN_PASSWORD` (admin console password), `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (Google login; feature disabled unless both are set) |
+| R2 | `forge-v2-artifacts` (binding `ARTIFACTS`): build artifacts at `p/{projectId}/v/{versionNo}/*` and generated-app upload objects |
+| KV | `forge-v2-appdata` (binding `APPDATA`): generated-app key-value store, keys `p:{projectId}:{env}:{key}` |
+| Durable Object | `PROJECT_DB` (class `ProjectDb`): generated apps' document data + owner SQL console; one isolated SQLite instance per project × per environment, named `${projectId}:${env}` |
 
-### 11.1 STAGING(与生产完全隔离,2026-10-17 搭建)
+### 11.1 STAGING (fully isolated from production, set up 2026-10-17)
 
-测试环境用于「先在 staging 开发验证,再上线」:两套环境**资源全隔离、代码同源**(同一仓库、同一份 `web/dist`、同一份 `agent/` 源码),差异只在部署目标与少量配置。完整说明见 §16。
+The staging environment exists for "develop and validate on staging first, then go live": the two environments are **fully resource-isolated with code from the same source** (same repo, same `web/dist`, same `agent/` source); the differences are only the deployment targets and a small amount of configuration. Full details in §16.
 
-| 组件 | 生产 | staging |
+| Component | Production | staging |
 | --- | --- | --- |
 | Cloudflare Worker | `forge-v2` → `app.1forgen.site` + `forge-v2.needle.workers.dev` | `forge-v2-staging` → `app-staging.1forgen.site` + `forge-v2-staging.needle.workers.dev` |
-| wrangler 环境 | 顶层(不带 `--env`,`npm run deploy`) | `env.staging`(`npm run deploy:staging`) |
-| D1 | `forge-v2`(`6fd724ad-…`) | `forge-v2-staging`(`da94e0ba-…`) |
+| wrangler environment | top level (no `--env`, `npm run deploy`) | `env.staging` (`npm run deploy:staging`) |
+| D1 | `forge-v2` (`6fd724ad-…`) | `forge-v2-staging` (`da94e0ba-…`) |
 | R2 | `forge-v2-artifacts` | `forge-v2-artifacts-staging` |
 | KV | `f6b66c90…` | `67e46b44…` |
-| Durable Object | 独立 namespace(Worker `forge-v2`) | 独立 namespace(Worker `forge-v2-staging`) |
-| Cloud Run Service | `forge-agent`(`--max-instances 5`) | `forge-agent-staging`(`--max-instances 1`) |
-| LLM key | Secret `llm-api-key`(DeepSeek,VIP);免费执行体用 `llm-api-key-minimax`(MiniMax) | Secret `llm-api-key-staging`(GLM,VIP,**另一把**);免费执行体用 `llm-api-key-minimax-staging`(MiniMax) |
-| LLM 模型 | VIP `deepseek-flash`(@ `api.deepseek.com/anthropic`,`anthropic-messages`);免费 `MiniMax-M3.1-Flash`(@ `api.minimaxi.com/anthropic`,`anthropic-messages`) | VIP `glm-5.3-flash`(@ `open.bigmodel.cn/api/paas/v4`,`openai-completions` + `PI_THINKING_FORMAT=zai`);免费 `MiniMax-M3.1-Flash`(Anthropic 方言) |
-| 内部密钥 | Secret `agent-secret` | Secret `agent-secret-staging`(**另一把**) |
-| Cron | `* * * * *`(仅巡检本环境任务) | `* * * * *`(仅巡检本环境任务) |
-| 注册验证邮件 | Resend Secret `RESEND_API_KEY` + `noreply@1forgen.site`(免费 3,000 封/月) | 同一 Resend 账号,`--env staging` 单独写 secret |
-| 环境标识 | 不设 `ENVIRONMENT`(前端按 production,无角标) | `ENVIRONMENT=staging`(前端显示琥珀色 STAGING 角标) |
+| Durable Object | Independent namespace (Worker `forge-v2`) | Independent namespace (Worker `forge-v2-staging`) |
+| Cloud Run Service | `forge-agent` (`--max-instances 5`) | `forge-agent-staging` (`--max-instances 1`) |
+| LLM key | Secret `llm-api-key` (DeepSeek, VIP); the free executor uses `llm-api-key-minimax` (MiniMax) | Secret `llm-api-key-staging` (GLM, VIP, **a different key**); the free executor uses `llm-api-key-minimax-staging` (MiniMax) |
+| LLM model | VIP `deepseek-flash` (@ `api.deepseek.com/anthropic`, `anthropic-messages`); free `MiniMax-M3.1-Flash` (@ `api.minimaxi.com/anthropic`, `anthropic-messages`) | VIP `glm-5.3-flash` (@ `open.bigmodel.cn/api/paas/v4`, `openai-completions` + `PI_THINKING_FORMAT=zai`); free `MiniMax-M3.1-Flash` (Anthropic dialect) |
+| Internal secret | Secret `agent-secret` | Secret `agent-secret-staging` (**a different key**) |
+| Cron | `* * * * *` (inspects only this environment's jobs) | `* * * * *` (inspects only this environment's jobs) |
+| Signup verification email | Resend Secret `RESEND_API_KEY` + `noreply@1forgen.site` (free tier 3,000 emails/month) | Same Resend account; secret written separately with `--env staging` |
+| Environment badge | No `ENVIRONMENT` set (frontend assumes production, no badge) | `ENVIRONMENT=staging` (frontend shows an amber STAGING badge) |
 
-> 多文件产物引入后需额外两步:**(1)** `npx wrangler kv namespace create forge-v2-appdata` 并把返回的 id 填进 `wrangler.jsonc` 的 `APPDATA.id`(当前是占位符,不填无法部署);**(2)** 对已存在的 v2 库执行一次 `schema.migrate-multifile.sql`(重建 `versions`/`jobs`,不保留旧单文件产物与任务历史)。全新安装直接 `schema.sql` 即可。之后 `npm run deploy` 部署 Worker;Cloud Run 侧因 Dockerfile 现在会预装 `template/` 依赖,需重新 `gcloud run deploy` 一次。
+> Multi-file artifacts added two extra steps: **(1)** `npx wrangler kv namespace create forge-v2-appdata` and fill the returned id into `APPDATA.id` in `wrangler.jsonc` (currently a placeholder; deployment fails without it); **(2)** run `schema.migrate-multifile.sql` once against the existing v2 database (rebuilds `versions`/`jobs`; old single-file artifacts and job history are not preserved). Fresh installs can just run `schema.sql`. Then `npm run deploy` deploys the Worker; on the Cloud Run side, since the Dockerfile now preinstalls the `template/` dependencies, one more `gcloud run deploy` is needed.
 
-> 启用 Google 登录另需一步:对已存在的 v2 库执行一次 `schema.migrate-google.sql`(`npm run db:migrate:google:remote`),新增 `users.google_sub` 及其唯一索引;不启用可跳过(登录页自动隐藏 Google 按钮)。
+> Enabling Google login takes one more step: run `schema.migrate-google.sql` once against the existing v2 database (`npm run db:migrate:google:remote`), adding `users.google_sub` and its unique index; skip it if not enabling (the login page automatically hides the Google button).
 
-**已启用的 API**:`run` / `cloudbuild` / `artifactregistry` / `compute` / `secretmanager`。
+**APIs already enabled**: `run` / `cloudbuild` / `artifactregistry` / `compute` / `secretmanager`.
 
-**已具备的 IAM**:执行部署的账号 `ttswhh@gmail.com` 在该项目是 `roles/owner`(无需再加权限);运行时默认计算 SA 已含 `secretmanager.secretAccessor`(读注入的密钥)、`artifactregistry.writer`、`logging.logWriter`、`iam.serviceAccountUser`、`run.admin`、`editor`。
+**IAM already in place**: the deployment account `ttswhh@gmail.com` is `roles/owner` on the project (no extra grants needed); the runtime default compute SA already has `secretmanager.secretAccessor` (reading injected secrets), `artifactregistry.writer`, `logging.logWriter`, `iam.serviceAccountUser`, `run.admin`, `editor`.
 
-**端到端验证(多文件)**:`generate`(极简番茄钟)→ Cloud Run agent 写多文件 React 源码 → 平台 `vite build` → commit 回调落版本(`src_json` 进 D1、`dist` 进 R2、`manifest` 生成)→ 预览 `GET /p/:token/` 200 → `publish` → `GET /s/:slug/` 200,入口注入 `window.__FORGE_API_BASE__="/s/:slug/api"`,Vite 哈希资源(`assets/*.js|css`)按长缓存命中,`/s/:slug/api/db/:collection` 200。全链路贯通。
+**End-to-end verification (multi-file)**: `generate` (a minimal pomodoro timer) → Cloud Run agent writes multi-file React source → platform `vite build` → commit callback lands the version (`src_json` into D1, `dist` into R2, `manifest` generated) → preview `GET /p/:token/` 200 → `publish` → `GET /s/:slug/` 200, with `window.__FORGE_API_BASE__="/s/:slug/api"` injected at the entry, Vite hashed assets (`assets/*.js|css`) hitting long cache, `/s/:slug/api/db/:collection` 200. The whole chain works.
 
-## 12. 管理后台
+## 12. Admin Console
 
-跨用户查看全部产物的后台,与普通用户体系**完全隔离**:口令来自 `ADMIN_PASSWORD` secret,`POST /api/admin/login` 校验后下发由口令派生的 HttpOnly cookie(`lib/admin.ts`,改口令即全体失效,无需会话表)。
+An admin console for viewing all artifacts across users, **fully isolated** from the normal user system: the password comes from the `ADMIN_PASSWORD` secret, and after `POST /api/admin/login` validates it, an HttpOnly cookie derived from the password is issued (`lib/admin.ts`; changing the password invalidates all sessions at once, no session table needed).
 
-- 页面:`/admin`(产物列表:属主、状态、版本/对话/数据计数、公开链接 + **草稿预览**,支持关键字搜索与分页,含全站统计);`/admin/projects/:id`(详情:草稿 + 全部版本源码 + iframe 预览 + 公开链接、对话记录、任务与 **agent 里程碑日志**尾部、站点数据);`/admin/users`(用户使用情况列表,按邮箱搜索、分页,可勾选用户**批量加积分**,可选邮件通知);`/admin/users/:id`(单个用户详情,可**加积分**(可选邮件通知)并查看最近积分流水);`/admin/models`(模型配置与用量,见 §21)。「数据计数」= 该项目两个环境 SQLite 各表行数之和,实时统计(页大小上限 20 以控制子请求)。顶栏在「产物 / 用户」间切换,产物列表的属主邮箱、用户详情的项目行互链。
-- **草稿预览**:「草稿」是 `version_no = 0` 的工作副本,不进正式版本序列,但正是用户当下看到的样子。列表/详情/用户详情都会给它单独签发预览令牌(`draft.preview_token`),详情页默认就停在草稿上,列表页可一键 `↗` 打开。令牌是无状态 HMAC(绑定 `projectId + versionNo`),与 `/p/:token/` 的定位方式一致,所以后台预览不依赖用户 cookie;草稿在 `/p/` 下以 `env=draft` 提供数据接口,并带「测试环境 · 草稿预览」角标。管理侧只在**构建清单有产物**(`manifest.files` 非空)时才签发令牌,否则 `preview_token` 为 `null`,前端显示空状态而不是打开一个必然 404 的 iframe;`GET /projects/:id/versions/:no` 同样遵守这条(`no = 0` 即草稿,允许请求)。
-- 接口(除 login/logout/me 外全部 `requireAdmin`;除模型配置与人工加积分外只读):`GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`;`POST /api/admin/{login,logout,migrate-doc-data}`;人工加积分 `POST /api/admin/users/:id/credits`(单用户)与 `POST /api/admin/users/credits`(批量,同一额度,单次 ≤100 人、额度为正整数且 ≤100000,全部用户存在才写入)。加积分只写 `users.credits` + 一条 `credit_ledger`(`reason = admin_grant`),不做扣分;`GET /api/admin/users/:id` 额外返回最近 30 条 `credits_log`。请求带 `notify: true` 时额外给**邮箱已验证**的用户发中英双语到账邮件(Resend,`src/lib/email.ts`),单封失败或未验证只计入返回的 `notify` 统计,**不影响加积分本身**。数据行取自项目该环境的独立 SQLite 库(§15)。`stats` 除项目/用户/版本外,含任务总数、成功/失败数、近 7 天任务数与近 7 天活跃用户数。项目列表/用户详情每行附 `draft` 字段:产物文件数直接用 SQL 的 `json_array_length(json_extract(manifest_json,'$.files'))` 算(带 `json_valid` 兜底),不把整棵清单拉进 Worker。
-- **用户使用情况**(`/admin/users`、`/admin/users/:id`):每个注册用户一行,聚合「核心用量」(项目数、正式版本数、对话消息数、任务数(生成/对话、成功/失败))、「积分」(余额 credits;已消耗 ≈ 成功任务数,每次成功 commit 扣 1)、「活跃度」(注册时间、最近活跃 = 最后一次任务时间、近 7/30 天任务数)、「产物体量」(构建产物总字节 = 各正式版本 `bytes` 之和;数据行数按项目读两个环境的独立 SQLite 求和,仅在用户详情页按该用户的项目集计算以控制子请求)。聚合走 `users` 上的关联子查询,任务量以 `jobs` 表为准。
-- **模型配置与用量**(`/admin/models`):可写区域之一(另一个是人工加积分),见 §21。`GET /api/admin/models` 返回配置列表 + 近 7 天按配置/模型聚合的用量;`POST /api/admin/models` 新增配置,`POST /api/admin/models/:id/enable|disable` 启用/停用。顶栏在「产物 / 用户 / 模型」间切换。
-- 配置:`npx wrangler secret put ADMIN_PASSWORD`(未设置则后台整体不可用)。
+- Pages: `/admin` (artifact list: owner, status, version/conversation/data counts, public link + **draft preview**, keyword search and pagination, site-wide stats); `/admin/projects/:id` (details: draft + all version sources + iframe preview + public link, conversation history, tail of jobs and the **agent milestone log**, site data); `/admin/users` (per-user usage list, search by email, pagination, multi-select for **batch credit grants**, optional email notification); `/admin/users/:id` (single user details, can **grant credits** (optional email notification) and view recent credit transactions); `/admin/models` (model configuration and usage, see §21). "Data counts" = the sum of row counts across both environments' SQLite tables for the project, computed in real time (page size capped at 20 to limit subrequests). The top bar switches between "Artifacts / Users", and owner emails in the artifact list cross-link to user-detail project rows.
+- **Draft preview**: the "draft" is a working copy with `version_no = 0`; it doesn't enter the formal version sequence but is exactly what the user currently sees. The list/details/user-details pages each issue it its own preview token (`draft.preview_token`); the details page defaults to showing the draft, and the list page can open it with one click via `↗`. The token is a stateless HMAC (bound to `projectId + versionNo`), the same locating scheme as `/p/:token/`, so admin previews don't depend on user cookies; the draft serves its data API under `/p/` with `env=draft` and carries a "staging environment · draft preview" badge. The admin side issues a token only when **the build manifest has artifacts** (`manifest.files` non-empty); otherwise `preview_token` is `null` and the frontend shows an empty state rather than opening an iframe that would inevitably 404; `GET /projects/:id/versions/:no` follows the same rule (`no = 0` means draft, requests allowed).
+- Endpoints (all `requireAdmin` except login/logout/me; read-only except model config and manual credit grants): `GET /api/admin/{me,stats,projects,projects/:id,projects/:id/versions/:no,projects/:id/data/:env/:collection,users,users/:id}`; `POST /api/admin/{login,logout,migrate-doc-data}`; manual credit grants `POST /api/admin/users/:id/credits` (single user) and `POST /api/admin/users/credits` (batch, same amount, ≤100 users per call, amount a positive integer ≤100000, written only if every user exists). Granting credits writes only `users.credits` + one `credit_ledger` row (`reason = admin_grant`); no deduction is done; `GET /api/admin/users/:id` additionally returns the last 30 `credits_log` rows. When a request carries `notify: true`, a bilingual (zh/en) credit-arrival email is additionally sent to users with **verified emails** (Resend, `src/lib/email.ts`); a single send failure or unverified email only counts toward the returned `notify` stats and **does not affect the grant itself**. Data rows come from the project's isolated SQLite database for that environment (§15). Beyond projects/users/versions, `stats` includes total jobs, success/failure counts, jobs over the last 7 days, and active users over the last 7 days. Each row of the project list / user details carries a `draft` field: the artifact file count is computed directly in SQL via `json_array_length(json_extract(manifest_json,'$.files'))` (with a `json_valid` fallback), rather than pulling the whole manifest into the Worker.
+- **User usage** (`/admin/users`, `/admin/users/:id`): one row per registered user, aggregating "core usage" (project count, formal version count, conversation message count, job count (generate/chat, success/failure)), "credits" (balance `credits`; consumed ≈ successful job count, 1 deducted per successful commit), "activity" (signup time, last active = last job time, jobs over the last 7/30 days), and "artifact volume" (total build artifact bytes = sum of each formal version's `bytes`; data row counts are summed by reading both environments' isolated SQLite per project, computed only on the user-details page over that user's project set to limit subrequests). Aggregation uses correlated subqueries on `users`, with job counts based on the `jobs` table.
+- **Model configuration and usage** (`/admin/models`): one of the writable areas (the other is manual credit grants), see §21. `GET /api/admin/models` returns the config list + usage over the last 7 days aggregated by config/model; `POST /api/admin/models` adds a config; `POST /api/admin/models/:id/enable|disable` enables/disables. The top bar switches between "Artifacts / Users / Models".
+- Configuration: `npx wrangler secret put ADMIN_PASSWORD` (if unset, the admin console is entirely unavailable).
 
-## 13. 产物形态与选型(多文件 / 全栈)
+## 13. Artifact Form and Choices (multi-file / full-stack)
 
-> 本章的**阶段一已落地**:产物从「一个版本 = 一段 HTML」升级为**多文件 React 应用**(源码树 + 构建产物),后端由平台通用数据 API 承载,整套跑在 Cloudflare 上。
+> **Phase one of this chapter is done**: artifacts upgraded from "one version = a piece of HTML" to **multi-file React apps** (source tree + build artifacts), with the backend carried by the platform's generic data API, the whole thing running on Cloudflare.
 
-### 13.1 结论(拍板)
+### 13.1 Conclusion (decided)
 
-| 维度 | 决定 |
+| Dimension | Decision |
 | --- | --- |
-| 前端 | **Vite + React(SPA)**,构建为静态产物 `dist/` |
-| 后端 | **同一 Worker 内 Hono 路由**;绑定限定 **D1(平台元数据)/ KV / R2 / 每项目每环境独立 SQLite(Durable Object)** |
-| 交付 | 阶段一 = 平台单 Worker 承载(共享资源按项目命名空间隔离);阶段二 = 每产物一个 Workers for Platforms 用户 Worker |
-| 预览 | **保留静态即时预览**(SPA 产物即静态文件,`html_preview` 语义可延续) |
-| 存储 | 源码树 + 构建产物 → **R2**;D1 只留平台元数据(项目/版本/任务/消息);**生成应用的数据 → 每项目 × 每环境一个独立 SQLite(见 §15)** |
+| Frontend | **Vite + React (SPA)**, built into static artifacts `dist/` |
+| Backend | **Hono routes in the same Worker**; bindings limited to **D1 (platform metadata) / KV / R2 / per-project-per-environment isolated SQLite (Durable Object)** |
+| Delivery | Phase 1 = carried by the platform's single Worker (shared resources namespaced per project); Phase 2 = one Workers for Platforms user Worker per artifact |
+| Preview | **Keep the static instant preview** (SPA artifacts are just static files; `html_preview` semantics can carry over) |
+| Storage | Source tree + build artifacts → **R2**; D1 keeps only platform metadata (projects/versions/jobs/messages); **generated apps' data → one isolated SQLite per project × per environment (see §15)** |
 
-### 13.2 为什么不做 SSR
+### 13.2 Why Not SSR
 
-SSR 让**产物应用本身**更简单(前后端合一、loader 直连 D1、无 API 契约),但让**平台侧**更重:
+SSR makes **the artifact app itself** simpler (frontend and backend unified, loaders hitting D1 directly, no API contract) but makes **the platform side** heavier:
 
-1. **平台绑死框架**:SSR 产物是框架的 server bundle + 适配器,平台要把某个框架的 runtime 搬进用户 Worker,升级/适配/各框架的坑都归平台。
-2. **丢即时预览(最大隐性成本)**:现有「agent 写一点、预览长一点」依赖单份静态 HTML;SSR 没有单份 HTML,要预览就得把 server 跑起来。
-3. **agent 生成成功率下降**:元框架约定多(loader vs action、server-only 模块、hydration),越厚越易写错。
+1. **The platform is locked to the framework**: an SSR artifact is the framework's server bundle + adapter; the platform would have to carry a particular framework's runtime into the user Worker, and upgrades/adaptation/every framework's quirks become the platform's problem.
+2. **Loses instant preview (the biggest hidden cost)**: the existing "agent writes a bit, preview grows a bit" depends on a single static HTML; SSR has no single HTML — to preview you'd have to run the server.
+3. **Agent generation success rate drops**: meta-frameworks have more conventions (loader vs action, server-only modules, hydration); the thicker the stack, the easier to get wrong.
 
-对照(结论:现阶段选左列):
+Comparison (conclusion: at this stage choose the left column):
 
-| | **SPA + Hono API(选定)** | SSR 元框架(Remix/SvelteKit/Astro) | Hono + JSX(最薄 SSR) |
+| | **SPA + Hono API (chosen)** | SSR meta-framework (Remix/SvelteKit/Astro) | Hono + JSX (thinnest SSR) |
 | --- | --- | --- | --- |
-| 应用心智 | 前后端两块 + 固定契约 | 一块 app | 一块 Worker |
-| 平台承载复杂度 | 低(只发文件) | 高(绑框架 runtime) | 中 |
-| 即时静态预览 | ✅ | ❌ | ⚠️(需一次渲染) |
-| 交互丰富度 | 高 | 高 | 中(需 islands) |
-| agent 生成难度 | 中 | 高 | 低 |
+| App mental model | Two pieces, frontend + backend, + fixed contract | One app | One Worker |
+| Platform carrying complexity | Low (just serve files) | High (tied to a framework runtime) | Medium |
+| Instant static preview | ✅ | ❌ | ⚠️ (needs one render) |
+| Interaction richness | High | High | Medium (needs islands) |
+| Agent generation difficulty | Medium | High | Low |
 
-### 13.3 "SPA + Hono" 不等于"维护 API 契约"
+### 13.3 "SPA + Hono" Does Not Mean "Maintaining an API Contract"
 
-这里的后端是**平台提供的通用能力**(D1/KV/R2 按项目命名空间化),**不是**每个项目手写的一套接口。agent 只调固定端点(读写集合、键值、对象),所以不存在"每项目都要设计前后端契约"的负担——这正是当初担心 SSR 复杂度的那个点被规避掉的地方。
+The backend here is a **platform-provided generic capability** (D1/KV/R2 namespaced per project), **not** a set of hand-written endpoints per project. The agent only calls fixed endpoints (read/write collections, key-value, objects), so there is no burden of "designing a frontend/backend contract per project" — this is exactly where the SSR-complexity concern gets avoided.
 
-### 13.4 存储与数据模型演进
+### 13.4 Storage and Data Model Evolution
 
-- `versions.html TEXT` → **版本 = 文件树(路径→内容)+ 构建产物引用**;大对象进 R2,D1 只存元数据(`manifest`、`build_hash`、`artifact_ref`、`deploy_version`)。
-- 管理后台「版本源码」页从**单份 HTML** 升级为**文件树浏览 + 每个文件预览 + 构建产物 + 已部署 URL**(§12 需相应扩展)。
+- `versions.html TEXT` → **version = a file tree (path→content) + build artifact reference**; large objects go to R2, D1 keeps only metadata (`manifest`, `build_hash`, `artifact_ref`, `deploy_version`).
+- The admin console's "version source" page upgrades from **a single HTML** to **file tree browsing + per-file preview + build artifacts + deployed URL** (§12 needs a corresponding extension).
 
-### 13.5 阶段划分(避免一步到位)
+### 13.5 Phasing (avoid doing it all at once)
 
-- **阶段一(小改,验证框架可行)**:固定 Vite+React 框架 + 多文件;后端仍是**平台通用数据 API**(`/api/app/:slug/*` 代理 D1/KV/R2,按项目命名空间);产物存 R2;预览/发布/后台升级为文件树。agent **不部署** Worker。
-- **阶段二(真正的"整套跑在 CF")**:接 **Workers for Platforms**,把每个项目的后端打包成独立用户 Worker 部署,绑共享资源,挂 `{slug}.域名`。
-- 阶段一的价值:不改执行模型就把交付链路升级成多文件,正好是阶段二的地基。
+- **Phase 1 (small change, validate the framework works)**: fixed Vite+React framework + multi-file; the backend is still the **platform generic data API** (`/api/app/:slug/*` proxying D1/KV/R2, namespaced per project); artifacts stored in R2; preview/publish/admin upgraded to a file tree. The agent **does not deploy** Workers.
+- **Phase 2 (true "whole thing on CF")**: adopt **Workers for Platforms**, package each project's backend as an independent user Worker, bind shared resources, mount at `{slug}.domain`.
+- The value of Phase 1: upgrade the delivery chain to multi-file without changing the execution model — exactly the foundation for Phase 2.
 
-### 13.6 保留后路(尚未决定)
+### 13.6 Keeping Options Open (not yet decided)
 
-- 若将来要 SSR / 统一全栈:**Remix / React Router v7**(Cloudflare 一等支持),接受平台绑框架 + 预览改为"跑预览 Worker"。
-- **SSG 桥**:用支持 SSG 的框架,在 agent 容器里构建时把各路由渲染成静态 HTML——保留统一开发模型,又留住静态预览/发布链路;代价是动态数据退回客户端调平台数据接口。
-- **自定义域名**:**用户项目**的自定义域名暂不做(未来付费增值能力;届时仍需 Cloudflare for SaaS)。**平台自己的域名已经挂上**(2026-10-19):`app.1forgen.site` → `forge-v2`、`app-staging.1forgen.site` → `forge-v2-staging`,两个都是 Custom Domain,根域名 `1forgen.site` 留空未用。注意这与「用户项目挂自己买的域名」是两件事——后者才需要 Cloudflare for SaaS。
+- If SSR / unified full-stack is wanted later: **Remix / React Router v7** (first-class Cloudflare support), accepting platform-tied framework + preview changing to "run a preview Worker".
+- **SSG bridge**: use an SSG-capable framework and render each route to static HTML at build time inside the agent container — keeps a unified development model while retaining the static preview/publish chain; the cost is that dynamic data falls back to client-side calls to the platform data API.
+- **Custom domains**: custom domains for **user projects** are not being done for now (a future paid add-on; it will still require Cloudflare for SaaS). **The platform's own domains are already attached** (2026-10-19): `app.1forgen.site` → `forge-v2`, `app-staging.1forgen.site` → `forge-v2-staging`, both Custom Domains, with the root domain `1forgen.site` left empty and unused. Note this is a different matter from "user projects attaching domains they bought" — only the latter needs Cloudflare for SaaS.
 
-### 13.7 阶段一实现落点(已落地)
+### 13.7 Phase 1 Implementation (done)
 
-**数据模型**
-- `versions`:`src_json`(源码树 `路径→内容`,交付/续聊基线)+ `manifest_json`(入口、`buildHash`、字节数、产物文件清单)+ `bytes`;构建产物本体在 R2(`p/{projectId}/v/{versionNo}/{path}`)。
-- `jobs`:新增 `files_preview`(agent 最近写入的源文件 `{path,content}`,前端流式看代码),取代单文件时代的半成品 HTML。
+**Data model**
+- `versions`: `src_json` (source tree `path→content`, the baseline for delivery/continued chat) + `manifest_json` (entry, `buildHash`, byte counts, artifact file list) + `bytes`; the build artifacts themselves live in R2 (`p/{projectId}/v/{versionNo}/{path}`).
+- `jobs`: new `files_preview` (the source files `{path,content}` the agent most recently wrote; the frontend watches code stream in), replacing the half-finished HTML of the single-file era.
 
-**执行链路(agent/Cloud Run)**
-- `agent/template/`:预装 Vite + React + Tailwind + **设计系统**(`src/styles/{tokens,theme,base}.css`、`src/components/ui/**` 30+ 个组件原语、`src/lib/motion.jsx`、`src/lib/cx.js`)+ **后端 SDK**(`src/lib/forge.js` 的 db/kv/counter/blob/storage、`src/lib/store.js` 的 hooks)的脚手架,Dockerfile 在构建期 `npm install` 其依赖(含 `lucide-react`、`motion`),运行期每 job 拷贝模板 + 符号链接 `node_modules`(不再运行期安装)。详见 §17。
-- `agent/src/prompt.ts`:system 约定多文件 React 产出规范 + 设计系统契约 + 组件目录 + 数据层用法 + 状态覆盖清单;generate 先写 `plan.json`、再把 `palette` 写进 `tokens.css`、再实现应用;chat 在既有源码树上改;`POLISH_PROMPT` 是第二轮设计复查的提示词。
-- `agent/src/runner.ts`:拷模板 → 预写当前源码(chat)→ **还原平台自有文件** → 跑 pi 会话 → **平台侧确定性 `vite build`** →(generate)设计复查轮 + 再构建(失败回滚到第一轮源码)→ 收集 `src`(源码树,跳过 node_modules/dist/plan.json/package-lock.json)+ `dist`(构建产物)+ `manifest`。
-- commit 回调回传 `{src, dist, manifest, plan}`;Worker 侧 `commit.ts` 把 `src` 写 D1、`dist` 写 R2、生成并落 `manifest`。
+**Execution chain (agent/Cloud Run)**
+- `agent/template/`: scaffold with preinstalled Vite + React + Tailwind + **design system** (`src/styles/{tokens,theme,base}.css`, `src/components/ui/**` 30+ component primitives, `src/lib/motion.jsx`, `src/lib/cx.js`) + **backend SDK** (`src/lib/forge.js`'s db/kv/counter/blob/storage, `src/lib/store.js`'s hooks); the Dockerfile runs `npm install` on its dependencies at build time (including `lucide-react`, `motion`), and at runtime each job copies the template + symlinks `node_modules` (no runtime install anymore). See §17 for details.
+- `agent/src/prompt.ts`: the system prompt stipulates the multi-file React output spec + design system contract + component catalog + data layer usage + state coverage checklist; generate first writes `plan.json`, then writes `palette` into `tokens.css`, then implements the app; chat edits the existing source tree; `POLISH_PROMPT` is the prompt for the second design review round.
+- `agent/src/runner.ts`: copy template → pre-write current source (chat) → **restore platform-owned files** → run the pi session → **platform-side deterministic `vite build`** → (generate) design review round + rebuild (rollback to the first round's source on failure) → collect `src` (source tree, skipping node_modules/dist/plan.json/package-lock.json) + `dist` (build artifacts) + `manifest`.
+- The commit callback returns `{src, dist, manifest, plan}`; the Worker side's `commit.ts` writes `src` to D1, `dist` to R2, and generates and stores `manifest`.
 
-**服务与后端 API**
-- `src/routes/serve.ts`:`/s/:slug/*`(发布,env=live)与 `/p/:token/*`(草稿预览,env=draft,HMAC 令牌绑定 project+version)服务 R2 里的构建产物;入口 HTML 注入 `window.__FORGE_API_BASE__` 指向同源 `/api` 子路径;`assets/` 长缓存,其余 no-store;SPA 兜底回退入口。有连接器绑定时,入口 HTML 还会多注一份 `window.__FORGE_CONNECTORS__`(只含 public 非密值,见 §19)。
-- `src/lib/appdata.ts`:平台通用数据 API,同一套端点覆盖文档集合(`/db/:collection`)、KV 键值(`/kv/:key`)、R2 对象(`/blob/:key`),按项目 + 环境(draft/live)命名空间隔离,响应带 CORS(页面跑在 sandbox opaque origin)。其中 `/db` 的存储已从共享 D1 的 `site_data` 迁到每项目每环境的独立 SQLite(见 §15),HTTP 契约不变。
-- `src/lib/projectDb.ts`:每项目 × 每环境一个 Durable Object(绑定 `PROJECT_DB`,类 `ProjectDb`,`new_sqlite_classes`),实例名 `${projectId}:${env}`;承载 `/db` 文档接口(集合 → 一张固定列的表)与 owner 的 SQL 控制台(任意 DDL/DML/索引)。
+**Service and backend API**
+- `src/routes/serve.ts`: `/s/:slug/*` (published, env=live) and `/p/:token/*` (draft preview, env=draft, HMAC token bound to project+version) serve build artifacts from R2; the entry HTML gets `window.__FORGE_API_BASE__` injected pointing at the same-origin `/api` subpath; `assets/` long-cached, everything else no-store; SPA fallback to the entry. When a connector binding exists, the entry HTML additionally gets a `window.__FORGE_CONNECTORS__` injected (public non-secret values only, see §19).
+- `src/lib/appdata.ts`: the platform generic data API; one set of endpoints covering document collections (`/db/:collection`), KV key-value (`/kv/:key`), R2 objects (`/blob/:key`), namespaced by project + environment (draft/live), with CORS on responses (pages run in a sandbox opaque origin). The `/db` storage has migrated from shared D1's `site_data` to per-project-per-environment isolated SQLite (see §15); the HTTP contract is unchanged.
+- `src/lib/projectDb.ts`: one Durable Object per project × per environment (binding `PROJECT_DB`, class `ProjectDb`, `new_sqlite_classes`), instance name `${projectId}:${env}`; carries the `/db` document interface (collection → one fixed-column table) and the owner's SQL console (arbitrary DDL/DML/indexes).
 
-**前端**
-- 工作台 `PreviewPane`:`预览` 用 `/p/:token/` iframe(取代 srcDoc 单 HTML),`代码` 在生成中展示 agent 实时写入的文件、完成后展示构建产物清单,`数据`(DataPanel)含 **键值 / 对象 / SQL** 三个页签,均按测试/线上环境隔离;其中 SQL 页即 DBeaver 风格的表数据网格 + SQL 编辑器(所有表都在这里)。草稿预览令牌按 `project+version` 签发,同一草稿改完后令牌不变、iframe 的 `src` 也不变,浏览器不会自行重拉最新产物 —— 因此任务结束(`streaming` 真→假)时前端强制重挂载 iframe 一次,预览工具栏另提供「⟳ 刷新预览」按钮供手动重载。
-- 管理后台 `AdminProject`:版本详情从「单份 HTML」升级为**文件树浏览 + 逐文件源码预览**;每个版本由后台签发草稿令牌,可直接用 `/p/:token/` 预览任意历史版本。
-## 14. 版本能力(用户侧)
+**Frontend**
+- Workspace `PreviewPane`: `预览` uses a `/p/:token/` iframe (replacing the srcDoc single HTML), `代码` shows the files the agent is writing in real time during generation and the build artifact list after completion, and `数据` (DataPanel) has three tabs — **key-value / objects / SQL** — all isolated by staging/live environment; the SQL tab is a DBeaver-style table data grid + SQL editor (all tables appear here). Draft preview tokens are issued per `project+version`; after the same draft is edited, the token doesn't change and neither does the iframe's `src`, so the browser won't re-fetch the latest artifacts on its own — therefore when a job ends (`streaming` true→false) the frontend force-remounts the iframe once, and the preview toolbar also provides a "⟳ 刷新预览" button for manual reload.
+- Admin console `AdminProject`: version details upgraded from "a single HTML" to **file tree browsing + per-file source preview**; each version gets a draft token issued by the admin side, so any historical version can be previewed directly at `/p/:token/`.
 
-每次「生成」或「对话修改」都会产出一个**新版本**,历史版本永久保留、互不覆盖。
+## 14. Versioning Capabilities (user-facing)
 
-- **编号**:新版本号 = `MAX(version_no) + 1`(不是 `current_version + 1`)。这样即使把某个旧版本「恢复」为当前版本后再继续修改,新版本也排在最后,不会与既有版本号冲突。
-- **基线**:对话修改始终以「当前生效版本」(`projects.current_version`)的源码为基线;查看历史版本不会改变基线,只有「恢复」才会。
-- **切换查看**:工作台预览工具栏的版本下拉可查看任意历史版本(预览 + 源码同步切换),`(当前)` 标记生效版本。
-- **恢复**:「恢复 vN 为当前版本」把 `current_version` 指向该版本,发布页 `/s/:slug` 随之更新;可反复切换。生成任务进行中禁止切换(避免与落定的乐观锁竞争)。
-- **发布**:「发布」作用于当前生效版本;查看历史版本时该按钮禁用,需先恢复。
-- **交付/导出**:`GET /api/projects/:id/versions/:no/export` 把该版本源码树打成 zip(`src/lib/zip.ts`,零依赖仅存储压缩),下载即可本地 `npm install && npm run build` 运行或另存交付。
+Every "generate" or "chat edit" produces a **new version**; historical versions are kept forever and never overwrite each other.
 
-### 14.1 生成应用的数据能力(修正)
+- **Numbering**: the new version number = `MAX(version_no) + 1` (not `current_version + 1`). This way, even if an old version is "restored" as the current version and then edited further, the new version still sorts last and won't conflict with existing version numbers.
+- **Baseline**: chat edits always use the source of the "currently active version" (`projects.current_version`) as the baseline; viewing a historical version doesn't change the baseline — only "restore" does.
+- **Switching views**: the version dropdown in the workspace preview toolbar can view any historical version (preview + source switch together), with `(当前)` marking the active version.
+- **Restore**: "Restore vN as current version" points `current_version` at that version, and the publish page `/s/:slug` updates accordingly; can be toggled repeatedly. Switching is forbidden while a generation job is in flight (to avoid racing the settling optimistic lock).
+- **Publish**: "Publish" applies to the currently active version; the button is disabled when viewing a historical version — restore first.
+- **Delivery/export**: `GET /api/projects/:id/versions/:no/export` zips the version's source tree (`src/lib/zip.ts`, zero-dependency store-only compression); download it and run `npm install && npm run build` locally, or keep it as a deliverable.
 
-- 平台数据 API 的写操作(POST/PUT/DELETE)此前因 `serve.ts` 只注册了 `app.get` 而全部 404,导致生成应用"新增后列表为空、统计为 0"。已改为 `app.all`,并新增 `PUT /db/:collection/:id`(合并式更新,支撑"标记完成")。
-- 模板新增 `src/lib/store.js` 的 `useCollection(collection)`:统一管理列表状态,`add/update/toggle/remove` 后自动重拉,列表与所有统计从同一份 `items` 派生;prompt 明确要求"状态联动"并在结束前按真实点击流程自查。
-- 2026-10-17 扩展(全部加法式,旧契约不变,老应用无需改动):
-  - **服务端分页 / 搜索 / 排序 + 真实总数**:`GET /db/:collection?limit=&offset=&order=&q=` → `{items,total,limit,offset}`。`limit` ≤200、`offset` ≤10000、`order` 只认 `asc|desc`(其余按默认倒序)、`q` ≤64 字符且只做 `instr(data, ?)` 子串匹配(不拼 SQL、无 `%/_` 转义问题)。`total` 是**符合条件的总行数**,让分页页码与"共 N 条"不必用 `items.length` 冒充。
-  - **原子计数**:`POST|GET /kv/:key/incr`(`{by?,start?}`,`by` 钳制 ±1000)→ `{key,value}`。落在该项目的 SQLite(`_forge_counters` 表,单条 `UPDATE v = v + ?`),并发自增不丢数——Workers KV 每键每秒 1 次写,做访问量/点赞会丢计数,所以刻意不走 KV。`GET /kv/:key` 在 KV 无值时回落读计数器,`kv.get` 因此也能显示刚 incr 过的值(不做双写)。
-  - **对象列举**:`GET /blob?prefix=&limit=&cursor=` → `{items:[{key,size,uploaded}],cursor,truncated}`,`limit` ≤500(默认 100),返回的 `key` 已去掉项目×环境前缀,可直接喂回 `blob.url(key)`。对象上传新增前端 2 MiB 前置校验与友好报错。
-- 仍保留的边界(没有放开):文档集合 ≤500 行、单篇请求体 ≤8 KiB、写操作带频控(20)、KV 单值 ≤25 KiB、单对象 ≤2 MiB。**读接口无频控**(现状,未变)。
+### 14.1 Generated Apps' Data Capabilities (corrections)
 
-## 15. 数据层:每项目 × 每环境的独立 SQLite(Durable Object)
+- The platform data API's write operations (POST/PUT/DELETE) previously all 404'd because `serve.ts` registered only `app.get`, causing generated apps' "add then the list is empty, stats are 0". Fixed to `app.all`, plus a new `PUT /db/:collection/:id` (merge-style update, supporting "mark complete").
+- The template adds `src/lib/store.js`'s `useCollection(collection)`: centrally manages list state; after `add/update/toggle/remove` it automatically re-fetches, and the list and all stats derive from the same `items`; the prompt explicitly requires "state linkage" and a self-check against real click flows before finishing.
+- 2026-10-17 extensions (all additive; old contracts unchanged, existing apps need no changes):
+  - **Server-side pagination / search / sort + real totals**: `GET /db/:collection?limit=&offset=&order=&q=` → `{items,total,limit,offset}`. `limit` ≤200, `offset` ≤10000, `order` accepts only `asc|desc` (anything else falls back to default descending), `q` ≤64 chars and does only an `instr(data, ?)` substring match (no SQL concatenation, no `%/_` escaping issues). `total` is the **total number of matching rows**, so page numbers and "N items total" no longer have to fake it with `items.length`.
+  - **Atomic counters**: `POST|GET /kv/:key/incr` (`{by?,start?}`, `by` clamped to ±1000) → `{key,value}`. Lands in the project's SQLite (`_forge_counters` table, single `UPDATE v = v + ?`), so concurrent increments lose no counts — Workers KV allows 1 write per key per second, which loses counts for view counters/likes, so KV is deliberately avoided. `GET /kv/:key` falls back to reading the counter when KV has no value, so `kv.get` can also display a just-incremented value (no dual-write).
+  - **Object listing**: `GET /blob?prefix=&limit=&cursor=` → `{items:[{key,size,uploaded}],cursor,truncated}`, `limit` ≤500 (default 100); the returned `key` has the project×environment prefix stripped and can be fed straight back to `blob.url(key)`. Object uploads gained a frontend 2 MiB pre-check with a friendly error.
+- Remaining limits (not relaxed): document collections ≤500 rows, per-document request body ≤8 KiB, rate-limited writes (20), KV values ≤25 KiB, single object ≤2 MiB. **Read endpoints have no rate limit** (current state, unchanged).
 
-### 15.1 结论
+## 15. Data Layer: Isolated SQLite per Project × per Environment (Durable Object)
 
-- 生成应用的数据(原共享 D1 表 `site_data` 的「文档集合」)迁到**每项目 × 每环境一个独立 SQLite 库**,由 Durable Object 承载。
-- 绑定 `PROJECT_DB`,类 `ProjectDb`;wrangler 迁移 `{ "tag": "v1", "new_sqlite_classes": ["ProjectDb"] }`(类名一经部署即固化,不可随意改名)。
-- 实例名 `${projectId}:${env}`(env ∈ `draft`/`live`)。项目之间、测试/线上之间是**物理隔离**,不靠 `WHERE` 过滤;库在第一次被访问时自动创建。
+### 15.1 Conclusion
 
-### 15.2 为什么
+- Generated apps' data (the "document collections" of the old shared D1 table `site_data`) migrates to **one isolated SQLite database per project × per environment**, carried by a Durable Object.
+- Binding `PROJECT_DB`, class `ProjectDb`; wrangler migration `{ "tag": "v1", "new_sqlite_classes": ["ProjectDb"] }` (the class name is fixed once deployed and cannot be renamed casually).
+- Instance name `${projectId}:${env}` (env ∈ `draft`/`live`). Projects, and staging/live, are **physically isolated** — not filtered by `WHERE`; the database is created automatically on first access.
 
-- 用户诉求:给生成应用真正的 SQLite 能力(建表 / 建索引 / 原生 SQL),而不是平台封装的一层"文档 JSON"。
-- 物理隔离比"共享表 + `project_id` 列过滤"更强,且每库可独立演进 schema、独立销毁。
-- 执行/计费模型不变:仍是 Cloudflare 绑定,不引入新服务。
+### 15.2 Why
 
-### 15.3 两类入口
+- User demand: real SQLite capability for generated apps (create tables / create indexes / native SQL), not a platform-wrapped layer of "document JSON".
+- Physical isolation is stronger than "shared table + `project_id` column filtering", and each database can evolve its schema and be destroyed independently.
+- The execution/billing model is unchanged: still Cloudflare bindings, no new service introduced.
 
-| 入口 | 鉴权 | 说明 |
+### 15.3 The Two Entry Points
+
+| Entry | Auth | Notes |
 | --- | --- | --- |
-| 生成应用 `/db/:collection`(`/s/:slug/api`、`/p/:token/api`) | 公开(CORS,无 cookie) | `GET/POST/PUT/PATCH/DELETE`;集合 → 一张固定列的表 `(id, data JSON文本, created_at, client_ip)`;HTTP 契约与旧 `site_data` 完全一致,已生成的应用无需改动;带频控与 500 行上限 |
-| owner SQL 控制台 `/api/projects/:id/sql`、`/schema` | 登录 + 属主 | 在该环境库上执行任意 SQL(DDL/DML/索引),并列出表 / 索引 / 视图与行数;不做语句白名单——用户只能碰到自己项目、自己环境的库 |
+| Generated app `/db/:collection` (`/s/:slug/api`, `/p/:token/api`) | Public (CORS, no cookies) | `GET/POST/PUT/PATCH/DELETE`; collection → one fixed-column table `(id, data JSON text, created_at, client_ip)`; the HTTP contract is identical to the old `site_data`, generated apps need no changes; rate-limited with a 500-row cap |
+| Owner SQL console `/api/projects/:id/sql`, `/schema` | Login + owner | Execute arbitrary SQL (DDL/DML/indexes) against that environment's database, list tables / indexes / views with row counts; no statement whitelisting — the user can only touch their own project's, own environment's database |
 
-DO 内部按 op 分发:`exec` / `schema` / `db.list|add|update|remove|collections` / `counter.incr|counter.get` / `seed` / `seeded` / `destroy`。`counter.*` 落在内部表 `_forge_counters`(下划线前缀,`schema()` 过滤 `NOT LIKE '\_%'`,所以 owner 的 SQL 控制台结构树里看不到它、不会误改)。`db.list` 自 2026-10-17 起接受 `limit/offset/order/q` 并回传 `total`(见 §14.1),op 名未变、旧调用行为不变。
+Internally the DO dispatches by op: `exec` / `schema` / `db.list|add|update|remove|collections` / `counter.incr|counter.get` / `seed` / `seeded` / `destroy`. `counter.*` lands in the internal table `_forge_counters` (underscore-prefixed; `schema()` filters `NOT LIKE '\_%'`, so it's invisible in the owner SQL console's structure tree and can't be modified by mistake). Since 2026-10-17 `db.list` accepts `limit/offset/order/q` and returns `total` (see §14.1); the op name is unchanged and old caller behavior is unchanged.
 
-控制台 UI 是 **DBeaver 风格**:左侧「库结构」树,点表名即在右侧网格翻页浏览;点击单元格就地编辑(Enter 提交 / Esc 取消)、可「新增行」、按行「删除」。行定位基于 `rowid`(`SELECT rowid AS __rowid, *`),`WITHOUT ROWID` 表自动退回只读浏览。切到「SQL 编辑器」可写任意语句。上述所有操作都走 `/sql` 端点(带参数绑定,标识符一律安全引用),不新增后端接口。生成应用写的文档集合(表)也直接出现在这棵结构树里,所以**不再单独提供「文档」页签**——SQL 一页即可浏览/编辑所有表。
+The console UI is **DBeaver-style**: a "database structure" tree on the left; clicking a table name pages through it in the grid on the right; clicking a cell edits in place (Enter commits / Esc cancels), with "add row" and per-row "delete". Row addressing is based on `rowid` (`SELECT rowid AS __rowid, *`); `WITHOUT ROWID` tables automatically fall back to read-only browsing. Switching to the "SQL editor" allows arbitrary statements. All of these operations go through the `/sql` endpoint (with parameter binding; identifiers always safely quoted) — no new backend endpoints. Document collections (tables) written by generated apps also appear directly in this structure tree, so **there is no separate "Documents" tab anymore** — the single SQL page browses/edits all tables.
 
-### 15.4 隔离与清理
+### 15.4 Isolation and Cleanup
 
-- 测试环境(draft)= 预览页 `/p/:token/api` 写入;线上环境(live)= 发布页 `/s/:slug/api` 写入;两者互不可见。
-- KV / R2 仍是共享资源 + 前缀(`p:{projectId}:{env}:` / `appdata/{projectId}/{env}/`),与 SQLite 采用同一套"项目 × 环境"隔离口径。
-- 删除项目时 `deleteProjectAppData` 清 KV 前缀 + R2 前缀 + `destroyProjectDb`(两个环境各 `deleteAll`)。
-- 删除顺序:先在同一个 D1 batch 里按外键方向删子表(`job_messages` → `jobs` → `messages` → `versions` → `site_data` → `project_connectors` → `projects`),再清 R2/KV/DO。D1 默认开启外键(`PRAGMA foreign_keys` 恒为 1),漏删 `jobs` 会让最后一句 `DELETE FROM projects` 报 `FOREIGN KEY constraint failed`——2026-10-25 生产删除项目 500 就是这个原因。对象存储清理放在 DB 之后且失败只记日志,避免"项目还在、产物/数据已经没了"的半删状态。
+- The staging environment (draft) = written via the preview page `/p/:token/api`; the live environment (live) = written via the publish page `/s/:slug/api`; neither sees the other.
+- KV / R2 remain shared resources + prefixes (`p:{projectId}:{env}:` / `appdata/{projectId}/{env}/`), using the same "project × environment" isolation scheme as SQLite.
+- On project deletion, `deleteProjectAppData` clears the KV prefix + R2 prefix + `destroyProjectDb` (`deleteAll` on each of the two environments).
+- Deletion order: first delete child tables in foreign-key order within a single D1 batch (`job_messages` → `jobs` → `messages` → `versions` → `site_data` → `project_connectors` → `projects`), then clear R2/KV/DO. D1 has foreign keys on by default (`PRAGMA foreign_keys` always 1); skipping `jobs` makes the final `DELETE FROM projects` fail with `FOREIGN KEY constraint failed` — the 2026-10-25 production 500 on project deletion was exactly this. Object-storage cleanup happens after the DB and failures there only log, avoiding the half-deleted state of "project still exists but artifacts/data are gone".
 
-### 15.5 迁移(一次性,幂等)
+### 15.5 Migration (one-time, idempotent)
 
-旧 D1 `site_data` 的存量行需回填进 SQLite。迁移后 D1 `site_data` **只读、不再写入**。
+Existing rows in the old D1 `site_data` need backfilling into SQLite. After migration, D1's `site_data` is **read-only, no longer written**.
 
 ```bash
 # 1) 登录后台拿 cookie
@@ -494,25 +495,24 @@ curl -s -c /tmp/a.jar -X POST https://forge-v2.needle.workers.dev/api/admin/logi
 curl -s -b /tmp/a.jar -X POST https://forge-v2.needle.workers.dev/api/admin/migrate-doc-data
 ```
 
-返回 `{groups, rows, errors}`;`rows` 为回填行数(按 `INSERT OR IGNORE` 幂等,重复跑不产生重复)。
+Returns `{groups, rows, errors}`; `rows` is the number of backfilled rows (idempotent via `INSERT OR IGNORE`; re-running produces no duplicates).
 
-### 15.6 与旧实现的差异(用户可见)
+### 15.6 Differences from the Old Implementation (user-visible)
+- The workspace "Data" tab converged from **Documents / Key-value / Objects / SQL** to **Key-value / Objects / SQL**: document collections are no longer a standalone tab; they are browsed/edited as tables in the "SQL" structure tree (DBeaver style), reading the **same database** the generated app reads.
+- Removed the owner's `/api/projects/:id/data/*` endpoint group (used only by the old "Documents" tab); the backend no longer has a second document-data pathway.
+- D1 `site_data` stopped being written: kept only as the historical source for the migration.
+- The admin console's artifact-list "Data" column now computes the live sum of row counts across both environments' SQLite databases.
+- The generated-app side's HTTP contract is completely unchanged (the `db/:collection` request/response shapes are identical), so existing apps keep working without regeneration.
 
-- 工作台「数据」页签从 **文档 / 键值 / 对象 / SQL** 收敛为 **键值 / 对象 / SQL**:文档集合不再是独立页签,改在「SQL」的结构树里以表的形式浏览/编辑(DBeaver 风格),与生成应用读的是**同一个库**。
-- 移除了 owner 的 `/api/projects/:id/data/*` 一组接口(仅原「文档」页签使用),后端不再有第二条文档数据通路。
-- D1 `site_data` 停写:仅作为迁移的历史源保留。
-- 管理后台产物列表的「数据」列改为实时统计两个环境 SQLite 的行数之和。
-- 生成应用侧 HTTP 契约完全不变(`db/:collection` 的请求 / 响应形态一致),无需重新生成即可继续使用。
+## 16. STAGING Environment (fully isolated from production)
 
-## 16. STAGING 环境(与生产完全隔离)
+### 16.1 Goals and Principles
 
-### 16.1 目标与原则
+"Develop and validate on staging first; go live only after confirming everything is fine." The two environments are **code-identical** (same repo, same build artifacts, same `agent/` source) with **fully isolated** resources — neither reads/writes nor overwrites the other. The production config at the top level of `wrangler.jsonc` is untouched, word for word; staging lives entirely in the `env.staging` block and in separate GCP services.
 
-「先在 staging 开发验证,确认没问题再上线」。两套环境**代码同源**(同一仓库、同一份构建产物、同一份 `agent/` 源码),资源**全隔离**,互不读写、互不覆盖。生产配置在 `wrangler.jsonc` 顶层,一字未动;staging 全部落在 `env.staging` 块与独立的 GCP 服务里。
+### 16.2 Cloudflare Side (`wrangler.jsonc`'s `env.staging`)
 
-### 16.2 Cloudflare 侧(`wrangler.jsonc` 的 `env.staging`)
-
-wrangler 的规则:**绑定类配置(`vars` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `durable_objects` / secrets)不可继承,必须在每个环境里显式声明**,漏声明不会在部署时报错,而是运行时 `c.env.XXX` 为 `undefined`(例如漏 `PROJECT_DB` 会让生成应用的 `/db` 接口和数据面板直接 500)。`main` / `compatibility_date` / `assets` / `migrations` / `triggers` 可继承,故意不重复,以免两边漂移。
+Wrangler's rule: **binding-type config (`vars` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `durable_objects` / secrets) is not inherited and must be declared explicitly in every environment**; a missing declaration does not error at deploy time — instead `c.env.XXX` is `undefined` at runtime (e.g., omitting `PROJECT_DB` makes generated apps' `/db` endpoint and data panel 500 outright). `main` / `compatibility_date` / `assets` / `migrations` / `triggers` are inheritable and are deliberately not repeated, to avoid the two sides drifting.
 
 ```bash
 # 一次性:建独立资源并把 id 填进 wrangler.jsonc 的 env.staging
@@ -527,44 +527,44 @@ npx wrangler secret put ADMIN_PASSWORD --env staging
 npm run deploy:staging                            # 构建前端 + 部署 Worker forge-v2-staging
 ```
 
-- 环境名即 Worker 名:`env.staging.name = "forge-v2-staging"`,遵循官方 `<顶层名>-<环境名>` 规则。
-- **生产部署守卫**:`npm run deploy`、`npm run agent:deploy:prod` 与 `npm run agent:deploy:free:prod` 都通过对应的 `pre*` 钩子执行 `scripts/guard-prod-deploy.mjs`,两道检查,任一不满足即中止:**(1) 当前分支必须是 `main`**;**(2) 工作区必须干净**(无未提交改动)。即 Worker 与两类 Agent 的生产部署都只允许来自「已验收并已提交的 main」。staging 命令故意不挂守卫。
-- `npm run deploy` 显式写成 `wrangler deploy --env=""`,在多环境配置下明确指向顶层(生产),避免 wrangler 的裸 `deploy` 交互警告。
+- The environment name is the Worker name: `env.staging.name = "forge-v2-staging"`, following the official `<top-level name>-<environment name>` rule.
+- **Production deploy guard**: `npm run deploy`, `npm run agent:deploy:prod`, and `npm run agent:deploy:free:prod` all run `scripts/guard-prod-deploy.mjs` through the corresponding `pre*` hooks; two checks, and either failing aborts: **(1) the current branch must be `main`**; **(2) the working tree must be clean** (no uncommitted changes). That is, production deployments of the Worker and both Agent types are allowed only from "an accepted, committed `main`". The staging commands deliberately carry no guard.
+- `npm run deploy` is written explicitly as `wrangler deploy --env=""`, which unambiguously targets the top level (production) under a multi-environment config, avoiding wrangler's bare `deploy` interactive warning.
 
-### 16.3 Google Cloud 侧(同项目内独立 Cloud Run 服务)
+### 16.3 Google Cloud Side (separate Cloud Run service within the same project)
 
-不新建 GCP 项目,在同项目 `sixth-impulse-286413` 内新建服务 `forge-agent-staging`,与 `forge-agent` 并列、镜像互不覆盖。
+No new GCP project; the service `forge-agent-staging` is created within the same project `sixth-impulse-286413`, alongside `forge-agent`, with images that don't overwrite each other.
 
-- **LLM 密钥独立(2026-10-18 起)**:staging 改用 GLM,密钥另存 Secret `llm-api-key-staging`;生产仍用 `llm-api-key`(DeepSeek)。两把密钥对应不同厂商,**不能共用**——早期「复用同一把」的做法已作废;隔离除了服务边界,现在还多了一道密钥边界。
-- **内部密钥另建**:Secret `agent-secret-staging`,与生产的 `agent-secret` 不同值 → 生产 Worker 的预览令牌(HMAC over `AGENT_SECRET`)在 staging 校验必然失败,反之亦然,天然挡住跨环境令牌。
-- **成本上限钉死**:`--max-instances 1`,同一时刻最多一个 job;运行预算与生产一致(后台可配到 3400s,必须 < `--timeout 3600`)——**不要把 staging 的运行上限调得比生产小**,否则正常的多文件生成会被自身超时掐死(初版设 300s 即踩过,失败信息「Agent 执行超时(上限 300s)」),失去验证价值。真正的滥用闸门是 `--max-instances 1`,不是把超时切短。
-- 部署脚本:`npm run agent:deploy:staging` / `npm run agent:deploy:prod`(参数唯一来源)。
+- **Independent LLM keys (since 2026-10-18)**: staging switched to GLM, with its key stored as Secret `llm-api-key-staging`; production still uses `llm-api-key` (DeepSeek). The two keys belong to different vendors and **cannot be shared** — the earlier "reuse the same key" approach is retired; isolation now has a key boundary on top of the service boundary.
+- **Separate internal secret**: Secret `agent-secret-staging`, different from production's `agent-secret` → production Worker preview tokens (HMAC over `AGENT_SECRET`) necessarily fail validation on staging and vice versa, naturally blocking cross-environment tokens.
+- **Cost cap pinned**: `--max-instances 1`, at most one job at any moment; the run budget matches production (configurable to 3400s on the admin side, must be < `--timeout 3600`) — **do not set staging's run cap smaller than production's**, otherwise normal multi-file generations get killed by their own timeout (the initial 300s hit exactly this, with failure message "Agent 执行超时(上限 300s)"), destroying its validation value. The real abuse gate is `--max-instances 1`, not shortening the timeout.
+- Deploy scripts: `npm run agent:deploy:staging` / `npm run agent:deploy:prod` (the single source of parameters).
 
-### 16.4 环境角标(前端如何区分)
+### 16.4 Environment Badge (how the frontend tells environments apart)
 
-生产与 staging **共用同一份 `web/dist`**,所以环境名只能**运行时下发**,不能用 Vite 构建期变量(否则会把 staging 角标打进生产包)。实现:staging 的 `vars` 里设 `ENVIRONMENT=staging`,生产不设 → `GET /api/auth/config` 回落 `environment: "production"`;前端 `<EnvBadge>`(挂在 `TopBar` / `AdminBar` / `Landing` / `Login`)取到非 production 才渲染琥珀色 `STAGING` 角标。
+Production and staging **share the same `web/dist`**, so the environment name can only be **delivered at runtime**, not via Vite build-time variables (otherwise the staging badge would get built into the production bundle). Implementation: staging's `vars` sets `ENVIRONMENT=staging`, production doesn't → `GET /api/auth/config` falls back to `environment: "production"`; the frontend `<EnvBadge>` (mounted on `TopBar` / `AdminBar` / `Landing` / `Login`) renders the amber `STAGING` badge only when it reads a non-production value.
 
-### 16.5 隔离验证(2026-10-17 实测结论)
+### 16.5 Isolation Verification (measured conclusions, 2026-10-17)
 
-| 检查项 | 结果 |
+| Check | Result |
 | --- | --- |
-| D1 数据隔离 | 生产 `users/projects/versions/site_data = 13/26/36/3`;staging 初始全 0。staging 跑完一次 E2E 后为 `1/1/1`,生产计数**分毫未变** |
-| R2 产物隔离 | `forge-v2-artifacts` 20 个对象(生产项目)、`forge-v2-artifacts-staging` 仅 3 个(E2E 项目),互不出现 |
-| Durable Object 隔离 | 独立 Worker ⇒ 独立 DO namespace;staging 生成应用的 `/p/:token/api/db/:collection` 返回 200(绑定已接好,漏配会 500),同一 token 在生产的同路径 404 |
-| 跨环境预览令牌 | staging 令牌在 staging `GET /p/:token/` = 200;同一令牌在**生产** 404(`AGENT_SECRET` 不同) |
-| 生产未被动过 | 生产线上仍服务旧构建 `assets/index-BRvPdKmy.js`(未重新部署),`/api/auth/config` 仍返回 `{"google":true}` 无 `environment` 字段 |
-| Cron 独立 | CF API 显示 `forge-v2` 与 `forge-v2-staging` 各有独立 `* * * * *` schedule,各自只巡检本环境任务 |
-| 端到端 | staging 注册 → 建项目 → `generate` → Cloud Run `forge-agent-staging` 写多文件 React → 构建 → commit 落版本(draft `version_no=0`,307834 B,20 个源文件)→ `GET /p/:token/` 200。全程只写 staging 的 D1/R2 |
+| D1 data isolation | Production `users/projects/versions/site_data = 13/26/36/3`; staging started all 0. After one E2E run staging was `1/1/1`, and production's counts **didn't move at all** |
+| R2 artifact isolation | `forge-v2-artifacts` 20 objects (production projects), `forge-v2-artifacts-staging` only 3 (the E2E project); neither appears in the other |
+| Durable Object isolation | Independent Worker ⇒ independent DO namespace; staging's generated app `/p/:token/api/db/:collection` returned 200 (bindings wired; a missing config would 500), and the same token 404s at production's same path |
+| Cross-environment preview tokens | Staging token at staging `GET /p/:token/` = 200; the same token at **production** 404 (`AGENT_SECRET` differs) |
+| Production untouched | Production still serves the old build `assets/index-BRvPdKmy.js` (not redeployed), and `/api/auth/config` still returns `{"google":true}` with no `environment` field |
+| Cron independence | The CF API shows `forge-v2` and `forge-v2-staging` each with an independent `* * * * *` schedule, each inspecting only its own environment's jobs |
+| End-to-end | Staging signup → create project → `generate` → Cloud Run `forge-agent-staging` writes multi-file React → build → commit lands the version (draft `version_no=0`, 307834 B, 20 source files) → `GET /p/:token/` 200. Only staging's D1/R2 were written the whole way |
 
-### 16.6 状态与注意
+### 16.6 Status and Notes
 
-- **staging Google 登录已启用(2026-10-17)**:`GET /api/auth/config` = `{"google":true,"environment":"staging"}`。做法是在自有 OAuth 客户端追加 `${STAGING_PUBLIC_BASE_URL}/api/auth/google/callback`,再给 staging Worker 单独写入 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`。校验 `GET /api/auth/google` 能正常 302 到 Google 且无 `redirect_uri_mismatch`,说明 client + 回调白名单都生效。
-- ⚠️ **Worker secret 只写不可读**:生产那两个值无法被任何环境「读取后复制」。wrangler 实际写入方式一直是 `printf '%s' "$值" | npx wrangler secret put …`(日志里 `secretSource: stdin` / `isInteractive: false`,见 `~/Library/Preferences/.wrangler/logs/`),所以 shell 历史里查不到值——换新环境时只能由**持有原始 secret 的人**再输入一次,或给该环境另建一个 OAuth 客户端。
-- staging D1 里留有本次 E2E 的 1 用户 / 1 项目 / 1 版本(测试环境,可保留或按需清)。
+- **Staging Google login enabled (2026-10-17)**: `GET /api/auth/config` = `{"google":true,"environment":"staging"}`. How: append `${STAGING_PUBLIC_BASE_URL}/api/auth/google/callback` to the existing OAuth client, then write `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` separately for the staging Worker. Verified that `GET /api/auth/google` 302s to Google properly with no `redirect_uri_mismatch`, meaning both the client and the callback allowlist took effect.
+- ⚠️ **Worker secrets are write-only**: the production values cannot be "read and copied" by any environment. Wrangler's actual write method has always been `printf '%s' "$值" | npx wrangler secret put …` (logs show `secretSource: stdin` / `isInteractive: false`, see `~/Library/Preferences/.wrangler/logs/`), so the values can't be found in shell history — when switching to a new environment, only the **person holding the original secret** can enter it again, or create a new OAuth client for that environment.
+- Staging's D1 retains this E2E's 1 user / 1 project / 1 version (a test environment; can be kept or cleaned as needed).
 
-### 16.7 分支模型与上线流程
+### 16.7 Branch Model and Release Flow
 
-**staging 分支开发测试 → 验证通过合并到 `main` → 从 `main` 上线。** 环境隔离(§16.2/§16.3)与分支是**两条独立的轴**:分支决定「跑的是哪份代码」,wrangler 环境决定「代码跑在哪套资源上」。两者组合出的日常流程:
+**Develop and test on the `staging` branch → merge to `main` after validation → release from `main`.** Environment isolation (§16.2/§16.3) and branches are **two independent axes**: the branch decides "which copy of the code runs", and the wrangler environment decides "which set of resources it runs on". The daily flow combining both:
 
 ```bash
 # 1) 在 staging 分支开发
@@ -584,30 +584,30 @@ npm run deploy                  # Worker forge-v2
 npm run agent:deploy:prod       # 只在改了 agent/ 时需要
 ```
 
-要点:
+Key points:
 
-- **`main` 是「可上线」基线**:`main` 上的每个提交都应该是已验收、可随时部署的;不直接在 `main 上攒未验证的改动。
-- **守卫只拦生产**:`npm run deploy`、`agent:deploy:prod`、`agent:deploy:free:prod` 都前置检查「分支 = main」+「工作区干净」(`scripts/guard-prod-deploy.mjs`)。`npm run deploy:staging` / `agent:deploy:staging` / `agent:deploy:free:staging` 不加任何守卫——未提交、未合并的改动正是要靠它验证。
-- **staging 与 main 共用同一份 `web/dist` 和 `agent/` 源码**:所以「代码在 staging 上跑通」不能靠构建期差异,环境差异只允许来自 §16.2/§16.3 的配置(绑定、`ENVIRONMENT`、Cloud Run 服务名与规格)。任何「只在某一环境生效」的行为都必须用运行时配置表达。
-- **前端环境角标**(§16.4)就是这条纪律的护栏:在 `app-staging.1forgen.site` 看到琥珀色 `STAGING`,在 `app.1forgen.site` 看到干净顶栏。
+- **`main` is the "releasable" baseline**: every commit on `main` should be accepted and deployable at any time; don't accumulate unverified changes directly on main.
+- **The guard blocks production only**: `npm run deploy`, `agent:deploy:prod`, and `agent:deploy:free:prod` all pre-check "branch = main" + "clean working tree" (`scripts/guard-prod-deploy.mjs`). `npm run deploy:staging` / `agent:deploy:staging` / `agent:deploy:free:staging` have no guard at all — uncommitted, unmerged changes are exactly what it exists to validate.
+- **Staging and main share the same `web/dist` and `agent/` source**: so "the code works on staging" cannot rely on build-time differences; environment differences may only come from the config in §16.2/§16.3 (bindings, `ENVIRONMENT`, Cloud Run service names and specs). Any behavior that "only takes effect in one environment" must be expressed as runtime configuration.
+- **The frontend environment badge** (§16.4) is the guardrail for this discipline: amber `STAGING` at `app-staging.1forgen.site`, a clean top bar at `app.1forgen.site`.
 
-## 17. 生成质量:模板设计系统 + 设计复查回路(2026-10-17)
+## 17. Generation Quality: Template Design System + Design Review Loop (2026-10-17)
 
-目标:用户不是专业开发者,所以**产出的完整性、观感与交互要由平台兜底,而不是交给模型即兴发挥**。做法是把"苹果官网级"的视觉与交互固化成模板里**确定性的默认值**,再用 prompt 契约 + 二轮复查把它锁住。
+Goal: users are not professional developers, so **the completeness, look, and interactions of the output must be backstopped by the platform, not left to the model's improvisation**. The approach: bake "Apple-homepage-grade" visuals and interactions into **deterministic defaults** in the template, then lock them in with a prompt contract + a second review round.
 
-### 17.1 三块升级
+### 17.1 Three Upgrades
 
-| 块 | 内容 | 落点 |
+| Block | Content | Location |
 | --- | --- | --- |
-| 数据能力 | 分页/搜索/真实总数、原子计数、对象列举 | `src/lib/{projectDb,appdata}.ts`(§14.1) |
-| 设计系统 | 三层 token CSS + 30+ 组件原语 + 图标/动效/数据 hooks | `agent/template/src/{styles,components/ui,lib}` |
-| 提示词 + 复查 | system 契约化(设计/组件/数据/状态/自检)+ 同会话二轮设计打磨与回滚 | `agent/src/{prompt,runner,config}.ts` |
+| Data capability | Pagination/search/real totals, atomic counters, object listing | `src/lib/{projectDb,appdata}.ts` (§14.1) |
+| Design system | Three-layer token CSS + 30+ component primitives + icon/motion/data hooks | `agent/template/src/{styles,components/ui,lib}` |
+| Prompts + review | Contract-based system prompt (design/components/data/state/self-check) + same-session second design polish round with rollback | `agent/src/{prompt,runner,config}.ts` |
 
-### 17.2 模板设计系统(agent/template/)
+### 17.2 Template Design System (agent/template/)
 
-依赖是**预装在镜像里**的,模型不需要(也不允许)装包:`lucide-react`(图标)、`motion`(动效);`package.json` / `vite.config.js` / `Dockerfile` 的脚本契约不变。
+Dependencies are **preinstalled in the image**; the model doesn't need to (and isn't allowed to) install packages: `lucide-react` (icons), `motion` (animation); the script contracts of `package.json` / `vite.config.js` / `Dockerfile` are unchanged.
 
-关键文件:
+Key files:
 
 ```
 LICENSE / THIRD_PARTY_NOTICES.md  模板 Apache-2.0 许可与依赖完整说明,随源码与 dist 交付
@@ -626,33 +626,33 @@ src/lib/store.js                  useCollection / useCollectionStats / useKv / u
 src/App.jsx                       示例应用(留言墙)= 模板自身的冒烟基线
 ```
 
-- **token-first 三层**:`tokens.css`(调色板与派生色阶,`color-mix` 派生 + 暗色两套)→ `theme.css`(`@theme inline` 语义类)→ `base.css`(排版/可访问性/降级)。切浅色/深色是**纯 CSS 生效**,组件里不写 `dark:` 变体。
-- **语义词汇表**(prompt 直接列出,模型照抄,不写死 hex/不写 `gray-*`):`bg-canvas|panel|panel-2|brand-soft`、`border-line`、`text-ink|muted|brand|brand-600|accent|success|warning|danger`、`rounded-card|field|pill`、`shadow-card|lift|pop`、`ease-soft|spring`、`font-sans|num`。
-- **组件是"最省力路径"**:单一 import 路径、零 props 也能渲染出合格样式、三态(loading 骨架 / `EmptyState` / `ErrorState`)内建、破坏性操作有 `ConfirmDialog`、反馈有 `useToast`、动效有 `Reveal/Stagger`。图标用 `<Icon name="Search" />`(白名单 `ICON_NAMES`),不引入图标库。
-- **禁止 localStorage/sessionStorage**:发布页与预览页跑在 CSP `sandbox` 的 opaque origin 下,访问它们会抛 `SecurityError` 导致白屏;需要"记住"的临时界面状态用 `storage.get/set`(内部 try/catch + 内存兜底),业务数据一律进 db/kv。
+- **Token-first three layers**: `tokens.css` (palette and derived color scales, `color-mix` derivation + both dark sets) → `theme.css` (`@theme inline` semantic classes) → `base.css` (typography/accessibility/fallbacks). Light/dark switching takes effect in **pure CSS**; components never write `dark:` variants.
+- **Semantic vocabulary** (listed directly in the prompt for the model to copy; no hardcoded hex, no `gray-*`): `bg-canvas|panel|panel-2|brand-soft`, `border-line`, `text-ink|muted|brand|brand-600|accent|success|warning|danger`, `rounded-card|field|pill`, `shadow-card|lift|pop`, `ease-soft|spring`, `font-sans|num`.
+- **Components are the "path of least effort"**: a single import path, zero props still renders passable styles, three states (loading skeleton / `EmptyState` / `ErrorState`) built in, `ConfirmDialog` for destructive operations, `useToast` for feedback, `Reveal/Stagger` for motion. Icons use `<Icon name="Search" />` (whitelist `ICON_NAMES`), no icon library introduced.
+- **localStorage/sessionStorage forbidden**: the publish page and preview page run under a CSP `sandbox` opaque origin, where accessing them throws `SecurityError` and white-screens the page; temporary UI state that needs "remembering" uses `storage.get/set` (internal try/catch + in-memory fallback), and all business data goes into db/kv.
 
-### 17.3 Prompt 结构(agent/src/prompt.ts,≈23 KB)
+### 17.3 Prompt Structure (agent/src/prompt.ts, ≈23 KB)
 
-`systemPrompt(lang, mode)` 是**函数**(产物语言与任务类型都是入参,见 §17.8),顺序:角色与运行环境 → **输出语言块**(最高优先级,见 §17.8)→ **文件权限**(可改 `src/**` 与 `tokens.css` 两行;禁改平台文件,违反会被强制还原)→ **设计系统契约**(配色/排版/节奏/动效)→ **组件库目录**(30+ 导出的签名与"何时用")→ **页面结构**(导航/Hero/核心功能/统计/选配/页脚,锚点与 id 对应)→ **交互与状态覆盖清单** → 数据层(`DATA_SDK`)→ 状态联动 → **结束前自检**(按真实点击走主流程 + 异常路径 + 数据能力覆盖 + 视觉清单)→ 交付说明格式。
+`systemPrompt(lang, mode)` is a **function** (both the artifact language and the job type are parameters, see §17.8), ordered: role and runtime environment → **output language block** (highest priority, see §17.8) → **file permissions** (may edit `src/**` and the two lines of `tokens.css`; platform files are off-limits, violations get force-restored) → **design system contract** (color/typography/rhythm/motion) → **component library catalog** (signatures and "when to use" of the 30+ exports) → **page structure** (nav/Hero/core features/stats/optional/footer, anchors and ids mapped) → **interaction and state coverage checklist** → data layer (`DATA_SDK`) → state linkage → **pre-finish self-check** (walk the main flow with real clicks + error paths + data capability coverage + visual checklist) → delivery-notes format.
 
-`DATA_SDK` 不只是"用法文档",而是一条**覆盖要求**:平台有四类后端能力(db / counter / kv / blob),先判断本应用能用到哪几类,**能用上的都要用上**(正常 ≥2 类),并给出可判定的触发条件——出现"今日 X / 累计 X / 共 X 次"这类汇总数字就必须用 `counter` 维护汇总值(明细进 db、汇总走 counter,不把全量明细拉下来现算);有"设置/公告/开关/门店资料"就必须用 `kv`;有图片/文件上传就必须用 `blob`。`generatePrompt` 要求把选型写进 `plan.json` 的 `data` 字段(`{collections,counters,kv,blob}`);`POLISH_PROMPT` 的复查清单新增第 9 条专门核对"能力是否真的接进了界面",第 8 条仍是"数据是否真实/分页/服务端检索"。
+`DATA_SDK` is not just "usage documentation" but a **coverage requirement**: the platform has four backend capabilities (db / counter / kv / blob); first judge which ones this app can use, **and every one it can use must be used** (normally ≥2), with decidable trigger conditions given — any summary figures like "today X / total X / X times in all" must use `counter` to maintain the summary (details go into db, summaries via counter; don't pull all details down and compute on the fly); any "settings/announcements/toggles/store profile" must use `kv`; any image/file upload must use `blob`. `generatePrompt` requires the selection to be written into `plan.json`'s `data` field (`{collections,counters,kv,blob}`); `POLISH_PROMPT`'s review checklist gains a 9th item specifically verifying "the capability is actually wired into the UI", and item 8 remains "is the data real/paginated/server-side searchable".
 
-`generatePrompt` 的步骤被钉成:读脚手架 → 写 `plan.json` → **把 `palette[0]/[1]` 写进 `tokens.css`** → 实现页面 → 自检。规划卡片的色块与成品主色因此必然一致(token-first)。
+`generatePrompt`'s steps are pinned as: read the scaffold → write `plan.json` → **write `palette[0]/[1]` into `tokens.css`** → implement pages → self-check. The plan card's color swatch and the finished product's primary color therefore necessarily match (token-first).
 
-`polishPrompt(lang, mode)` 复查清单的第 10 条按模式分叉:generate 查「所有文案是否都是目标语言(脚手架里的中文示例、组件默认文案有没有漏)」;chat 查「本次新增/修改的文案是不是目标语言,没动到的旧文案保持原样」。收尾那句话同样用目标语言。
+`polishPrompt(lang, mode)`'s review checklist diverges at item 10 by mode: generate checks "is all copy in the target language (the scaffold's Chinese sample copy, any missed component defaults)"; chat checks "is the copy added/modified this time in the target language, with untouched old copy left as is". The closing sentence likewise uses the target language.
 
-### 17.4 设计复查回路(runner.ts)
+### 17.4 Design Review Loop (runner.ts)
 
-初稿构建通过后,在**同一会话**里再跑一轮 `POLISH_PROMPT`("设计总监复查与打磨",10 条清单:配色/层级/节奏/组件/三态/反馈/动效/数据/数据能力覆盖/文案),只精修、不推翻结构、不改数据接口。工程化的护栏:
+After the first draft's build passes, the **same session** runs another round with `POLISH_PROMPT` ("design-director review and polish", a 10-item checklist: color/hierarchy/rhythm/components/three states/feedback/motion/data/data-capability coverage/copy), doing only fine polish — no overturning structure, no changing data interfaces. Engineering guardrails:
 
-1. **先构建再复查**:第一轮的源码树 `collectSource` 存为基线;复查轮只有在初稿已通过构建的前提下才开始。
-2. **复查轮失败不判 job 失败**:超时或异常只写 `agent_log` 一行警告,保留第一轮结果。
-3. **复查产物构建失败 → 回滚**:`restoreFromMap(workspace, baseline)` 覆盖回初稿(并删掉复查轮新增的多余文件)再构建一次——输入已通过过,必然通过。
-4. **交付说明仍取第一轮**:复查轮的收尾话术("我改了什么")不适合当交付说明,`RunResult.summary` 优先用第一轮的正文。
-5. **不动 stage 白名单**:复查轮只改 `progress` 文案,见 §4。
-6. **时长**:复查轮预算 = `min(AGENT_POLISH_MAX_MS, 总预算剩余)`,剩余 <30s 自动跳过;总上限是后台 `max_run_ms`(默认 1500s、可配到 3400s,< Cloud Run `--timeout 3600`),云 Run 红线不变。
+1. **Build before review**: the first round's source tree is stored via `collectSource` as the baseline; the review round only starts once the first draft has passed the build.
+2. **A failed review round doesn't fail the job**: timeout or exception only writes one `agent_log` warning line; the first round's result is kept.
+3. **Review output fails to build → rollback**: `restoreFromMap(workspace, baseline)` overwrites back to the first draft (and deletes extra files the review round added), then builds once more — the input already passed, so it will pass.
+4. **Delivery notes still come from round one**: the review round's closing wording ("what I changed") is unsuitable as delivery notes; `RunResult.summary` prefers the first round's body text.
+5. **Doesn't touch the stage whitelist**: the review round only changes the `progress` copy, see §4.
+6. **Duration**: review-round budget = `min(AGENT_POLISH_MAX_MS, remaining total budget)`, auto-skipped if less than 30s remains; the overall cap is the admin-side `max_run_ms` (default 1500s, configurable to 3400s, < Cloud Run `--timeout 3600`), and the Cloud Run red line is unchanged.
 
-### 17.5 staging 验证清单
+### 17.5 Staging Verification Checklist
 
 ```bash
 BASE=https://app-staging.1forgen.site/s/<slug>/api
@@ -664,309 +664,307 @@ curl -s "$BASE/blob?prefix=uploads/&limit=50"              # {items:[{key,size,u
 curl -s -X PUT "$BASE/blob" -d x                           # 405(列举只允许 GET)
 ```
 
-生成后**同时看 `/s/<slug>/`(发布页)与 `/p/<token>/`(预览页)** 两个 URL,逐项核对:规划卡片色块 = 成品主色;每页唯一 h1、区段间距统一;390px 不横向滚动、1280px 不空荡;异步区三态齐全;hover/active/focus-visible/disabled 可见;系统「减少动态效果」下仍完整可读;数据刷新仍在、draft 与 live 互不可见;控制台**无 `SecurityError`**;`/api/jobs/:id` 的 stage 只出现 `planning|coding|building`;owner「数据 → SQL」结构树里看不到 `_forge_counters`。
+After generating, **look at both `/s/<slug>/` (the publish page) and `/p/<token>/` (the preview page)**, checking item by item: plan-card color swatch = the finished product's primary color; one unique h1 per page, uniform section spacing; no horizontal scroll at 390px, no emptiness at 1280px; all three states present in async areas; hover/active/focus-visible/disabled visible; still fully readable under the system's "reduce motion"; data survives refresh, draft and live invisible to each other; console shows **no `SecurityError`**; the `/api/jobs/:id` stage only ever shows `planning|coding|building`; `_forge_counters` is invisible in the owner's "Data → SQL" structure tree.
 
-### 17.6 已知边界与后续项
+### 17.6 Known Limits and Follow-ups
 
-- **读接口无频控**(只有写有):分页/搜索不放大风险,但一个循环翻页的页面会持续打读请求;如需再加读限流,是独立议题(避免破坏既有应用,本轮不做)。
-- **`src_json` 随版本增长**:模板文件进了每个版本的源码树,单版本比升级前大 ≈45 KB(总量仍在几百 KB 量级,离 2 MiB chat 载荷上限余量很大)。若将来逼近 D1 单行/单值上限,再考虑把平台文件改为"按需回填"而非随源码树存储。
-- **复查轮是"打磨"不是"重做"**:它提升的是执行一致性(用没用 token、三态全不全),不保证每一条设计判断都对;prompt 契约与组件默认值仍是主要保障。
+- **Read endpoints have no rate limit** (only writes do): pagination/search doesn't amplify risk, but a page that loops over pages keeps firing read requests; adding read rate-limiting, if needed, is a separate topic (avoiding breaking existing apps; not done this round).
+- **`src_json` grows with versions**: template files enter every version's source tree, making each version ≈45 KB larger than before the upgrade (the total is still on the order of a few hundred KB, with plenty of headroom under the 2 MiB chat payload cap). If it ever approaches D1's per-row/per-value limits, consider changing platform files to "backfill on demand" instead of storing them with the source tree.
+- **The review round is "polish", not "redo"**: it improves execution consistency (were tokens used, are all three states present), and doesn't guarantee every design judgment is right; the prompt contract and component defaults remain the main safeguard.
 
-### 17.7 生成应用的标签标题与实时看代码(2026-10-17)
+### 17.7 Generated Apps' Tab Title and Live Code View (2026-10-17)
 
-两个"完整性"细节,都是在 staging 全链路 E2E 里实测出来的:
+Two "completeness" details, both surfaced in the staging full-chain E2E:
 
-- **浏览器标签标题**:`index.html` 是平台文件、模型不可改,模板里写死 `<title>应用</title>`,于是所有生成应用的标签页都叫"应用"。做法改为**下发时注入**:`injectRuntime(html, apiBase, dataEnv, title)` 用 `projects.name`(generate 落定时已被 `plan.name` 覆盖,聊天天不覆盖)替换 `<title>`,实测 `/p/<token>/` 得 `<title>豆屋管家</title>`。只影响入口 HTML(资产不走这条路径),`projects.name` 为空时保持模板原样;标题文本按 HTML 文本节点转义并截断 60 字。
-- **实时「看代码」预览**:模型的 `write/edit` 有时给工作目录下的**绝对路径**,而原来用 `relative(workspace, join(workspace, path))` 归一化——`path.join` 对绝对路径是**拼接**不是替换,于是算出 `tmp/forge-agent/<jobId>/src/…` 这种错位路径,`readIfExists` 读不到 → `files_preview` 恒为 `null`,前端"实时看代码"面板一直空白。修法:`isAbsolute(path) ? path : join(workspace, path)` 再 `relative`,并丢弃落到工作目录之外(`..` 开头)的路径。
+- **Browser tab title**: `index.html` is a platform file the model can't change, and the template hardcodes `<title>应用</title>`, so every generated app's tab was named "应用". The approach changed to **injection at delivery**: `injectRuntime(html, apiBase, dataEnv, title)` replaces `<title>` with `projects.name` (already overwritten by `plan.name` when generate settles; chat doesn't overwrite it); in testing `/p/<token>/` yielded `<title>豆屋管家</title>`. It only affects the entry HTML (assets don't go through this path); when `projects.name` is empty the template stays as is; the title text is escaped as an HTML text node and truncated to 60 characters.
+- **Live "code view" preview**: the model's `write/edit` sometimes provides **absolute paths** under the working directory, while the original code normalized with `relative(workspace, join(workspace, path))` — `path.join` **concatenates** rather than replaces on absolute paths, computing misaligned paths like `tmp/forge-agent/<jobId>/src/…`, so `readIfExists` couldn't read → `files_preview` stayed `null` and the frontend's live-code panel stayed blank. Fix: `isAbsolute(path) ? path : join(workspace, path)` then `relative`, discarding paths that land outside the working directory (starting with `..`).
 
-### 17.8 产物文案语言(2026-10-24)
+### 17.8 Artifact Copy Language (2026-10-24)
 
-**起因**:system prompt 原本写死「全部文案使用简体中文」,用户用英文提需求、拿回的仍是全中文应用;而中文还不只在模型写的文案里 —— 脚手架的**平台文件**(模型禁止改)里有一批运行时默认串(空状态「暂无内容」、Modal 的「确认/取消」、报错「加载失败」),`index.html` 的 `<html lang="zh-CN">` 也永远改不掉,平台自身的进度/报错更是直接原样透出中文。
+**Origin**: the system prompt originally hardcoded "all copy in Simplified Chinese"; a user requesting in English still got an all-Chinese app. And the Chinese wasn't only in the copy the model writes — the scaffold's **platform files** (which the model may not change) contain a batch of runtime default strings (empty state "暂无内容", Modal's "确认/取消", error "加载失败"), `index.html`'s `<html lang="zh-CN">` could never be changed, and the platform's own progress/error messages show Chinese verbatim.
 
-**三个「语言」不是一回事,别混**:
+**The three "languages" are not the same thing; don't conflate them**:
 
-| 概念 | 是什么 | 谁决定 |
+| Concept | What it is | Who decides |
 | --- | --- | --- |
-| **产物语言** | 生成出来的应用里的文案语言 | agent 从需求正文检测(`agent/src/lang.ts`) |
-| **平台界面语言** | 平台 chrome(任务进度、错误提示)的语言 | Worker 的 `body.lang`,跨 Worker→agent 边界传给 agent(`RunRequest.lang`) |
-| **脚手架 locale** | 平台默认文案(空状态/报错/Modal 按钮)的语言 | 产物自己写进 `src/App.jsx` 的 `setLocale()` 调用 |
+| **Artifact language** | The copy language inside the generated app | The agent detects it from the request body (`agent/src/lang.ts`) |
+| **Platform UI language** | The language of the platform chrome (job progress, error messages) | The Worker's `body.lang`, passed across the Worker→agent boundary to the agent (`RunRequest.lang`) |
+| **Scaffold locale** | The language of platform default copy (empty states/errors/Modal buttons) | A `setLocale()` call the artifact itself writes into `src/App.jsx` |
 
-**产物语言怎么定的**(`agent/src/lang.ts`):
+**How the artifact language is determined** (`agent/src/lang.ts`):
 
-1. 字符类别:假名 → `ja`、谚文 → `ko`、西里尔 → `ru`;汉字占「汉字 + 拉丁字母」≥ 20% → `zh` —— 这条阈值是给「中文需求里夹一堆 React / TypeScript / IndexedDB」准备的,按字母数比会把它误判成英文。
-2. 拉丁文字:各语言的**特征词**加权打分(只收辨识度高的词,通用功能词会跨语言串味),最高分 ≥ 2 且领先第二名 2 倍才算命中。
-3. 识别不出 → 回落平台界面语言 → 回落 `zh`。
-4. 用户在需求里**显式指定**语言(「用英文」「in English」「日文」)时以用户说的为准 —— 这条交给模型,提示词里明写。
+1. Script classes: kana → `ja`, hangul → `ko`, Cyrillic → `ru`; if CJK characters are ≥20% of "CJK + Latin letters" → `zh` — this threshold exists for "a Chinese request stuffed with React / TypeScript / IndexedDB", which a letter-count ratio would misjudge as English.
+2. Latin scripts: weighted scoring on each language's **characteristic words** (only highly distinctive words are collected; generic function words would bleed across languages); a hit requires the top score ≥2 and 2x the runner-up.
+3. Not identifiable → fall back to the platform UI language → fall back to `zh`.
+4. When the user **explicitly specifies** a language in the request ("用英文", "in English", "日文"), the user's word wins — this is left to the model and written explicitly in the prompt.
 
-检测逻辑是本次唯一有分支判断的代码,单独有个自检脚本:`node --experimental-strip-types agent/scripts/lang-check.mjs`(中/英/日/韩/西/法/德/意/葡/荷 + 混排 + 回落)。
+The detection logic is the only branch-heavy code in this change and has its own self-check script: `node --experimental-strip-types agent/scripts/lang-check.mjs` (zh/en/ja/ko/es/fr/de/it/pt/nl + mixed text + fallbacks).
 
-**提示词怎么落**(`agent/src/prompt.ts`):`systemPrompt(lang, mode)` / `polishPrompt(lang, mode)` / `generatePrompt(req, lang)` / `chatPrompt(req, lang)` 都按目标语言参数化,system prompt 顶部插一段**输出语言块**并**点名**目标语言 —— 指令本身是中文写的,不点名模型大概率跟着中文走。generate 要求全部文案用目标语言;chat 只要求**本次新增/修改**的部分用目标语言,已有文案保持原样(用户在英文应用上说「add a dark mode」,不会把整站翻掉)。
+**How the prompts implement it** (`agent/src/prompt.ts`): `systemPrompt(lang, mode)` / `polishPrompt(lang, mode)` / `generatePrompt(req, lang)` / `chatPrompt(req, lang)` are all parameterized by target language; the system prompt gets an **output language block** at the top that **names** the target language — the instructions themselves are written in Chinese, and without naming it the model would most likely follow the Chinese. Generate requires all copy in the target language; chat requires only **what is added/modified this time** in the target language, with existing copy untouched (saying "add a dark mode" on an English app won't translate the whole site).
 
-**脚手架 locale**(`agent/template/src/lib/locale.js`):平台默认文案的中英双份,`setLocale()` 切换、`t('key')` 取值。平台文件里的默认串一律走 `t()`,不写死中文字面量。应用侧只有一行:`setLocale('en')`。
+**Scaffold locale** (`agent/template/src/lib/locale.js`): a zh/en pair of the platform default copy, switched by `setLocale()` and fetched with `t('key')`. Default strings in platform files always go through `t()`, never hardcoded Chinese literals. The app side has exactly one line: `setLocale('en')`.
 
-- **`<html lang>` 两处都改**:① 运行时 `setLocale()` 会把 `document.documentElement.lang` 改掉;② **构建期**由模板的 vite 插件(`agent/template/vite.config.js`)按 agent 传入的 `FORGE_LOCALE` 写进首屏 HTML —— `index.html` 是平台文件、模型改不了,而首屏 HTML 比 JS 先到,只靠运行时改会晚一拍(屏幕阅读器与浏览器翻译提示读的是首屏)。
+- **`<html lang>` is changed in both places**: ① at runtime `setLocale()` changes `document.documentElement.lang`; ② **at build time** the template's vite plugin (`agent/template/vite.config.js`) writes it into the first-paint HTML based on the agent-passed `FORGE_LOCALE` — `index.html` is a platform file the model can't change, and the first-paint HTML arrives before the JS; relying only on the runtime change lags one beat (screen readers and browser translate prompts read the first paint).
+- **No reliance on model diligence**: before building, the agent runs `ensureLocaleCall()`, checking whether `src/App.jsx` has that call — if missing it's added, if wrong it's corrected. Chat mode **doesn't touch** an existing app's locale (that would translate the whole site's default copy).
 
-- **不依赖模型自觉**:agent 在构建前跑 `ensureLocaleCall()`,检查 `src/App.jsx` 有没有这行调用 —— 没有就补上,写错了就改对。chat 模式**不动**已有应用的 locale(那会把整站默认文案翻掉)。
+**Platform chrome**: the agent's progress/log/error copy follows the UI language (`agent/src/i18n.ts`, which does not share a module with the Worker's `src/lib/i18n.ts` — two independent build products); the Worker side's `jobs.error` follows the lang in the job payload (`srv(lang, key)`); the draft preview badge "测试环境 · 草稿预览" renders according to the `?lang=` on the preview URL (carried by the frontend on the iframe's URL).
 
-**平台 chrome**:agent 的进度/日志/错误文案按界面语言(`agent/src/i18n.ts`,与 Worker 那份 `src/lib/i18n.ts` 不共享模块 —— 两个独立构建产物);Worker 侧 `jobs.error` 按任务 payload 里的 lang(`srv(lang, key)`);草稿预览角标「测试环境 · 草稿预览」按预览 URL 上的 `?lang=` 渲染(前端在 iframe 的 URL 上带)。
+**Delivery notes: language and extraction** (both have burned us):
 
-**交付说明的语言与取法**(两处都踩过坑):
+1. **Language**: the model sometimes writes the closing in the prompt's language (Chinese) rather than the target language — the app content it wrote was English, its self-check even said "all English ✓", but the final delivery note was Chinese (and it claimed "and wrote the delivery note in English"). Two safeguards: ① the prompt **ends** by pinning again "your final reply (delivery note) must be written in <language>" (end-of-prompt instructions carry more weight; the top language block gets diluted by thousands of following Chinese words); ② the agent side checks whether Chinese characters got mixed into the delivery note (`matchesLang` in `lang.ts`), and if it went astray, asks again with a **short prompt whose only ask is to write the delivery note** (`deliveryNotePrompt`) — short instructions with a single goal work far better than emphasizing inside a long prompt; if that fails, the original is kept.
+2. **Extraction**: only trust the body text **after the last tool call** — some models (measured MiniMax-M3.1-Flash) say one sentence at the very start, then think and call tools the whole round without emitting body text again at the end; taking "the last paragraph of body text" would grab the opening line as the delivery note. No body text after tool calls → treat as "the model wrote no delivery note", return empty, and let the Worker fall back to the platform's own closing copy (`commit.generate`, in the job's language).
 
-1. **语言**:模型有时会用提示词的语言(中文)写收尾,而不是目标语言 —— 它写的应用内容是英文的,自查里还写着「all English ✓」,但最后那段交付说明是中文(而且它自己声称「并用英文编写了交付说明」)。两道保险:① 提示词**末尾**再钉一遍「你的最终回复(交付说明)必须用 <语言名> 写」(末位指令权重高,顶部语言块会被后面几千字中文稀释);② agent 侧检查交付说明里有没有混进汉字(`lang.ts` 的 `matchesLang`),跑偏了就用一段**短的、只要求写交付说明**的提示词(`deliveryNotePrompt`)专门再问一次 —— 指令短、目标单一,比在长提示词里强调有效得多;问不到就保留原来那份。
-2. **取法**:只认**最后一次工具调用之后**的那段正文 —— 有些模型(实测 MiniMax-M3.1-Flash)整轮只在开头说过一句话,之后全是思考与工具调用、收尾时不再输出正文;只取「最后一段正文」会拿到开场白当交付说明。工具调用之后没有正文 → 视为模型没写交付说明,返回空,由 Worker 用平台自己的收尾文案(`commit.generate`,按任务语言)兜底。
+**Known limit**: the scaffold locale ships only zh and en — for artifacts in Japanese/Korean etc., the platform default copy falls back to English (the app's own copy is still in the target language).
 
-**已知边界**:脚手架 locale 只内置中英两套 —— 日/韩等语言的产物,平台默认文案回落英文(应用自己的文案仍是目标语言)。
+## 18. Chat Pane Interactions (2026-10-18)
 
-## 18. 对话栏交互(2026-10-18)
+Three UX reinforcements on the user-facing "submit a request" path, all in `web/src/components/ChatPanel.tsx` + `web/src/pages/Workspace.tsx`:
 
-用户侧「提需求」这条路径的三处体验补强,都在 `web/src/components/ChatPanel.tsx` + `web/src/pages/Workspace.tsx`:
+- **Keep typing during generation (steering)**: while a job is `pending/running` the input is no longer disabled; Enter/"Append" delivers the content to the executing agent (server-side chain in §5.2). The input's placeholder and button copy switch by state: during generation "Append" + "■ Stop" side by side; when idle only "Send". If the steer request fails, **the input and attachments stay in place** so the user can retry directly; if the job just ended (409) it degrades to a normal send without losing content.
+- **Pasting images**: `Cmd/Ctrl+V` adds clipboard images directly to the pending attachments, using the browser's native `clipboardData.items`, no extra dependencies. Paste sources often lack extensions; `withPastedName()` supplies one from the MIME type (`粘贴图片-<ts>.jpg`), otherwise the whitelist would reject it. Plain-text paste is not intercepted — it remains the browser's default behavior.
+- **IME Enter doesn't misfire**: Enter during composition confirms candidate words; `onCompositionStart/End` state + `isComposing` / `keyCode 229` / a 100ms window after composition ends jointly intercept it, candidates land in the input first; another Enter then sends.
+- **Attachment limits switch by state**: idle sends use `SEND_LIMITS` (images 2MB / text 256KB / total 4MB); mid-generation steering uses the tighter `STEER_LIMITS` (1MB / 128KB / 1.2MB, see §5.2); the two constant sets are written separately in `web/src/lib/attachments.ts` and the Worker-side `src/lib/attachments.ts`, with the latter authoritative (the frontend only pre-filters). The tooltip's limit copy is generated dynamically from the current state.
+- **Resizable chat pane**: on desktop, dragging the 6px handle on the right edge changes the width (`pointerdown` → follow movement → persist on release), double-click resets. Default width raised from 380px to **460px**; range `340–760px`, additionally constrained by `window.innerWidth - 360` so the preview area is never squeezed out. Width is stored in `localStorage['forge.chatWidth']` (both read and write do `clampWidth` + try/catch; in private mode resizing still works, it just isn't remembered). On narrow screens (`<768px`) `w-full` decides; the inline width applies only on desktop — mobile remains full-screen + top tab switching.
 
-- **生成中继续输入(steering)**:任务 `pending/running` 期间输入框不再禁用,回车/「追加」把内容投给正在执行的 agent(服务端链路见 §5.2)。输入框 placeholder 与按钮文案随状态切换:生成中显示「追加」+「■ 停止」并排,空闲时只有「发送」。追加请求失败时**输入与附件原样留在框里**,用户可直接重试;任务刚好结束(409)则退化成正常发送,不丢内容。
-- **粘贴图片**:`Cmd/Ctrl+V` 直接把剪贴板里的图片加进待发送附件,走浏览器原生 `clipboardData.items`,无额外依赖。粘贴来源常缺扩展名,`withPastedName()` 按 MIME 补一个(`粘贴图片-<ts>.jpg`),否则过不了白名单。纯文本粘贴不拦截,仍是浏览器默认行为。
-- **中文输入法回车不误发**:组词期间的 Enter 用于确认候选词,`onCompositionStart/End` 状态 + `isComposing` / `keyCode 229` / 组词收尾后的 100ms 窗口共同拦截,候选词先落进输入框;再按一次回车才发送。
-- **附件限额随状态切换**:空闲发送用 `SEND_LIMITS`(图片 2MB / 文本 256KB / 合计 4MB),生成中追加用更紧的 `STEER_LIMITS`(1MB / 128KB / 1.2MB,见 §5.2);两套常量在 `web/src/lib/attachments.ts` 与 Worker 侧 `src/lib/attachments.ts` 各写一份,以后者为准(前端只是提前拦)。工具提示里的上限文案按当前状态动态生成。
-- **对话栏宽度可调**:桌面端把右边缘的 6px 拖拽条拖动即改宽(`pointerdown` → 跟随位移 → 松手落库),双击复位。默认宽度从 380px 提到 **460px**;范围 `340–760px`,并额外受 `window.innerWidth - 360` 约束,保证预览区不被挤没。宽度存 `localStorage['forge.chatWidth']`(读写都做 `clampWidth` + try/catch,隐私模式下调宽仍生效、只是不记忆)。窄屏(`<768px`)由 `w-full` 决定,内联宽度只在桌面端生效,移动端仍是整屏 + 顶部标签切换。
+## 19. Connectors: Letting Generated Sites Use External Systems (2026-10-19)
 
-## 19. 连接器:让生成的站点用上外部系统(2026-10-19)
+The answer to "can I hook up payments/analytics/repos" on the user side is not MCP but **platform hand-written provider adapters**. Full design and trade-offs in `docs/CONNECTORS.md`; this section records only what landed in the platform and its runtime constraints.
 
-用户侧「能不能接支付/统计/仓库」的答案不是 MCP,而是**平台手写的 provider 适配器**。完整设计与取舍见 `docs/CONNECTORS.md`,本节只记落在平台里的实现与运行约束。
+### 19.1 Why Not MCP
 
-### 19.1 为什么不走 MCP
+- pi **deliberately does not support MCP** (`pi-coding-agent/README.md:446`); the current session mounts only `createCodingTools`. Supporting MCP would mean writing a pi extension ourselves plus three new problem areas: process lifecycle, auth, and tool-name conflicts.
+- What generation needs — "use an external account to do a thing" — is achievable with **injected credentials + prompt explanation + the agent's own bash**, with zero new runtime.
+- Runtime (visitor pages) is not an MCP client scenario: pages run in a CSP `sandbox` opaque origin and can only call external APIs with public values or a user-supplied backend.
 
-- pi **刻意不支持 MCP**(`pi-coding-agent/README.md:446`),当前会话只挂 `createCodingTools`;接 MCP 得自己写 pi 扩展,还要引入进程生命周期、鉴权、工具命名冲突三摊新问题。
-- 生成期需要的"用外部账号做件事"用**注入凭证 + 提示词说明 + agent 自带 bash**就能实现,零新增运行时。
-- 运行期(访客页面)不是 MCP client 场景:页面跑在 CSP `sandbox` 的 opaque origin 里,调外部 API 只能靠 public 值或用户自带后端。
+### 19.2 Three Forms and This Phase's Scope
 
-### 19.2 三种形态与本期范围
-
-| 形态 | 例子 | 凭证 | 本期 |
+| Form | Example | Credentials | This phase |
 | --- | --- | --- | --- |
-| A 纯注入 | GA4 `measurementId`、Stripe Payment Link、地图 key | 全 public | ✅ |
-| B 生成期授权 | GA4 Data API、Search Console、GitHub | OAuth,生成时用完即弃 | ✅(首个 provider:GA4) |
-| **B′ 自带密钥(`auth:'apikey'`)** | **Stripe、Supabase、各类长尾 SaaS** | **用户从对方控制台生成密钥自己贴进来** | ✅(首个 provider:Stripe) |
-| C 运行期闭环 | Stripe 运行期代持 + webhook | 含 secret,平台须服务端保管 | ❌ 延后(平台不代持资金密钥) |
+| A pure injection | GA4 `measurementId`, Stripe Payment Link, maps key | All public | ✅ |
+| B generation-time authorization | GA4 Data API, Search Console, GitHub | OAuth, used once at generation time then discarded | ✅ (first provider: GA4) |
+| **B′ bring-your-own key (`auth:'apikey'`)** | **Stripe, Supabase, various long-tail SaaS** | **User generates a key in the provider's console and pastes it in** | ✅ (first provider: Stripe) |
+| C runtime closed loop | Stripe runtime custody + webhooks | Contains secrets; the platform must keep them server-side | ❌ Deferred (the platform does not hold funds-related secrets) |
 
-加一个 provider = 加一个文件 `src/lib/connectors/providers/*.ts` 并在 `registry.ts` 注册,**不改 schema、不动核心代码**。
+Adding a provider = adding one file `src/lib/connectors/providers/*.ts` and registering it in `registry.ts`, **no schema change, no core code changes**.
+**B′ is this design's expansion strategy**: the `oauth` form requires the platform to register an OAuth client + callback URL with each provider (often with approval processes), which is impossible for the long tail; the `apikey` form requires **zero platform-side registration** — the user already has their own account with the provider, and copying a key costs far less than the platform applying on each one's behalf.
+So apart from the few "OAuth-only / worth registering" providers (GA4, GitHub), **everything else goes through `apikey`**.
+It reuses exactly the same storage and parsing chain as GA4 (the same `connections` table, the same `CONNECTOR_KEK`, the same `resolveGrants`),
+with the **sole difference being the credential source**: from "a token exchanged with the upstream" to "a key the user pasted in".
 
-**B′ 是本设计里的扩展策略**:`oauth` 形态要求平台替该 provider 登记 OAuth 客户端 + 回调地址(常有审批),
-对长尾不可能成立;`apikey` 形态**零平台侧登记** —— 用户自己已有对方账号,复制一个 key 的成本远低于平台逐个申请。
-所以除少数"只有 OAuth / 值得登记"的 provider(GA4、GitHub),**其余一律走 `apikey`**。
-它复用与 GA4 完全相同的存储与解析链路(同一张 `connections`、同一把 `CONNECTOR_KEK`、同一个 `resolveGrants`),
-**唯一区别是凭证来源**:从「上游换回的 token」变成「用户贴上来的 key」。
+### 19.3 Data Model (two tables, `schema.migrate-connectors.sql`)
 
-### 19.3 数据模型(两张表,`schema.migrate-connectors.sql`)
+- `connections` (**account level**): one external account can serve multiple projects, avoiding n OAuth round trips for n projects. Credentials are AES-GCM encrypted and stored in `credentials` (master key `CONNECTOR_KEK`), `UNIQUE(user_id, provider, account_label)`; re-authorization overwrites.
+- `project_connectors` (**project-level binding**): `PRIMARY KEY(project_id, provider, env)`. **The `env` dimension is mandatory**, matching KV/R2/DO's "project × environment" scheme, otherwise sooner or later "the draft's test payment lands in the real account".
 
-- `connections`(**账号级**):一个外部账号可服务多个项目,避免 n 个项目走 n 次 OAuth。凭证 AES-GCM 加密后存 `credentials`(主密钥 `CONNECTOR_KEK`),`UNIQUE(user_id, provider, account_label)`,重新授权即覆盖。
-- `project_connectors`(**项目级绑定**):`PRIMARY KEY(project_id, provider, env)`。**必须有 `env` 维度**,与 KV/R2/DO 的「项目 × 环境」同口径,否则迟早出现"草稿的测试付款打进真账"。
+### 19.4 The Four Flows
 
-### 19.4 四条链路
+0. **Bring-your-own key → encrypted storage (B′ only)**: paste the key in the panel → `POST /api/connections/:provider/secret` (`src/routes/connections.ts`).
+   Validation accepts only keys declared in `provider.secretInputs`; missing required fields are rejected; the key is AES-GCM encrypted and written to `connections` (same table and KEK as OAuth),
+   non-secret config is written along the way, and `setBinding` binds it to `(project, env)` — the same semantics as the OAuth callback. **Values only go up, never echo back**: list endpoints never return `credentials`.
+1. **Public values → generation page**: `injectRuntime()` (`src/lib/artifacts.ts`) injects an extra `window.__FORGE_CONNECTORS__` containing only keys marked `public` in `configFields`. The SDK lives in `agent/template/src/lib/connectors.js` (a platform file, force-restored via `PLATFORM_FILES`), providing `connector()/hasConnector()/loadGA4()`. With no binding, **the global is not injected** and the artifact is byte-for-byte identical to before.
+2. **Reading real data at generation time**: `launchJob` (`src/routes/generate.ts`) resolves grants ("draft binding first, fall back to live", `resolveGrants`) and dispatches them once via `AgentRunRequest.connectors`; the agent side writes them to `.forge/connectors.json` in the working directory (`.forge` is in `SKIP_DIRS`, kept out of the source tree/artifacts), and `connectorsBrief()` splices usage instructions into the user prompt. **Credentials in plaintext live only in this one request and the container** — never in D1/R2/versions.
+3. **Runtime closed loop (form C)**: not done. The future escape hatch is an `ext` proxy branch in `src/lib/appdata.ts`, and only **test-mode** credentials would be considered for proxying.
 
-0. **自带密钥 → 加密落库(B′ 专属)**:面板贴密钥 → `POST /api/connections/:provider/secret`(`src/routes/connections.ts`)。
-   校验只接受 `provider.secretInputs` 声明过的键、必填缺失即拒;密钥 AES-GCM 加密后写 `connections`(与 OAuth 同表同 KEK),
-   顺手写非密配置并 `setBinding` 到 `(project, env)` —— 与 OAuth 回调同一语义。**值只上行、不回显**:列表接口永不返回 `credentials`。
-1. **public 值 → 生成页**:`injectRuntime()`(`src/lib/artifacts.ts`)多注一个 `window.__FORGE_CONNECTORS__`,只含 `configFields` 里标了 `public` 的键。SDK 在 `agent/template/src/lib/connectors.js`(平台文件,进 `PLATFORM_FILES` 强制还原),提供 `connector()/hasConnector()/loadGA4()`。无绑定时**不注入该全局**,产物与从前逐字节一致。
-2. **生成期读真实数据**:`launchJob`(`src/routes/generate.ts`)按「草稿绑定优先、回落线上」解析授权(`resolveGrants`),随 `AgentRunRequest.connectors` 一次性派发;agent 侧落到工作目录 `.forge/connectors.json`(`.forge` 进 `SKIP_DIRS`,不进源码树/产物),由 `connectorsBrief()` 把用法拼进 user prompt。**凭证明文只活在这一次请求与容器里**,不落 D1/R2/versions。
-3. **运行期闭环(C 类)**:不做。将来的后路是在 `src/lib/appdata.ts` 加 `ext` 代理分支,且只考虑代理**测试模式**凭证。
+### 19.5 Interaction: Inherit by Default; Only Override on Purpose
 
-### 19.5 交互:默认继承,override 才动手
+- Rule: **a binding means everything takes effect by default**; the per-turn chips are just toggles to "temporarily disable / temporarily enable", **not persisted, auto-reset at the end of the turn**, avoiding connectors becoming a second "re-pick on every message" attachment.
+- **Permission tiers**: read-only providers are included by default every turn; writable providers (non-empty `writeScopes`) are **not** included by default — the user must enable them for the turn, and the agent must explain the impact before acting.
+- The capability bar `web/src/components/ConnectorChips.tsx` sits above the chat input (chips always carry a `只读`/`可写` badge); full management lives in `web/src/components/ConnectorsPanel.tsx` (the top-bar "Connectors" entry; manage account switching / revocation / re-uploading keys / what draft and live each bind / form-A config). **The chat pane only toggles; it does not configure.**
+- The capability bar shows only bindings that **will actually take effect**: a provider whose binding exists but whose credentials are missing/revoked gets no chip (the same rule as `resolveGrants`), so users never see a lit chip that does nothing.
+- Panel entries branch three ways by `auth`: `oauth` → "Connect" jumps to the authorization page; `apikey` → password field to paste + "Save and bind" (collapsed once saved; "Re-upload" overwrites to rotate, and "Use existing key" binds an account-level connection to this project); `config` → plain inputs.
+- **First-time onboarding happens in the conversation, not the panel**: the capability bar's "+ Connect" expands an inline provider list → on selection, `web/src/components/ConnectorCard.tsx` credential card expands at the end of the conversation flow. Keys **only go up and are never echoed**, and **never travel the message pathway** (a direct `POST /api/connections/:provider/secret`) — plaintext never enters the `messages` table, the prompt, or `agent_log`. The panel keeps only slow variables (account switching / revocation / re-upload / separate draft and live config). The card binds to `draft` by default; going live requires explicitly clicking "线上".
+- **The card offers reuse before creation**: its top lists previously saved credentials for this provider under the account (clicking one writes only a project-level binding, **without re-uploading the key**; also applies to `oauth` — selecting an already-authorized account means **no second authorization**); switching accounts or uploading a new key goes through the input boxes or the authorization page below. The data comes from the account-level `connections` in the `GET /api/projects/:id/connectors` response (the draft/live copies are the same list).
+- Chips are read-only during generation: credentials were fixed at dispatch time; steering does not change connectors.
 
-- 规则:**绑定即默认全生效**;per-turn 的 chip 只是"临时关掉/临时点亮"的开关,**不落库、本轮结束自动复位**,避免连接器变成第二个"每条消息都要重选"的附件。
-- **权限分档**:只读 provider 默认每一轮都带上;可写 provider(`writeScopes` 非空)默认**不**带上,要用户本轮点亮,且 agent 动手前先说明影响。
-- 能力条 `web/src/components/ConnectorChips.tsx` 挂在对话栏输入框上方(chip 永远带 `只读`/`可写` 徽标);完整管理在 `web/src/components/ConnectorsPanel.tsx`(顶栏「连接器」入口,管换账号/撤销/重新上传密钥/draft 与 live 各绑什么/A 类配置)。**对话栏只做开关,不做配置。**
-- 能力条只显示**真能生效**的绑定:绑定在但凭证缺失/已撤销的 provider 不上条(与 `resolveGrants` 同口径),免得用户看到一个亮了却什么都没生效的 chip。
-- 面板入口按 `auth` 分三种:`oauth` →「连接」跳授权页;`apikey` → 密码框粘贴 + 「保存并绑定」(已保存后折叠,可「重新上传」覆盖轮换,也可「用已有的密钥」把账号级连接绑到本项目);`config` → 纯输入框。
-- **第一次接入在对话里完成,不在面板**:能力条「+ 连接」展开内联 provider 列表 → 选中后对话流末尾展开 `web/src/components/ConnectorCard.tsx` 凭证卡片。密钥**只上行、永不回显**,且**不走消息链路**(直接 `POST /api/connections/:provider/secret`)—— 明文不进 `messages` 表、不进 prompt、不进 `agent_log`。面板只留慢变量(换账号/撤销/重新上传/draft 与 live 分开配)。卡片默认绑 `draft`,要发线上需显式点「线上」。
-- **卡片先给复用、再给新建**:卡片顶部列出账号下已保存过的该 provider 凭证(点一下只写一条项目级绑定,**不重传密钥**;`oauth` 也适用,选已授权账号即**免二次授权**),要换账号/传新密钥才走下面的输入框或授权页。数据来自 `GET /api/projects/:id/connectors` 响应里的账号级 `connections`(draft/live 两份是同一份列表)。
-- 生成中 chip 只读:凭证在 dispatch 时已定,steering 不改连接器。
+### 19.6 Runtime Constraints
 
-### 19.6 运行约束
+- `CONNECTOR_KEK` is a **Worker secret, written once each at the top level and in `env.staging`** (`wrangler secret put`; binding-type config is not inherited). **Rotating it = all user connections need re-authorization** (decryption failures are uniformly handled as "please re-authorize").
+- Trust model: the platform's master key can decrypt every user's connection credentials — this is stated in the panel copy, not hidden; avoiding it requires waiting for Workers for Platforms.
+- Without `CONNECTOR_KEK` configured, connectors degrade entirely to unavailable (endpoints return `enabled:false`, the panel says so), **without affecting other features**; the generation chain's `resolveGrants` just returns empty.
+- OAuth reuses the login Google client (`GOOGLE_CLIENT_ID/SECRET`); the random state is stored in an HttpOnly cookie against CSRF; the callback redirects back to the workspace at the top level with `?connected=` / `?connector_error=`. The state looks like `<random>~<projectId>~<env>~<non-secret config base64url>` — required config already filled in the card travels with the authorization round trip, and at callback time is **merged** into storage with `connectionId` (not wholesale overwritten), so "switch account and re-authorize" won't wipe a previously entered `propertyId`, and the user doesn't have to come back and fill it again.
+- The prompt's payment stance becomes tiered: **external payment links** (Payment Link) are allowed; collecting/storing card numbers, CVC, passwords remains forbidden.
 
-- `CONNECTOR_KEK` 是 **Worker secret,顶层与 `env.staging` 各写一次**(`wrangler secret put`,绑定类配置不可继承)。**换掉 = 所有用户连接需重新授权**(解密失败统一按「请重新授权」处理)。
-- 信任模型:平台主密钥能解开所有用户的连接凭证 —— 这一点写在面板文案里,不隐藏;要规避需等 Workers for Platforms。
-- 未配置 `CONNECTOR_KEK` 时连接器整体降级为不可用(接口返回 `enabled:false`,面板提示),**不影响其它功能**;生成链路 `resolveGrants` 直接返回空。
-- OAuth 复用登录那套 Google 客户端(`GOOGLE_CLIENT_ID/SECRET`),state 随机数存 HttpOnly cookie 防 CSRF;回调顶层跳回工作台并带 `?connected=` / `?connector_error=`。state 形如 `<随机数>~<projectId>~<env>~<非密配置 base64url>` —— 卡片里已填的必填配置随授权往返带过去,回调时与 `connectionId` **合并**落库(不是整体覆盖),所以「换账号重授权」不会把之前填好的 `propertyId` 抹掉,也不需要用户回来再补一次。
-- 提示词里的支付口径改为分档:允许**外链支付按钮**(Payment Link),继续禁止收集/存储卡号、CVC、密码。
+### 19.7 To Be Completed by the User on the Platform Side (v0 acceptance dependencies)
 
-### 19.7 待用户在平台侧完成(v0 验收依赖)
+1. Google Cloud Console: append the callback URI `${PUBLIC_BASE_URL}/api/connections/ga4/callback` to the existing OAuth client (once each for staging and production).
+2. Enable the **Analytics Data API** (`analyticsdata.googleapis.com`), otherwise generation-time reads are 403.
+3. Acceptance criteria for GA4 as the first provider: the generated app's stats block shows **real GA numbers** (not invented by the model), and the `G-XXXX` reported by the page comes from the bound config.
 
-1. Google Cloud Console 在现有 OAuth 客户端追加回调 URI:`${PUBLIC_BASE_URL}/api/connections/ga4/callback`(staging 与生产各一次)。
-2. 启用 **Analytics Data API**(`analyticsdata.googleapis.com`),否则生成期读数为 403。
-3. GA4 首个 provider 的验收判据:生成的应用统计区块显示**真实 GA 数字**(不是模型编的),且页面上报用的 `G-XXXX` 来自绑定配置。
+## 20. Credits and Billing: Overseas Prepayment + Multilingual (2026-10-20)
 
-## 20. 积分与计费:海外预付 + 多语言(2026-10-20)
+Aimed at overseas users, **prepaid credits**: signup grants a small trial allowance; afterwards credits come from one-time top-up packs or monthly subscriptions. Payments go through **MoR (Merchant of Record) — [Creem](https://creem.io) has been chosen**: the platform holds no overseas entity and does not collect or remit taxes; Creem, as merchant of record, invoices and collects from end users and bears tax compliance; we are only responsible for granting credits after funds arrive.
 
-面向海外用户,**预付屯积分**:注册送一点试用额度,之后靠一次性充值包或按月订阅获得积分。收款走 **MoR(Merchant of Record)—— 已选定 [Creem](https://creem.io)**:平台不持有海外实体、不代收代缴税,Creem 作为记录商户对终端用户开票、收款,并承担税务合规;我们只负责在到账后发积分。
+### 20.1 Terms
 
-### 20.1 口径
+- **The unit is the "credit"**. One generation = **1 credit**; `generate` (first generation) and `chat` (chat edit) are priced the same. The price table is `JOB_COST` in `src/lib/credits.ts`; changing prices touches only that one place, no caller changes needed.
+- **Four sources**: signup / first Google login grant (`SIGNUP_CREDITS = 5`, i.e. 5 generations), one-time top-up packs, monthly subscriptions, and **admin manual grants** (`grantAdminCredits` in `src/lib/credits.ts`; single user `POST /api/admin/users/:id/credits`, batch `POST /api/admin/users/credits`, same amount, ≤100 users per call, amount a positive integer ≤100000; grants only, never deductions, one `credit_ledger.reason = admin_grant` row per user). The admin can optionally also send arrival emails: sent only to addresses with `email_verified = 1`, bilingual (zh/en) body reusing `grant.*` from `src/lib/i18n.ts`; an email failure does not roll back the credits. Grants are **explicitly written** into `users.credits` (see §20.6), not relying on `schema.sql` column defaults.
+- **Failure is free**: when a job fails or the user clicks "Stop", the credits frozen at initiation are refunded in full (both frontend copy and conversation-card wording rest on this promise).
+- Why prepayment rather than monthly post-paid: prepayment is naturally an **abuse gate** (see §20.2), and it keeps cash-flow and bad-debt risk outside the platform.
 
-- **单位是「积分」**(credit)。一次生成 = **1 积分**;`generate`(首次生成)与 `chat`(对话修改)同价。价格表就是 `src/lib/credits.ts` 的 `JOB_COST`,调价只改这一处,调用方无需改动。
-- **四个来源**:注册 / Google 首次登录赠送(`SIGNUP_CREDITS = 5`,即 5 次生成)、一次性充值包、按月订阅、**后台人工加积分**(`src/lib/credits.ts` 的 `grantAdminCredits`;单用户 `POST /api/admin/users/:id/credits`、批量 `POST /api/admin/users/credits`,同一额度、单次 ≤100 人,额度为正整数且 ≤100000;只加不减,每个用户记一条 `credit_ledger.reason = admin_grant`)。后台可选择同时发到账邮件:只发给 `email_verified = 1` 的地址,中英双语正文复用 `src/lib/i18n.ts` 的 `grant.*`,邮件失败不回滚积分。赠送额度**显式写入** `users.credits`(见 §20.6),不依赖 `schema.sql` 的列默认值。
-- **失败不收费**:任务失败或用户点「停止」时,把发起时冻结的积分原额退还(前端文案、对话卡片口径都建立在这条承诺上)。
-- 为什么预付而不是按量月结:预付天然是**滥用闸门**(见 §20.2),也把现金流与坏账风险挡在平台之外。
+### 20.2 Freeze-Settle (core mechanism, `src/lib/credits.ts`)
 
-### 20.2 冻结-结算(核心机制,`src/lib/credits.ts`)
+- **Credits are frozen when the job is initiated** (`reserveCredits`: one atomic conditional deduction `UPDATE ... WHERE credits >= ? RETURNING credits`, concurrency-safe), and **a successful settle (commit) deducts nothing more** — the frozen amount is the bill for this run.
+- **Why not deduct on success**: freezing is simultaneously the **gate**. Otherwise a user could repeatedly initiate doomed jobs with 0 credits, and every failed job still burns LLM and Cloud Run money (the only global concurrency gate is Cloud Run's `--max-instances`, which doesn't stop this). So the gate lives in exactly one place — the freeze in `launchJob`; the `generate` / `chat` routes **no longer pre-check balances** (a job creation sits between the pre-check and the freeze; two checks would actually create a bypass window).
+- **The balance of record is `users.credits`**; all increases/decreases land on a single conditional `UPDATE`; `credit_ledger` is an **append-only** audit trail. In the extreme case (deduction succeeded, process died before the ledger row was written) a ledger row goes missing, but the balance is always right — reconcile against the balance, use the ledger as evidence.
+- **Idempotency**: the unique index `idx_ledger_job_once` guarantees at most one `job_hold` and one `job_release` per job. `releaseJobCredits` looks up how much to refund from the ledger itself (no hold row, or already refunded → returns 0), so callers pass only `jobId`. Of the three terminal paths (`commitJob` / `markJobFailed` / `cancelJob`), the latter two refund only when a **state transition actually happened** (`meta.changes` truthy); on the normal path a job is genuinely refunded only once.
 
-- **发起任务时先把积分冻结掉**(`reserveCredits`:一条 `UPDATE ... WHERE credits >= ? RETURNING credits` 的原子条件扣减,并发安全),**成功落定(commit)不再扣分** —— 冻结那一笔就是这次的账。
-- **为什么不在成功时才扣**:冻结同时是**闸门**。否则用户可以拿 0 积分反复发起注定失败的任务,而每个失败任务照样烧掉 LLM 与 Cloud Run 的钱(全局并发闸门只有 Cloud Run 的 `--max-instances`,拦不住这个)。所以闸门只有一处 —— `launchJob` 里的冻结;`generate` / `chat` 路由里**不再做余额预检**(预检与冻结之间隔着一次建任务,两次判断反而给了绕过窗口)。
-- **余额以 `users.credits` 为准**,所有增减都落在一条条件 `UPDATE` 上;`credit_ledger` 是**只追加**的审计流水。极端情况下(扣减成功、写流水前进程消失)会缺一条流水,但余额永远是对的 —— 对账以余额为准、流水为证。
-- **幂等**:唯一索引 `idx_ledger_job_once` 保证同一任务最多一条 `job_hold` 与一条 `job_release`。`releaseJobCredits` 自己从账本查该退多少(没有冻结行、或已退过 → 返回 0),所以调用方只传 `jobId`。三条终态路径(`commitJob` / `markJobFailed` / `cancelJob`)中,后两条在**真的完成状态迁移**(`meta.changes` 为真)时才退还,正常路径下一个任务只会真正退一次。
+### 20.3 Usage and Cost Metering
 
-### 20.3 用量与成本计量
+- When the agent winds down (**in all three terminal states: success, failure, user stop**) it calls `POST /internal/jobs/:id/usage`, reporting the pi session's accumulated tokens and `runMs`; the Worker side's `src/lib/pricing.ts` converts to `llm_cost_usd` / `gcp_cost_usd` and **upserts** into `job_usage` by `job_id` (idempotent; callback replays are harmless).
+- **Deliberately no status guard**: failed and stopped jobs burn tokens and instance time just the same; missing them makes real gross margin uncomputable — this is precisely the core problem this change set out to solve (before it, the platform had no idea what a generation cost).
+- **`runMs` covers the whole request's duration**, not just the pi part: Cloud Run bills by instance lifetime, and copying the template, creating the pi session, and the platform-side build all burn money.
+- Prices are **snapshots**; changes must note source and date (`pricing.ts` comments record DeepSeek's price tier and source); **unknown models are recorded as 0** (better to under-count than invent); staging's GLM hasn't been priced item by item, so it's 0 for now. Historical costs already in the database are not recomputed — when recalculation is needed, use the raw tokens in `job_usage` (usage is the truth).
+- Usage reporting is **pure statistics**: if the write fails, log it and move on; it never changes a job's terminal state (agent-side `reportUsage` is fire-and-forget).
 
-- agent 收尾时(**成功、失败、用户停止三种终态都**)调用 `POST /internal/jobs/:id/usage`,上报 pi 会话累计的 token 与 `runMs`;Worker 侧 `src/lib/pricing.ts` 换算成 `llm_cost_usd` / `gcp_cost_usd`,按 `job_id` **upsert** 进 `job_usage`(幂等,回调重放无害)。
-- **刻意不做 status 守卫**:失败与被停掉的任务同样烧 token 与实例时间,漏记就算不出真实毛利 —— 这正是这次改造要解决的核心问题(在此之前平台完全不知道一次生成花了多少钱)。
-- **`runMs` 取整个请求的耗时**,不是 pi 那一段:Cloud Run 按实例存活时间计费,拷模板、建 pi 会话、平台侧构建都在烧钱。
-- 价格是**快照**,改要注明来源与日期(`pricing.ts` 注释里写了 DeepSeek 的取价档位与来源);**未知模型按 0 记**(宁可少算也不编),staging 的 GLM 未逐项核价故先按 0。已落库的历史成本不重算 —— 需要重算时以 `job_usage` 里的原始 token 为准(用量才是真相)。
-- 用量上报**纯统计**:写不进去只记日志,绝不改变任务终态(agent 侧 `reportUsage` fire-and-forget)。
+### 20.4 Data Model (`schema.migrate-billing.sql`; fresh installs see `schema.sql`)
 
-### 20.4 数据模型(`schema.migrate-billing.sql`,新库见 `schema.sql`)
-
-四张表:`job_usage`(每任务一行真实用量与成本)、`credit_ledger`(只追加账本)、`orders`(结算后的充值订单)、`subscriptions`(订阅状态)。
-已存在的库跑增量迁移,**不要**直接跑 `schema.sql`(会报 `no such column`)。staging / 生产各一次:
+Four tables: `job_usage` (one row of real usage and cost per job), `credit_ledger` (append-only ledger), `orders` (settled top-up orders), `subscriptions` (subscription states).
+Existing databases run the incremental migration, **not** `schema.sql` directly (it errors with `no such column`). Once each for staging / production:
 
 ```bash
 npm run db:migrate:billing:staging     # staging(前面加 yes |,wrangler 会问确认)
 npm run db:migrate:billing:remote      # 生产
 ```
 
-`orders.provider_ref` 的唯一索引(`idx_orders_provider_ref`)是 **webhook 幂等的唯一依据**:支付平台重放通知是常态,靠数据库挡掉。
+The unique index on `orders.provider_ref` (`idx_orders_provider_ref`) is the **sole basis for webhook idempotency**: payment platforms replaying notifications is normal; the database blocks them.
 
-### 20.5 多语言(中 / 英)
+### 20.5 Multilingual (Chinese / English)
 
-- **前端**:自研极简 i18n(`web/src/lib/i18n/`),**不引第三方库**。两份同构字典 `dict.zh.ts` / `dict.en.ts`,**键名是唯一契约** —— 加一门语言 = 新增一份 `Record<DictKey, string>` 字典 + 在 `DICTS` / `LANG_OPTIONS` 各加一行,**组件一行都不用改**;`en` 用 `Record<DictKey, string>` 类型约束,漏译一个键就是编译错误。默认语言按浏览器(中文→中文,其余一律英文),`localStorage['forge-lang']` 记忆。`LangToggle` 是单键切换(显示对方语言简称)。
-- **服务端**:Worker **只返回中文原文**(它的用户就是中文运营/开发场景),前端在 `web/src/lib/i18n/serverMessages.ts` 把中文文案映射到词典键;映射不中时**原样透出中文** —— 宁可露出中文,也不要吞掉真实原因。之所以不是「服务端直接返回 code」,是因为那要改 50+ 处 return,收益只是少一张表;新接口想更干净可以直接在响应里带 `code`。
-- **Worker 侧另有一份** `src/lib/i18n.ts`:只为**直接写进 D1 的文案**服务(附件的 📎 清单标记、commit 的 assistant 消息)。它和前端那份**不共享模块** —— 两者是两个独立构建产物(共用的是 `web/dist`,不是源码)。
-- 环境差异只能来自运行时配置(见 §2 与 AGENTS.md),**禁用构建期变量**,所以语言只能在运行时选,不能按环境打两份包。
-- **产物语言是另一回事**:上面讲的都是**平台界面**的语言;**生成出来的应用用什么语言**由需求正文决定(见 §17.8),与界面语言相互独立 —— 中文界面里用英文提需求,拿回的是英文应用。
-- **覆盖面**:除 `/admin` 六个页面(刻意保持中文,面向中文运营)外的**全部用户可见文案**都已进词典 —— 首页 / 登录 / 项目列表 / 工作台(对话栏、预览区、连接器面板与对话内凭证卡片、数据面板、代码视图)/ 计费页 / 顶栏 / 主题与环境角标。判断标准是「渲染给用户的字」;代码注释、`console`、SQL 里的列名不进词典。
-- **带行内格式的词条**(`**加粗**`、`` `代码` ``)用 `web/src/components/RichText.tsx` 渲染 —— 它只处理这两种标记、不递归,把标记解析成 React 元素而**不是** `dangerouslySetInnerHTML`。纯文本词条直接 `t()` 就行,不必套这层;漏写标记只会丢样式、不会丢内容。列表连接符同理走词条(`chat.listSep`,中文「、」/ 英文「, 」),不要写死分隔符。
+- **Frontend**: a homegrown minimal i18n (`web/src/lib/i18n/`), **no third-party library**. Two isomorphic dictionaries `dict.zh.ts` / `dict.en.ts`; **key names are the sole contract** — adding a language = adding one `Record<DictKey, string>` dictionary + one line each in `DICTS` / `LANG_OPTIONS`, **without changing a single component**; `en` is constrained by `Record<DictKey, string>`, so one missed key is a compile error. The default language follows the browser (Chinese→Chinese, everything else English); `localStorage['forge-lang']` remembers the choice. `LangToggle` is a single-key toggle (showing the other language's abbreviation).
+- **Server side**: the Worker **returns Chinese originals only** (its users are the Chinese ops/dev scenario); the frontend maps the Chinese copy to dictionary keys in `web/src/lib/i18n/serverMessages.ts`; when a mapping misses, **the Chinese is shown verbatim** — better to expose Chinese than swallow the real reason. The reason it isn't "the server directly returns a code" is that this would require changing 50+ return sites, and the only payoff is dropping one mapping table; new endpoints that want to be cleaner can just include `code` in the response.
+- **The Worker has its own separate** `src/lib/i18n.ts`: it serves only **copy written directly into D1** (the attachments' 📎 list marker, commit's assistant message). It does **not share a module** with the frontend's — the two are independent build products (what they share is `web/dist`, not source).
+- Environment differences may only come from runtime configuration (see §2 and AGENTS.md); **build-time variables are forbidden**, so language can only be chosen at runtime, not packaged per environment.
+- **Artifact language is a different matter**: everything above concerns the language of the **platform UI**; **what language the generated app uses** is decided by the request body (see §17.8), independent of the UI language — request in English from a Chinese UI and you get an English app.
+- **Coverage**: all **user-visible copy** outside the six `/admin` pages (deliberately kept Chinese, for Chinese-speaking ops) is in the dictionaries — landing / login / project list / workspace (chat pane, preview area, connectors panel and in-chat credential card, data panel, code view) / billing page / top bar / theme and environment badges. The criterion is "characters rendered to the user"; code comments, `console`, and SQL column names don't enter the dictionaries.
+- **Entries with inline formatting** (`**bold**`, `` `code` ``) render via `web/src/components/RichText.tsx` — it handles only these two markers, doesn't recurse, and parses the markers into React elements **rather than** `dangerouslySetInnerHTML`. Plain-text entries can call `t()` directly without this layer; a missed marker only loses styling, not content. List separators likewise go through a dictionary entry (`chat.listSep`, Chinese "、" / English ", "), not a hardcoded separator.
 
-### 20.6 界面与接口(阶段四:Creem 已接通)
+### 20.6 UI and Endpoints (Phase 4: Creem connected)
 
-| 接口 | 鉴权 | 说明 |
+| Endpoint | Auth | Notes |
 | --- | --- | --- |
-| `GET /api/billing/plans` | 公开 | 价目表(货币、单位价、充值包、订阅档)+ `checkoutReady`(支付通道是否已配置) |
-| `GET /api/billing/summary` | 需登录 | 本人余额 + 最近账本流水 + 订单记录 |
-| `POST /api/billing/checkout` | 需登录 | 发起结账:校验商品 → 调 Creem 建结账会话 → 返回 `{ url }`,前端跳转 |
-| `POST /api/billing/webhook` | **公开**(签名校验) | Creem 回调:落 `orders` + `credit_ledger`(`purchase`)并加积分 |
+| `GET /api/billing/plans` | Public | Price table (currency, unit price, top-up packs, subscription tiers) + `checkoutReady` (whether the payment channel is configured) |
+| `GET /api/billing/summary` | Login required | Own balance + recent ledger entries + order history |
+| `POST /api/billing/checkout` | Login required | Start checkout: validate the product → call Creem to create a checkout session → return `{ url }` for the frontend to redirect |
+| `POST /api/billing/webhook` | **Public** (signature-verified) | Creem callback: lands `orders` + `credit_ledger` (`purchase`) and grants credits |
 
-- **价格的唯一来源是 `src/lib/plans.ts`**(结构化数字,不含任何自然语言);前端从 `/api/billing/plans` 拉,**不复制一份**。文案(档位卖点)在前端 i18n 里按 id 组装,加语言不必动服务端。
-#### 定价(2026-10-20 定稿,`src/lib/plans.ts` 是唯一来源)
+- **The single source of pricing is `src/lib/plans.ts`** (structured numbers, no natural language); the frontend pulls from `/api/billing/plans` and **does not keep a copy**. Copy (tier selling points) is assembled by id in the frontend i18n; adding a language doesn't touch the server.
 
-**1 积分 = 1 次生成/修改**(`JOB_COST` 全为 1),所以每个档位的积分数就是「能做多少次」。
+#### Pricing (finalized 2026-10-20; `src/lib/plans.ts` is the only source)
 
-| 档位 | 价格 | 积分(= 生成次数) | 单价 |
+**1 credit = 1 generation/edit** (`JOB_COST` all 1), so each tier's credit count is "how many runs you get".
+
+| Tier | Price | Credits (= generations) | Unit price |
 | --- | --- | --- | --- |
-| pack_20 | $9 | 20 | $0.450 / 次 |
-| pack_60 | $25 | 60 | $0.417 / 次 |
-| pack_200 | $79 | 200 | $0.395 / 次 |
-| Plus(月) | $19 | 50 / 月 | $0.380 / 次 |
-| Pro(月) | $49 | 150 / 月 | $0.327 / 次 |
+| pack_20 | $9 | 20 | $0.450 / run |
+| pack_60 | $25 | 60 | $0.417 / run |
+| pack_200 | $79 | 200 | $0.395 / run |
+| Plus (monthly) | $19 | 50 / month | $0.380 / run |
+| Pro (monthly) | $49 | 150 / month | $0.327 / run |
 
-定价依据:单次生成的边际成本 ≈ **$0.06~0.15**(LLM token 按 `src/lib/pricing.ts` 的 DeepSeek 低谷档 + Cloud Run 实例时间),另加 MoR 手续费(Creem 3.9% + $0.40/笔)。**早期按 $0.09/次(100 积分 $9)定过价,那个档位是纯亏的** —— 一次生成的成本就能把整包利润吃光,所以把「每个包给多少积分」下调到与成本匹配,标价不变(用户看到的是「1 积分 = 1 次生成」,心智模型不变)。
+Pricing rationale: the marginal cost of one generation ≈ **$0.06–0.15** (LLM tokens at `src/lib/pricing.ts`'s DeepSeek off-peak tier + Cloud Run instance time), plus MoR fees (Creem 3.9% + $0.40/transaction). **The early price of $0.09/run (100 credits for $9) was pure loss** — the cost of a single generation ate the whole pack's profit, so "how many credits per pack" was lowered to match cost while the sticker price stayed (users see "1 credit = 1 generation"; the mental model is unchanged).
 
-- 真实成本以 `job_usage.cost_usd` 的实测分位数校准(字段已就绪,待计量上线后回填)。
-- 注册赠送是**薅羊毛闸门**:`SIGNUP_CREDITS = 5` ≈ $0.3~0.75/假号(旧值 20 是 $1.2~3.0)。
-- **发多少积分一律以本地目录为准**:webhook 只信本地目录,不信上游传的数字;上游金额与本地不一致时只打一条 warn 日志。
-- 改价时**两边都要改**:`src/lib/plans.ts`(权威)+ Creem 后台商品(金额/描述要跟着改或重建商品),否则 webhook 对账口径会漂。
-- 前端页面 `web/src/pages/Billing.tsx`(`/billing`,顶栏积分胶囊是入口):余额卡 + 充值包 + 订阅 + 积分明细 / 订单表;`checkoutReady === false` 时禁用结账按钮并显示说明条(判断来自服务端配置);另有**收款主体披露**——MoR 下用户账单显示的是 Creem 而不是本站,不提前说清楚会增加无理由拒付。
-- 支付完成后 Creem 把用户带回 `/billing?checkout=success`,本页提示「积分通常几秒内到账」并重新拉一次余额(积分由 webhook 落账,与前端跳转是两条独立路径)。
-- **公开价格与法务页面(Creem 账户复审要求)**:`/pricing`、`/privacy`、`/terms`、`/acceptable-use` 都是**无需登录**的公开路由(SPA 兜底直接命中);首页 `Landing` 也直接展示充值包/订阅价格,审核员不注册账号即可看到。`PublicFooter` 同时出现在首页与注册页,链接三份文档并展示支持邮箱。支持邮箱唯一来源是 `web/src/lib/site.ts` 的 `SUPPORT_EMAIL`,**必须与 Creem 店铺 business details 里填写的邮箱完全一致**;AUP 中保留「色情/成人/NSFW 内容明确禁止」条款。
-- **运营主体披露(Creem 复审 2026-10-20)**:页脚与三份法务页必须明确写出运营主体,并与 Creem Business Details 完全一致——当前为 `Yunus Su`(业务名称 `1forgen`,Hong Kong SAR)。唯一来源是 `web/src/lib/site.ts` 的 `LEGAL_ENTITY` / `BUSINESS_NAME` / `OPERATOR_COUNTRY`。Creem 曾以「网站运营方与 onboarding 法定主体不一致」打回。
+- Real costs should be calibrated against measured percentiles of `job_usage.cost_usd` (the field is ready, to be backfilled once metering is live).
+- The signup grant is the **freebie-abuse gate**: `SIGNUP_CREDITS = 5` ≈ $0.3–0.75 per fake account (the old value of 20 was $1.2–3.0).
+- **How many credits to grant is always decided by the local catalog**: the webhook trusts only the local catalog, not numbers sent by the upstream; if upstream amounts disagree with local, one warn log is all that happens.
+- When changing prices, **change both sides**: `src/lib/plans.ts` (authoritative) + the Creem console products (amounts/descriptions must be updated or the products rebuilt), otherwise webhook reconciliation drifts.
+- Frontend page `web/src/pages/Billing.tsx` (`/billing`; the top-bar credit pill is the entry): balance card + top-up packs + subscriptions + credit history / order table; when `checkoutReady === false` the checkout button is disabled and an explanation banner shows (the judgment comes from server config); there is also a **merchant-of-record disclosure** — under MoR the user's statement shows Creem, not this site; not saying so up front increases chargebacks.
+- After payment, Creem brings the user back to `/billing?checkout=success`; the page says "credits usually arrive within seconds" and re-fetches the balance once (credits are landed by the webhook; the frontend redirect is a separate path).
+- **Public pricing and legal pages (Creem account review requirements)**: `/pricing`, `/privacy`, `/terms`, `/acceptable-use` are all **login-free** public routes (hit directly by the SPA fallback); the `Landing` homepage also shows top-up/subscription prices directly, so reviewers can see them without registering. `PublicFooter` appears on both the homepage and the signup page, links the three documents, and shows the support email. The support email's only source is `SUPPORT_EMAIL` in `web/src/lib/site.ts`, which **must match exactly the email entered in the Creem store's business details**; the AUP retains an explicit ban on pornographic/adult/NSFW content.
+- **Operating-entity disclosure (Creem review 2026-10-20)**: the footer and the three legal pages must clearly name the operating entity, matching Creem Business Details exactly — currently `Yunus Su` (business name `1forgen`, Hong Kong SAR). The only sources are `LEGAL_ENTITY` / `BUSINESS_NAME` / `OPERATOR_COUNTRY` in `web/src/lib/site.ts`. Creem previously rejected onboarding for "the site operator not matching the legal entity in onboarding".
 
-### 20.7 Creem 接入(阶段四)
+### 20.7 Creem Integration (Phase 4)
 
-**结账**:`POST {CREEM_API_BASE}/v1/checkouts`,`x-api-key: CREEM_API_KEY`,body = `{ product_id, request_id, success_url, customer: { email } }`;响应 `checkout_url` 即跳转地址(`src/lib/creem.ts` 的 `creemCreateCheckout`)。
+**Checkout**: `POST {CREEM_API_BASE}/v1/checkouts`, `x-api-key: CREEM_API_KEY`, body = `{ product_id, request_id, success_url, customer: { email } }`; the response's `checkout_url` is the redirect target (`creemCreateCheckout` in `src/lib/creem.ts`).
 
-**幂等**:唯一屏障是 `orders` 的唯一索引 `idx_orders_provider_ref(provider, provider_ref)`。`settlePayment` 先 `INSERT ... ON CONFLICT DO NOTHING` 落单,**插入成功才加积分**;重放(支付平台重发是常态)直接返回、不重复加分。刻意**不用事件 id** 做幂等 —— Creem 的自动重试与人工重发语义不同,订单/交易 id 才是钱的标识。
+**Idempotency**: the sole barrier is `orders`' unique index `idx_orders_provider_ref(provider, provider_ref)`. `settlePayment` first does `INSERT ... ON CONFLICT DO NOTHING` to land the order, and **grants credits only if the insert succeeded**; a replay (payment platforms re-sending is normal) returns directly without granting again. Event ids are deliberately **not** used for idempotency — Creem's automatic retries and manual re-sends differ semantically; the order/transaction id is the identifier of the money.
 
-**事件处理**(`handleCreemEvent`,见 `src/lib/creem.ts` 文件头):
+**Event handling** (`handleCreemEvent`, see the header of `src/lib/creem.ts`):
 
-| 事件 | 处理 |
+| Event | Handling |
 | --- | --- |
-| `checkout.completed` | **只处理一次性商品**(`product.billing_type === 'onetime'`)→ 按 Creem 订单 id 落单 + 发积分 |
-| `subscription.paid` | 订阅**每次成功扣款**(首期 + 续费)都发积分,按交易 id(`tran_...`)落单;只信这一条,避免首期被发两次 |
-| `subscription.active` / `canceled` / `scheduled_cancel` / `past_due` / `unpaid` / `expired` / `paused` / `update` / `trialing` | 只更新 `subscriptions` 状态,**不发积分、不回收已发积分** |
-| `refund.created` | 订单置 `refunded`;余额够则追回该单发的积分(记 `refund` 流水),不够就只记订单、不把余额打成负数 |
-| 其它 | 直接 200 忽略 |
+| `checkout.completed` | **Handles one-time products only** (`product.billing_type === 'onetime'`) → land the order by Creem order id + grant credits |
+| `subscription.paid` | Grants credits on **every successful subscription charge** (first period + renewals), landing orders by transaction id (`tran_...`); only this one is trusted, avoiding double-granting the first period |
+| `subscription.active` / `canceled` / `scheduled_cancel` / `past_due` / `unpaid` / `expired` / `paused` / `update` / `trialing` | Only updates the `subscriptions` status; **grants no credits and doesn't revoke granted credits** |
+| `refund.created` | Order set to `refunded`; if the balance suffices, claw back that order's granted credits (a `refund` ledger row); if not, only record the order — never drive the balance negative |
+| Others | Ignored with a direct 200 |
 
-- **为什么订阅首期只认 `subscription.paid`**:首期会同时收到 `checkout.completed`(recurring)、`subscription.active` 与 `subscription.paid` 三条,且它们的对象 id 不同;若都发积分,同一笔钱会发三次。Creem 官方亦建议用 `subscription.paid` 激活权益。
-- **归因**:优先用创建结账时写入的 `metadata.forgeUserId`,兜底按买家邮箱匹配本地账号(用户在 Creem 门店页直接下单时只有邮箱可用)。
-- **签名**:`creem-signature` 头 = `HMAC-SHA256(原始请求体, CREEM_WEBHOOK_SECRET)` 的 hex。必须用**未解析的原始 body** 计算(解析后重新序列化会因空格/键序变化而校验失败),比较用定长比较。校验失败返回 401。处理抛错返回 500 → Creem 按退避重试(5 次:立即 / 30s / 5min / 30min / 6h,24h 内)。
-- **不落 pending 订单**:Creem 结账会话会过期,预落 pending 行只会在用户放弃支付后留下永远不结的脏数据;订单一律在 webhook 结算时落。
+- **Why the subscription first period trusts only `subscription.paid`**: the first period arrives as three events — `checkout.completed` (recurring), `subscription.active`, and `subscription.paid` — with different object ids; granting on all three would grant the same money three times. Creem officially also recommends `subscription.paid` for activating entitlements.
+- **Attribution**: prefer `metadata.forgeUserId` written at checkout creation; fall back to matching a local account by buyer email (when a user checks out directly on the Creem store page, only the email is available).
+- **Signature**: the `creem-signature` header = hex of `HMAC-SHA256(raw request body, CREEM_WEBHOOK_SECRET)`. It must be computed over the **unparsed raw body** (re-serializing after parsing fails verification due to spacing/key order), compared with a fixed-length comparison. Verification failure returns 401. Handler exceptions return 500 → Creem retries with backoff (5 times: immediately / 30s / 5min / 30min / 6h, within 24h).
+- **No pending orders**: Creem checkout sessions expire; pre-creating pending rows only leaves dirty data that never settles after the user abandons payment. Orders are always landed when the webhook settles.
 
-**配置(环境差异全部走运行时,见 §2 / AGENTS.md)**:
+**Configuration (all environment differences at runtime; see §2 / AGENTS.md)**:
 
-| 名称 | 形式 | 生产 | staging |
+| Name | Form | Production | staging |
 | --- | --- | --- | --- |
-| `CREEM_API_KEY` | Worker secret | live key | test(sandbox)key |
+| `CREEM_API_KEY` | Worker secret | live key | test (sandbox) key |
 | `CREEM_WEBHOOK_SECRET` | Worker secret | live webhook secret | test webhook secret |
 | `CREEM_API_BASE` | `vars` | `https://api.creem.io` | `https://test-api.creem.io` |
-| `CREEM_PRODUCTS` | `vars`(JSON) | 本地目录 id → live 商品 id | → test 商品 id |
+| `CREEM_PRODUCTS` | `vars` (JSON) | local catalog id → live product id | → test product id |
 
-- **webhook 端点**登记地址:`生产 https://app.1forgen.site/api/billing/webhook`、`staging https://app-staging.1forgen.site/api/billing/webhook`。
-- **staging 已配齐(2026-10-20)**:5 个 test 商品 + webhook 端点用 Creem CLI(`brew install creem` → `creem login --api-key creem_test_...`)建好,商品 id 已写进 `wrangler.jsonc` 的 `env.staging.vars.CREEM_PRODUCTS`;两个 secret 已 `wrangler secret put --env staging`。批量建商品的脚本是 `scripts/creem-seed-products.mjs`(幂等,带 `Idempotency-Key`;`npm run creem:seed:test` / `creem:seed:live`),live 上线时换 live key 重跑一遍即可。
-- **生产已配齐(2026-10-20)**:live 门店的 5 个商品已用同一脚本以 live key 创建,id 写进顶层 `vars.CREEM_PRODUCTS`;`CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET` 已写入生产 secrets;live webhook 端点 `wh_5AH5qwIzrTjr9Qu3Q17llC`(`https://app.1forgen.site/api/billing/webhook`,订阅全部事件)已登记。KYC 与提现账户由账户持有人在 Creem 后台完成。
-- 密钥**只写不可读**(换环境只能由持有原值的人重新输入,见 AGENTS.md §1)。
-- `CREEM_PRODUCTS` 留空 = 结账返回「商品未配置」、前端显示「支付通道未开通」;建好商品后填真值,无需重新部署代码(改了 vars 要重新 `deploy`/`deploy:staging`)。
-- **Cloudflare 侧注意**:机器人防护可能拦截 webhook(自动化的服务器间请求)。别用来源 IP 白名单鉴权(Creem 不提供固定出网 IP);若开了 Bot Fight Mode 需为该路由加例外(`docs.creem.io/code/webhooks` 有说明)。
+- **Webhook endpoint** registered addresses: production `https://app.1forgen.site/api/billing/webhook`, staging `https://app-staging.1forgen.site/api/billing/webhook`.
+- **Staging fully configured (2026-10-20)**: the 5 test products + webhook endpoint were created with the Creem CLI (`brew install creem` → `creem login --api-key creem_test_...`), product ids written into `env.staging.vars.CREEM_PRODUCTS` in `wrangler.jsonc`; both secrets written with `wrangler secret put --env staging`. The batch product-seeding script is `scripts/creem-seed-products.mjs` (idempotent, with `Idempotency-Key`; `npm run creem:seed:test` / `creem:seed:live`); at live launch, re-run it with the live key.
+- **Production fully configured (2026-10-20)**: the live store's 5 products were created with the same script using the live key, ids written into the top-level `vars.CREEM_PRODUCTS`; `CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET` written to production secrets; the live webhook endpoint `wh_5AH5qwIzrTjr9Qu3Q17llC` (`https://app.1forgen.site/api/billing/webhook`, all events) registered. KYC and the payout account are completed by the account holder in the Creem console.
+- Secrets are **write-only** (switching environments requires whoever holds the original value to re-enter it, see AGENTS.md §1).
+- `CREEM_PRODUCTS` empty = checkout returns "product not configured" and the frontend shows "payment channel unavailable"; once products are created, fill in the real values — no code redeploy needed (changing vars does require re-running `deploy`/`deploy:staging`).
+- **Cloudflare-side note**: bot protection may intercept the webhook (automated server-to-server requests). Don't use source-IP allowlists for auth (Creem provides no fixed egress IPs); if Bot Fight Mode is on, an exception is needed for that route (`docs.creem.io/code/webhooks` documents this).
 
-### 20.8 阶段规划(后续)
+### 20.8 Phase Planning (later)
 
-- 待定稿:订阅到期与降级策略(当前取消不回收已发积分)、退款政策细节。
-- 用户需自备:Creem 账号与商品创建(平台方注册,与用户无关)、webhook 端点登记、`CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET` 写入。
-- 可选增强:计费页展示订阅状态(数据已在 `subscriptions` 表)、客户自助门户链接(Creem hosted customer portal)、发票下载入口。
+- Pending finalization: subscription expiry and downgrade policy (currently canceling doesn't revoke granted credits), refund policy details.
+- The user must provide: a Creem account and product creation (registered by the platform operator, unrelated to end users), webhook endpoint registration, writing `CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET`.
+- Optional enhancements: show subscription status on the billing page (data already in the `subscriptions` table), a customer self-service portal link (Creem hosted customer portal), an invoice download entry.
 
-## 21. 模型配置与用量观测(2026-10-21)
+## 21. Model Configuration and Usage Observability (2026-10-21)
 
-目标:把「用哪个模型、什么价格、跑多久、开不开复查轮」从**部署命令里的环境变量**变成后台可管理的运行时数据,并让每次任务的真实成本**可按模型/配置归因**。
+Goal: move "which model, at what price, running how long, whether the review round is on" out of **environment variables in the deploy command** and into admin-managed runtime data, and make every job's real cost **attributable by model/config**.
 
-### 21.1 数据模型(`schema.migrate-model-config.sql`)
+### 21.1 Data Model (`schema.migrate-model-config.sql`)
 
-`model_configs` 一行 = 一套可派发的模型配置:
+One `model_configs` row = one dispatchable model configuration:
 
-| 字段 | 说明 |
+| Field | Notes |
 | --- | --- |
-| `name` / `model_id` / `provider_id` | 后台展示名 / 上游模型 id / pi provider id |
-| `base_url` / `api_dialect` | 网关地址与方言(`openai-completions` / `anthropic-messages`) |
-| `api_key_env` | **密钥环境变量名**(执行体上 `--set-secrets` 绑定的变量,如 `LLM_API_KEY_MINIMAX` / `LLM_API_KEY_GLM`);表里只存变量名,不存密钥值 |
-| `thinking_level` / `reasoning` / `image_input` | 思考档位、是否推理模型、是否声明图片输入 |
-| `thinking_format` / `max_tokens` | pi 的 `compat.thinkingFormat`(空 = 按 baseUrl 自动推断)与 `Model.maxTokens`;思考预算从 `max_tokens` 里划,值太小会挤掉输出 |
-| `design_review` / `max_run_ms` / `polish_max_ms` | 复查轮开关与运行预算 |
-| `input_price` / `output_price` / `cache_read_price` / `cache_write_price` | USD / 1M tokens;全 0 时回落到 `src/lib/pricing.ts` 的内置价格 |
-| `channel` / `enabled` | `free` / `vip` / `default`(见 §21.5);每通道最多一条 `enabled = 1`(部分唯一索引) |
+| `name` / `model_id` / `provider_id` | Admin display name / upstream model id / pi provider id |
+| `base_url` / `api_dialect` | Gateway address and dialect (`openai-completions` / `anthropic-messages`) |
+| `api_key_env` | **The secret's environment variable name** (a variable bound on the executor via `--set-secrets`, e.g. `LLM_API_KEY_MINIMAX` / `LLM_API_KEY_GLM`); only the variable name is stored, never the key value |
+| `thinking_level` / `reasoning` / `image_input` | Thinking tier, whether it's a reasoning model, whether image input is declared |
+| `thinking_format` / `max_tokens` | pi's `compat.thinkingFormat` (empty = inferred from baseUrl) and `Model.maxTokens`; the thinking budget is carved out of `max_tokens` — too small a value crowds out output |
+| `design_review` / `max_run_ms` / `polish_max_ms` | Review-round switch and run budget |
+| `input_price` / `output_price` / `cache_read_price` / `cache_write_price` | USD / 1M tokens; when all 0, falls back to the built-in prices in `src/lib/pricing.ts` |
+| `channel` / `enabled` | `free` / `vip` / `default` (see §21.5); at most one `enabled = 1` per channel (partial unique index) |
 
-- **配置可原地编辑**:后台直接改已有行(模型/网关/预算/价格等),保存后对下一个任务生效。`job_usage` 在用量上报时已把成本换算结果落库,所以改价或改预算不会重算历史账;`jobs.model_config_id` 仍保留派发时的配置 id 用于归因。
-- **回落**:表为空、没有启用行、或查询失败(含未执行迁移)→ Worker 不向 agent 下发覆盖,agent 使用 Cloud Run env 默认模型。后台不是生成链路的单点。
-- **密钥边界(2026-10-25 修正)**:表里**只存变量名** `api_key_env`,密钥值仍只在 Cloud Run Secret 里。执行体可同时绑定多把 key(`LLM_API_KEY_MINIMAX` / `LLM_API_KEY_GLM` / `LLM_API_KEY_DEEPSEEK` …),后台按行选择用哪把 —— **切换供应商不再需要重部署**。变量名白名单 `/^LLM_API_KEY(?:_[A-Z0-9]+)*$/`,防止把 `AGENT_SECRET` 等非模型密钥发给上游。
-  - 踩过的坑:旧实现只有 `LLM_API_KEY` 一把 key,后台把 free 切到 GLM 后请求仍带 MiniMax 的 key → bigmodel 401;pi 把 provider 错误降级成「空轮次」,构建在未改动的脚手架上照常通过,任务仍标 `succeeded` 并交付旧模板(用户看到"秒回旧页面")。当天修了三层兜底:
-    1. `runner.ts` 接活前检查 `process.env[apiKeyEnv]` 是否存在,缺失直接失败;
-    2. `message_end` 的 `stopReason === 'error'` 在构建前判失败,不再静默降级;
-    3. 生成前后对比源码树,一个字节都没变 → 判 `error.emptyModelRun`(chat 不受此限)。
-  - bigmodel 的 Anthropic 端点:`https://open.bigmodel.cn/api/anthropic`,方言 `anthropic-messages`,`x-api-key` 认证(与 `/api/paas/v4` 的 OpenAI 兼容端点并存)。
-  - **2026-10-25 第二起线上事故(max_tokens 截断)**:生产免费通道切到 `glm-5.3-flash` + Anthropic 方言后,任务能正常鉴权、也读了脚手架(6~8 轮 tool 调用),但最后一轮思考把 16384 的 `max_tokens` 全部吃掉,`stop_reason=max_tokens`,模型还没调用 `write` 就结束;源码零改动 → 被第 3 层兜底判失败(前端提示「模型没有返回可用内容…」)。
-    - 不是凭证问题:日志里有真实用量(`in≈28k / out≈16.8k / cacheRead≈124k`),401 时用量为 0。
-    - bigmodel 的 Anthropic 端点不按 pi 下发的 `thinking.budget_tokens` 收口,所以单轮思考可能超过 16k;OpenAI 兼容 + `thinkingFormat=zai` 的行由 `reasoning_effort` 约束思考量,16384 足够。
-    - 修复:`schema.migrate-glm-max-tokens.sql` 把 Anthropic 方言的 GLM 行 `max_tokens` 调到 65536(pi 会再按思考预算加总并封顶 32000 → 实际请求 40192;本地同 prompt 实测可完整生成,775s/21 轮/33 次 tool 调用)。
-    - `runner.ts` 现在区分 `stopReason=length`:判 `error.modelTruncated`,明确提示「调大该配置的 max_tokens」,不再与凭证/方言问题混在一起。
-  - **env 与后台的优先级**:任务级 `model_id` / `base_url` / `api_dialect` / `thinking_level` / `reasoning` / `image_input` / `max_tokens` / `max_run_ms` / `polish_max_ms` / `queue_concurrency` 一律以 `model_configs` 下发的覆盖为准,Cloud Run env 只是回落;`api_key_env` 只选变量名,密钥值仍来自 Secret,后台改不了。`--timeout 3600s` 是硬上限,后台 `max_run_ms` 上限 3400s,env `AGENT_MAX_RUN_MS=1500s` 仅在配置行缺失时生效。
-  - 新增供应商 = 建 Secret + 在 `agent:deploy:*` 的 `--set-secrets` 加一行绑定(一次性),之后后台随时切换。
+- **Configs are editable in place**: the admin edits existing rows directly (model/gateway/budget/prices etc.), taking effect for the next job after saving. `job_usage` already lands the cost conversion at usage-report time, so price or budget changes don't recompute history; `jobs.model_config_id` still keeps the config id at dispatch time for attribution.
+- **Fallbacks**: empty table, no enabled row, or a query failure (including un-run migration) → the Worker sends no override to the agent, which uses the Cloud Run env's default model. The admin is not a single point of failure in the generation chain.
+- **Secret boundary (corrected 2026-10-25)**: the table stores **only the variable name** `api_key_env`; the key value still lives only in Cloud Run Secrets. An executor can bind several keys at once (`LLM_API_KEY_MINIMAX` / `LLM_API_KEY_GLM` / `LLM_API_KEY_DEEPSEEK` …), and the admin picks which per row — **switching providers no longer needs a redeploy**. The variable-name whitelist is `/^LLM_API_KEY(?:_[A-Z0-9]+)*$/`, preventing non-model secrets like `AGENT_SECRET` from being sent upstream.
+  - A pitfall we hit: the old implementation had only one key, `LLM_API_KEY`; after the admin switched free to GLM, requests still carried MiniMax's key → bigmodel 401; pi downgraded the provider error into an "empty round", the build passed unchanged on the scaffold, the job was still marked `succeeded` and delivered the old template (users saw "the old page come back instantly"). Three layers of defense were fixed that day:
+    1. `runner.ts` checks that `process.env[apiKeyEnv]` exists before accepting the job, failing directly if missing;
+    2. `message_end`'s `stopReason === 'error'` fails the job before build, no longer silently degrading;
+    3. The source tree is compared before and after generation; if not one byte changed → judged `error.emptyModelRun` (chat is exempt from this).
+  - bigmodel's Anthropic endpoint: `https://open.bigmodel.cn/api/anthropic`, dialect `anthropic-messages`, `x-api-key` auth (alongside the `/api/paas/v4` OpenAI-compatible endpoint).
+  - **The second production incident (2026-10-25, max_tokens truncation)**: after the production free channel switched to `glm-5.3-flash` + the Anthropic dialect, jobs authenticated fine and read the scaffold (6–8 tool calls), but the final thinking round consumed the entire 16384 `max_tokens`, `stop_reason=max_tokens`, and the model ended before ever calling `write`; zero source change → layer 3 judged it failed (frontend shows "模型没有返回可用内容…").
+    - Not a credentials issue: logs show real usage (`in≈28k / out≈16.8k / cacheRead≈124k`); on 401 usage is 0.
+    - bigmodel's Anthropic endpoint doesn't cap thinking by pi's `thinking.budget_tokens`, so a single thinking round can exceed 16k; OpenAI-compatible rows with `thinkingFormat=zai` constrain thinking via `reasoning_effort`, where 16384 is enough.
+    - Fix: `schema.migrate-glm-max-tokens.sql` raised the Anthropic-dialect GLM row's `max_tokens` to 65536 (pi sums in the thinking budget and caps at 32000 → actual request 40192; the same prompt generated completely in local testing, 775s / 21 rounds / 33 tool calls).
+    - `runner.ts` now distinguishes `stopReason=length`: judged `error.modelTruncated` with an explicit hint to "raise this config's max_tokens", no longer conflated with credential/dialect issues.
+  - **Precedence of env vs admin**: job-level `model_id` / `base_url` / `api_dialect` / `thinking_level` / `reasoning` / `image_input` / `max_tokens` / `max_run_ms` / `polish_max_ms` / `queue_concurrency` always follow the `model_configs` override; Cloud Run env is only the fallback; `api_key_env` only selects the variable name — the key value still comes from Secrets and the admin can't touch it. `--timeout 3600s` is the hard ceiling; the admin's `max_run_ms` caps at 3400s; env `AGENT_MAX_RUN_MS=1500s` applies only when the config row is missing.
+  - Adding a provider = create a Secret + add one `--set-secrets` binding line in `agent:deploy:*` (one-time); after that, switch anytime from the admin.
 
-### 21.2 链路
+### 21.2 Chain
 
-1. `launchJob`(`src/routes/generate.ts`)在积分冻结成功后读一次生效配置(`src/lib/modelConfig.ts:getActiveModelConfig`)。
-2. 配置 id 写入 `jobs.model_config_id`;配置内容作为 `model` 字段随 `POST {AGENT_URL}/run` 下发(`src/lib/agent.ts` 的 `AgentModelOverride`)。
-3. agent 侧 `applyModelOverride`(`agent/src/config.ts`)把覆盖合并到 env 默认配置上,非法值回落;`session.ts` 用它生成 `models.json`(含 `compat.thinkingFormat` 与 `maxTokens`)、`runner.ts` 用它控制 `maxRunMs` / 复查轮。
-4. 用量回调 `POST /internal/jobs/:id/usage` 按 `jobs.model_config_id` 取当时的价格(`src/routes/internal.ts`),换算后写入 `job_usage`(含 `model_config_id`)。
+1. `launchJob` (`src/routes/generate.ts`) reads the active config once (`src/lib/modelConfig.ts:getActiveModelConfig`) after the credit freeze succeeds.
+2. The config id is written to `jobs.model_config_id`; the config content is dispatched as the `model` field with `POST {AGENT_URL}/run` (`AgentModelOverride` in `src/lib/agent.ts`).
+3. Agent-side `applyModelOverride` (`agent/src/config.ts`) merges the override over the env defaults with fallbacks for invalid values; `session.ts` uses it to generate `models.json` (including `compat.thinkingFormat` and `maxTokens`), and `runner.ts` uses it to control `maxRunMs` / the review round.
+4. The usage callback `POST /internal/jobs/:id/usage` looks up the then-current prices by `jobs.model_config_id` (`src/routes/internal.ts`), converts, and writes `job_usage` (including `model_config_id`).
 
-### 21.3 后台
+### 21.3 Admin Console
 
-- 页面 `/admin/models`(中文,刻意不接 i18n):近 7 天任务/成功率/总成本/单次成功成本/无用量记录;当前生效配置;全部配置列表(含未计价标记);新增/编辑表单;按模型用量。
-- 接口:`GET /api/admin/models`、`POST /api/admin/models`、`PUT /api/admin/models/:id`(原地编辑)、`POST /api/admin/models/:id/enable`、`POST /api/admin/models/:id/disable`,全部 `requireAdmin`。
-- **单次成功成本** = 区间总成本 / 成功任务数。失败任务也烧 token 与实例时间(用户不付钱,平台付),必须摊进去;`jobs_without_usage` 单独计数,避免「报表正常但有一批任务没上报」。
-- 未计价:配置四项价格全 0 且模型不在内置价格表 → 后台标「未计价」,成本按 0 记(宁可少算也不编数)。
+- Page `/admin/models` (Chinese, deliberately not i18n'd): last 7 days' jobs / success rate / total cost / cost per successful job / jobs without usage records; the currently active config; the full config list (with unpriced markers); add/edit forms; per-model usage.
+- Endpoints: `GET /api/admin/models`, `POST /api/admin/models`, `PUT /api/admin/models/:id` (in-place edit), `POST /api/admin/models/:id/enable`, `POST /api/admin/models/:id/disable`, all `requireAdmin`.
+- **Cost per successful job** = total cost in the window / successful job count. Failed jobs also burn tokens and instance time (the user doesn't pay; the platform does), so they must be amortized in; `jobs_without_usage` is counted separately, avoiding "reports look fine but a batch of jobs never reported".
+- Unpriced: all four price fields 0 and the model absent from the built-in price table → the admin marks it "unpriced", costs recorded as 0 (better to under-count than invent numbers).
 
-### 21.4 上线步骤
+### 21.4 Rollout Steps
 
 ```bash
 npm run db:migrate:model:staging      # v1:model_configs + usage 快照列
@@ -983,77 +981,81 @@ npm run deploy:staging
 #       看 job_usage.model_config_id / jobs.channel 是否按通道归因
 ```
 
-生产:`npm run db:migrate:model:remote` → `model2` → `channel` → `db:seed:channels:remote`
-→ 合并到 `main` → `npm run deploy`(生产部署需用户明确放行)。
+Production: `npm run db:migrate:model:remote` → `model2` → `channel` → `db:seed:channels:remote`
+→ merge to `main` → `npm run deploy` (production deployment requires the user's explicit go-ahead).
 
-### 21.5 通道分流:免费积分排队 / 充值积分 VIP(2026-10-21)
+### 21.5 Channel Split: Free Credits Queue / Paid Credits VIP (2026-10-21)
 
-目标:**免费用便宜模型 + 任务并发上限控成本,付过费的用户走原模型、不排队。**
-判定口径是「用户有没有过任意一条 `orders.status = 'paid'`」(一次性充值或订阅扣款都算),
-不追溯积分批次 —— 积分本身可互换,账本没有「哪一分是充值来的」。
+Goal: **free users get the cheap model with a job-concurrency cap to control cost; paying users keep the original model and don't queue.**
+The criterion is "does the user have any `orders.status = 'paid'`" (one-time top-ups and subscription charges both count);
+credit batches are not traced — credits are fungible, and the ledger has no notion of "which cent came from a top-up".
 
-| | 免费通道(`free`) | VIP 通道(`vip`) |
+| | Free channel (`free`) | VIP channel (`vip`) |
 | --- | --- | --- |
-| 判定 | 没有 paid 订单 | 有过任意一条 paid 订单 |
-| 模型 | MiniMax-M3.1-Flash(`anthropic-messages`) | DeepSeek V4.1-Flash(`anthropic-messages`) |
-| 执行体 | 独立 Cloud Run:`forge-agent-free` / `-staging` | 原 `forge-agent` / `-staging` |
-| 并发 | 资源并发:Cloud Run `--concurrency 8 --no-cpu-throttling --max-instances 1`;任务并发:`model_configs.queue_concurrency`(默认 2,后台可改) | 保持原配置(不排队) |
-| 超时 | Cloud Run `--timeout 3600`;Worker 总龄阈值 3700s | Cloud Run `--timeout 3600`;Worker 总龄阈值 3700s |
+| Criterion | No paid order | Has at least one paid order |
+| Model | MiniMax-M3.1-Flash (`anthropic-messages`) | DeepSeek V4.1-Flash (`anthropic-messages`) |
+| Executor | Separate Cloud Run: `forge-agent-free` / `-staging` | The original `forge-agent` / `-staging` |
+| Concurrency | Resource concurrency: Cloud Run `--concurrency 8 --no-cpu-throttling --max-instances 1`; job concurrency: `model_configs.queue_concurrency` (default 2, admin-editable) | Keeps the original config (no queue) |
+| Timeout | Cloud Run `--timeout 3600`; Worker total-age threshold 3700s | Cloud Run `--timeout 3600`; Worker total-age threshold 3700s |
 
-链路:
+Flow:
 
-1. `launchJob`(`src/routes/generate.ts`)派发前算通道并写 `jobs.channel`;免费任务派发到
-   `AGENT_URL_FREE`(`src/lib/agent.ts:dispatchAgent`),VIP 仍走 `AGENT_URL`。
-2. Worker 按通道取 `model_configs` 生效行(`getModelConfigForUser`),随请求下发模型覆盖与
-   `queueConcurrency`(仅 free 通道)。
-3. 免费执行体用请求里的 `queueConcurrency` 设置 `agent/src/index.ts` 的 `FifoQueue`;缺省回落
-   Cloud Run env 的 `AGENT_QUEUE_CONCURRENCY`。它限制的是**同时跑几个 job**,与 Cloud Run 的
-   `--concurrency`(单实例能接多少请求,资源侧扩缩容)是两回事。排队在心跳与取消巡检启动之后 ——
-   等待期间照常写 `updated_at`,不会被 180s 心跳阈值误判失联;用户在排队中取消会立即返回 409。
-   排队期间用 `progress` 回调持续上报「排队中,前面还有 N 个任务」(位置变化才重发,排到后
-   runner 的第一条阶段文案立即覆盖),前端生成面板直接展示 `job.progress`,免费用户能感知到自己在排队;
-   VIP 通道 `queueConcurrency = 0`,不会产生任何排队文案。
-   **后台改并发后,下一次派发就生效,不需要重新部署**(值随每次请求下发,调大时立即放行等待者)。
-   `--concurrency 8` 只是给「正在跑 + 排队」留出 8 个在途请求的位置;超过 8 个的突发会在平台层被拒,
-   任务由巡检判失败(要更深的队列应改成 Worker 侧排队)。
-   **并发任务的会话目录必须按 job 隔离**:`createForgeSession` 的 `agentDir` 放在各自 workspace 的
-   `.pi/` 下。曾经共用 `${WORKSPACE_ROOT}/.pi/models.json`,两个任务同时写/读会拿到半截 JSON
-   (`Unexpected end of JSON input`),线上在并发第 2 个任务上踩过;`.pi` 已在源码收集的跳过列表里。
-4. `jobs.channel` 同时用于巡检:免费任务的总龄阈值放宽到 3700s(排队 + 3600s 执行)。
-   迁移未执行(列不存在)时巡检自动退回旧的单阈值查询,不影响生成。
+1. `launchJob` (`src/routes/generate.ts`) computes the channel before dispatch and writes `jobs.channel`; free jobs are dispatched to
+   `AGENT_URL_FREE` (`src/lib/agent.ts:dispatchAgent`), while VIP still goes through `AGENT_URL`.
+2. The Worker fetches the effective `model_configs` row for the channel (`getModelConfigForUser`) and sends the model overrides and
+   `queueConcurrency` (free channel only) with the request.
+3. The free executor uses the request's `queueConcurrency` to set the `FifoQueue` in `agent/src/index.ts`; if absent it falls back to
+   the Cloud Run env `AGENT_QUEUE_CONCURRENCY`. It caps **how many jobs run at the same time**, which is a different thing from Cloud Run's
+   `--concurrency` (how many requests a single instance can accept — resource-side scaling). Queuing starts after the heartbeat and the
+   cancellation patrol are up — while waiting, `updated_at` keeps being written as usual, so the 180s heartbeat threshold won't misjudge
+   the job as lost; a user cancelling while queued gets an immediate 409. During queuing, the `progress` callback keeps reporting
+   「排队中,前面还有 N 个任务」 (re-sent only when the position changes; once dequeued, the runner's first phase message overwrites it
+   immediately), the frontend generation panel shows `job.progress` directly, so free users can perceive that they are queued; on the
+   VIP channel `queueConcurrency = 0`, so no queue messages are ever produced.
+   **After the admin changes concurrency, it takes effect on the next dispatch — no redeploy needed** (the value rides on every request;
+   when raised, waiters are admitted immediately).
+   `--concurrency 8` only reserves 8 in-flight request slots for "running + queued"; bursts beyond 8 are rejected at the platform layer
+   and the job is marked failed by the patrol (for a deeper queue, move queuing to the Worker side).
+   **Concurrent jobs' session directories must be isolated per job**: `createForgeSession`'s `agentDir` lives under each workspace's own
+   `.pi/`. Sharing `${WORKSPACE_ROOT}/.pi/models.json` once caused two jobs writing/reading at the same time to get a truncated JSON
+   (`Unexpected end of JSON input`) — this bit us in production on the second concurrent job; `.pi` is already in the source-collection skip list.
+4. `jobs.channel` also feeds the patrol: the free channel's total-age threshold is relaxed to 3700s (queuing + 3600s execution).
+   If the migration hasn't run (column missing), the patrol automatically falls back to the old single-threshold query, generation unaffected.
 
-配置方法:`/admin/models` 新增配置时选通道;free 通道还要填「任务并发」(`queue_concurrency`,0 = 不限),
-每通道最多一条生效行,互不覆盖。已生效的 free 配置在卡片里可以直接改任务并发(运维旋钮,不影响历史成本),
-改完下一次派发生效。
-`db:seed:channels:*` 的两条默认配置是幂等种子(固定 id + `INSERT OR IGNORE`)。
-免费通道默认 `thinking_level = low`(2026-10-22 从 medium 下调,压规划阶段的时延与成本);
-改档位同样走「新增一行并启用」,历史 `job_usage.model_config_id` 仍指向旧行,成本可复现。
-2026-10-23 免费通道从 GLM-5.3-Flash 切到 **MiniMax-M3.1-Flash**(`anthropic-messages`,
-`https://api.minimaxi.com/anthropic`):执行体改绑 Secret `llm-api-key-minimax`
-(staging 为 `llm-api-key-minimax-staging`),库侧跑 `db:migrate:free-minimax:*` 新增生效行并停用旧 GLM 行。
-MiniMax 的 Anthropic 端点实测支持流式、tool_use、thinking(`budget_tokens`)与 image 块;
-图片输入由后台行 `image_input` 决定(2026-10-25 起生产 GLM / DeepSeek 行也已开启并实测)。
-**密钥边界**:执行体一次绑定多把 key,后台用 `api_key_env` 选变量名即可切换已绑定的供应商;
-只有**从未绑定过的新供应商**才需要「建 secret + 补一行 `--set-secrets` + 重新部署执行体」,
-生产上线前要先建好 secret 并部署 `npm run agent:deploy:free:prod`。
+Configuration: when adding a config in `/admin/models`, pick the channel; the free channel also requires filling in the 「任务并发」
+(`queue_concurrency`, 0 = unlimited) field. Each channel has at most one effective row, and they don't override each other. An
+already-effective free config's task concurrency can be edited directly on its card (an ops knob that doesn't affect historical cost);
+the change takes effect on the next dispatch.
+The two default configs from `db:seed:channels:*` are idempotent seeds (fixed ids + `INSERT OR IGNORE`).
+The free channel defaults to `thinking_level = low` (lowered from medium on 2026-10-22 to squeeze latency and cost out of the planning
+phase); changing the level likewise goes through "add a new row and enable it", and historical `job_usage.model_config_id` still points
+at the old row, so costs stay reproducible.
+On 2026-10-23 the free channel switched from GLM-5.3-Flash to **MiniMax-M3.1-Flash** (`anthropic-messages`,
+`https://api.minimaxi.com/anthropic`): the executor re-binds Secret `llm-api-key-minimax`
+(staging: `llm-api-key-minimax-staging`), and the DB side runs `db:migrate:free-minimax:*` to add the effective row and disable the old GLM row.
+MiniMax's Anthropic endpoint has been tested to support streaming, tool_use, thinking (`budget_tokens`) and image blocks;
+image input is decided by the admin row `image_input` (the production GLM / DeepSeek rows were enabled and verified starting 2026-10-25).
+**Key boundary**: the executor binds multiple keys at once; the admin can switch between already-bound providers just by picking a
+variable name via `api_key_env`; only a **brand-new, never-bound provider** needs "create a secret + add a `--set-secrets` line +
+redeploy the executor" — before going to production, create the secret and run `npm run agent:deploy:free:prod` first.
 
 ---
 
-## 22. 用户大盘:活跃、漏斗、留存与商业化(2026-10-22)
+## 22. User dashboard: activity, funnel, retention and monetization (2026-10-22)
 
-目标:让运营在 `/admin/dashboard` 一次看到「有多少人来、来了做什么、留下来没有、有没有付钱、每次生成赚不赚钱」,
-而不是把 `jobs`、`orders`、`users` 拆成几张表手工对。
+Goal: let operations see in one place at `/admin/dashboard` "how many people came, what they did once here, whether they stayed,
+whether they paid, and whether each generation is profitable", instead of manually joining `jobs`, `orders` and `users` across several tables.
 
-### 22.1 数据模型(`schema.migrate-analytics.sql`)
+### 22.1 Data model (`schema.migrate-analytics.sql`)
 
-| 对象 | 作用 |
+| Object | Purpose |
 | --- | --- |
-| `users.last_active_at` | 最近一次带会话请求 / 登录的时间(UTC)。替代原来用 `MAX(jobs.created_at)` 推活跃 |
-| `projects.published_at` | 首次发布时间(UTC)。`published_version` 只记结果,记不了每日发布与发布耗时 |
-| `user_daily_active(user_id, day, first_seen_at)` | 一天一行、按 UTC+8 切日;DAU/WAU/MAU 与留存的主数据源 |
-| `user_events(id, user_id, name, props, created_at)` | 关键行为流水;`props` 是 JSON,方便扩字段 |
+| `users.last_active_at` | Time (UTC) of the most recent request carrying a session / login. Replaces the old practice of inferring activity from `MAX(jobs.created_at)` |
+| `projects.published_at` | First-publish time (UTC). `published_version` only records the outcome; it can't record daily publish counts or publish latency |
+| `user_daily_active(user_id, day, first_seen_at)` | One row per user per day, day boundary at UTC+8; the primary data source for DAU/WAU/MAU and retention |
+| `user_events(id, user_id, name, props, created_at)` | Stream of key behaviors; `props` is JSON for easy field extension |
 
-`user_events.name` 目前只记这些高价值动作(不做全量请求日志):
+`user_events.name` currently records only these high-value actions (no full request logging):
 
 ```
 register / register_verified / login
@@ -1061,55 +1063,55 @@ project_create / job_create / job_end / version_create / publish
 checkout_start / order_paid / subscription_change
 ```
 
-### 22.2 埋点链路(`src/lib/events.ts`)
+### 22.2 Instrumentation path (`src/lib/events.ts`)
 
 - `touchActivity(db, userId)`:
-  - 更新 `users.last_active_at`,条件是「从没写过 / 超过 10 分钟 / 已跨 UTC+8 自然日」;
-  - 只有真的更新了才 `INSERT OR IGNORE` 一行 `user_daily_active`。
-- `requireUser`(`src/lib/auth.ts`)在 cookie `forge_act` 不是今天时,异步 `waitUntil(touchActivity)`,
-  并把 cookie 写成今天 —— 正常浏览一天最多只触发一次 D1 写。
-- `/api/auth/me` 同样处理:前端每次进应用都拉它,是最稳定的访问活跃信号。
-- `createSession` 在建会话时直接 `touchActivity` + `logEvent('login')`,覆盖「登录后立刻离开」。
-- 业务事件挂在主流程**之后**且全部 best-effort:埋点表没迁移或写失败只打 `console.warn`,
-  不影响注册、生成、支付。
-- 发布时同时写 `projects.published_at = COALESCE(published_at, now)`(首次发布)并记 `publish` 事件
-  (每次发布都记,用于每日发布数)。
+  - Updates `users.last_active_at` only when "never written / more than 10 minutes stale / crossed a UTC+8 calendar day";
+  - Only if it really updated does it `INSERT OR IGNORE` a `user_daily_active` row.
+- `requireUser` (`src/lib/auth.ts`): when cookie `forge_act` isn't today, asynchronously `waitUntil(touchActivity)`
+  and rewrites the cookie to today — normal browsing triggers at most one D1 write per day.
+- `/api/auth/me` is handled the same way: the frontend fetches it on every entry into the app, making it the most stable visit-activity signal.
+- `createSession` calls `touchActivity` + `logEvent('login')` directly when creating a session, covering "leave right after login".
+- Business events hang off the main flow **afterwards** and are entirely best-effort: if the event tables aren't migrated or the write
+  fails, only `console.warn` is logged — registration, generation and payment are unaffected.
+- On publish, also writes `projects.published_at = COALESCE(published_at, now)` (first publish) and logs a `publish` event
+  (logged on every publish, used for daily publish counts).
 
-### 22.3 口径(看板与 SQL 一致)
+### 22.3 Definitions (dashboard and SQL agree)
 
-| 指标 | 口径 |
+| Metric | Definition |
 | --- | --- |
-| 活跃(DAU/WAU/MAU) | 当天/近 7 天/近 30 天 `user_daily_active ∪ jobs ∪ user_events` 按 `user_id` 去重,所以埋点上线前的历史活跃也能回算 |
-| 生成活跃 | 当天创建过 `jobs` 的去重用户 |
-| 粘性 | DAU ÷ MAU |
-| 激活 | 首个 `status='succeeded'` 的任务 |
-| TTV | 注册 → 首个成功任务;给 P50 / P90 |
-| 付费转化(累计) | 有 `orders.status='paid'` 的用户 ÷ 全部注册用户 |
-| 30 日付费渗透 | 近 30 天付费用户 ÷ MAU |
-| ARPPU / ARPU | 累计已支付金额 ÷ 付费用户 / 近 30 天已支付金额 ÷ MAU |
-| 留存 Dn | 注册周 cohort 中,注册后第 n 天**当天**有活跃行为的比例;未成熟显示 — |
-| 留存活跃 | `user_daily_active ∪ jobs ∪ user_events` 的按天去重,埋点上线前的历史也能用任务行为回算 |
-| 现金口径毛利 | 近 30 天已支付金额 − 近 30 天 `job_usage.cost_usd` |
-| 消耗口径毛利 | 近 30 天消耗积分 × (累计已支付金额 ÷ 累计购买积分) − 成本;避免充值当天全额计收入虚高 |
+| Activity (DAU/WAU/MAU) | Dedup by `user_id` over `user_daily_active ∪ jobs ∪ user_events` for the day / last 7 days / last 30 days, so historical activity from before instrumentation launched can be back-computed |
+| Generation-active | Deduped users who created a `jobs` row that day |
+| Stickiness | DAU ÷ MAU |
+| Activation | First job with `status='succeeded'` |
+| TTV | Registration → first successful job; reported as P50 / P90 |
+| Paid conversion (cumulative) | Users with `orders.status='paid'` ÷ all registered users |
+| 30-day paid penetration | Users who paid in the last 30 days ÷ MAU |
+| ARPPU / ARPU | Cumulative paid amount ÷ paying users / last-30-day paid amount ÷ MAU |
+| Retention Dn | Within each registration-week cohort, the share with activity **on exactly day n** after registration; shown as — until mature |
+| Retention activity | Per-day dedup over `user_daily_active ∪ jobs ∪ user_events`; pre-instrumentation history can be back-computed from job behavior |
+| Gross margin (cash basis) | Last-30-day paid amount − last-30-day `job_usage.cost_usd` |
+| Gross margin (consumption basis) | Last-30-day consumed credits × (cumulative paid amount ÷ cumulative purchased credits) − cost; avoids overstating revenue by booking a top-up in full on the day it arrives |
 
-时区:**所有日界线按 UTC+8(Asia/Shanghai)**。D1 的 `datetime('now')` 是 UTC,SQL 统一用
-`date(col, '+8 hours')`;区间起点用 `datetime(date('now','+8 hours','-N days'), '-8 hours')`
-把本地日零点换算回 UTC,这样还能走 `created_at` 索引。
+Time zone: **all day boundaries are UTC+8 (Asia/Shanghai)**. D1's `datetime('now')` is UTC; the SQL uniformly uses
+`date(col, '+8 hours')`; interval starts use `datetime(date('now','+8 hours','-N days'), '-8 hours')`
+to convert local midnight back to UTC, which also keeps queries on the `created_at` index.
 
-### 22.4 接口与页面
+### 22.4 API and page
 
-- `GET /api/admin/dashboard?days=7|30|90&end=0|1`(`requireAdmin`):一次返回
-  `overview / series / funnel / activation / retention / monetization / quality`;
-  聚合逻辑在 `src/lib/dashboard.ts`。
-  - `end=0` 统计**今天**,`end=1` 统计**昨天(T-1)**。日级指标(`new_users_today`、
-    `jobs_today`、`dau`、`dau_jobs`)取该自然日;WAU/MAU 与 7/30 天滚动窗口也都以该日为终点,
-    不会把今天的数据混进昨天的窗口。
-- 页面 `/admin/dashboard`(`web/src/pages/AdminDashboard.tsx`),中文,顶部有
-  「今日 / 昨日 T-1」统计日切换 + 7/30/90 天趋势窗口切换:
-  概览卡、四条趋势线、激活漏斗、留存热力图、商业化、质量与成本、口径说明。
-- 后台导航 `AdminBar` 新增「大盘」;原「产物 / 用户 / 模型」保留。
+- `GET /api/admin/dashboard?days=7|30|90&end=0|1` (`requireAdmin`): returns
+  `overview / series / funnel / activation / retention / monetization / quality` in one call;
+  aggregation logic lives in `src/lib/dashboard.ts`.
+  - `end=0` counts **today**, `end=1` counts **yesterday (T-1)**. Daily metrics (`new_users_today`,
+    `jobs_today`, `dau`, `dau_jobs`) take that calendar day; WAU/MAU and the 7/30-day rolling windows also end on that day,
+    so today's data never leaks into yesterday's window.
+- Page `/admin/dashboard` (`web/src/pages/AdminDashboard.tsx`), in Chinese, with the
+  「今日 / 昨日 T-1」 stats-day toggle and 7/30/90-day trend-window switch on top:
+  overview cards, four trend lines, activation funnel, retention heatmap, monetization, quality & cost, definitions.
+- The admin nav `AdminBar` adds 「大盘」; the original 「产物 / 用户 / 模型」 entries stay.
 
-### 22.5 上线步骤(顺序不能反)
+### 22.5 Rollout steps (order matters)
 
 ```bash
 # 1) 先迁移(新表/新列);没迁移就发代码,后台用户列表与大盘会 500
@@ -1120,107 +1122,113 @@ npm run typecheck && npm run build && npm run deploy:staging
 npm run db:migrate:analytics:remote
 ```
 
-迁移文件是增量 `ALTER TABLE` + `CREATE TABLE IF NOT EXISTS`,幂等性由「只执行一次」保证;
-不要重复执行 `ALTER TABLE`(SQLite 会报 duplicate column)。全新库直接跑 `schema.sql`,已含同样的列与表。
+The migration file is incremental `ALTER TABLE` + `CREATE TABLE IF NOT EXISTS`; idempotency rests on "run it only once";
+don't repeat `ALTER TABLE` (SQLite reports duplicate column). Fresh databases can run `schema.sql` directly — it already
+contains the same columns and tables.
 
-### 22.6 已知边界
+### 22.6 Known limits
 
-- `user_daily_active` 从本次上线开始累积;但活跃口径已 UNION `jobs` / `user_events`,所以 T-1 与历史 DAU 仍能回算(只有访问、没生成也没触发关键行为的用户无法回溯)。
-- `checkout_start` 只在上线后记录;上线前只有「已支付」,没有「发起结账」,所以历史结账转化缺失。
-- 生成站点(PV/UV)不在本大盘范围:那要另在 `serve.ts` 做访问计数或接 Cloudflare Web Analytics。
-- 渠道 / UTM 未采集,分渠道拉新与留存暂不可用。
-- 大盘是管理后台只读接口,不做用户维度下钻;需要下钻时走 `/admin/users/:id`。
+- `user_daily_active` starts accumulating from this launch; but the activity definition already UNIONs `jobs` / `user_events`, so T-1 and historical DAU can still be back-computed (only users who visited but neither generated nor triggered a key event can't be traced).
+- `checkout_start` is only recorded after launch; before launch there is only "paid", no "checkout started", so historical checkout conversion is missing.
+- Generated sites (PV/UV) are out of scope for this dashboard: that would require visit counting in `serve.ts` or Cloudflare Web Analytics.
+- Channel / UTM isn't collected, so per-channel acquisition and retention are unavailable for now.
+- The dashboard is a read-only admin API with no per-user drill-down; use `/admin/users/:id` when you need to drill down.
 
-### 22.7 平台页面访问量 / 国家分布(Cloudflare Web Analytics)
+### 22.7 Platform page views / country distribution (Cloudflare Web Analytics)
 
-平台自身的 PV/UV、访问国家、来源、路径走 Cloudflare Web Analytics,**不进本大盘接口**。
-看板页 `/admin/dashboard` 顶部有「Cloudflare 访问统计 ↗」,直接跳到该账号的 Web Analytics 页面:
-`https://dash.cloudflare.com/?to=/:account/web-analytics`(生产选 `app.1forgen.site`、staging 选
-`app-staging.1forgen.site` 卡片看明细)。
+The platform's own PV/UV, visitor countries, sources and paths go through Cloudflare Web Analytics and **do not enter this
+dashboard API**. The dashboard page `/admin/dashboard` has a 「Cloudflare 访问统计 ↗」 link at the top that jumps straight to
+that account's Web Analytics page:
+`https://dash.cloudflare.com/?to=/:account/web-analytics` (production: pick the `app.1forgen.site` card, staging:
+`app-staging.1forgen.site` — for details).
 
-数据本身不进 `/admin/dashboard` 的原因:Web Analytics 没有官方的「站点统计」REST 查询接口;
-要做站内展示,只能走 Cloudflare GraphQL Analytics API(`rumPageloadEventsAdaptiveGroups`,
-按 `siteTag` + `requestHost` 过滤),需要单独建一个带 Account Analytics:Read 的 API Token。
-目前选择先用面板,避免再引入一个外部凭证。
+Why the data doesn't flow into `/admin/dashboard`: Web Analytics has no official "site statistics" REST query API;
+to show it in-app, you'd have to go through the Cloudflare GraphQL Analytics API (`rumPageloadEventsAdaptiveGroups`,
+filtered by `siteTag` + `requestHost`), which requires creating a separate API token with Account Analytics: Read.
+For now we chose to use the dashboard first, avoiding the introduction of another external credential.
 
-接入方式(手动 snippet,**不要用自动注入**):
+Integration (manual snippet, **do not use auto-injection**):
 
-1. Dashboard → Web Analytics → 添加站点(生产 `app.1forgen.site`、staging
-   `app-staging.1forgen.site` 各建一个)→ 注入方式选「Enable with manual snippet」。
-2. 复制 token,填到 `wrangler.jsonc` 对应环境的 `vars.WEB_ANALYTICS_TOKEN`(顶层 = 生产,
-   `env.staging` = staging;绑定类配置两边各写一份,互不继承)。
-3. `npm run deploy` / `npm run deploy:staging` 后生效。
+1. Dashboard → Web Analytics → add site (one each for production `app.1forgen.site` and staging
+   `app-staging.1forgen.site`) → for injection choose "Enable with manual snippet".
+2. Copy the token into `wrangler.jsonc`'s `vars.WEB_ANALYTICS_TOKEN` for the matching environment (top level = production,
+   `env.staging` = staging; binding-type config must be written on both sides, no inheritance).
+3. Takes effect after `npm run deploy` / `npm run deploy:staging`.
 
-为什么手动而不是自动注入:平台是 `BrowserRouter` 单页应用,beacon 必须带 `spa:true` 才会在
-前端路由切换时上报 pageview;自动注入不保证带该参数,只会记录首次整页加载。
-前端 `web/src/components/CloudflareAnalytics.tsx` 从 `GET /api/auth/config` 取 token 后动态加载
-`beacon.min.js`——token 走运行时下发,生产与 staging 共用一份 `web/dist` 也不会串数据(AGENTS.md §2)。
+Why manual rather than auto-injection: the platform is a `BrowserRouter` SPA, and the beacon needs `spa:true` to report
+pageviews on frontend route changes; auto-injection doesn't guarantee that parameter and would only record the initial full page load.
+The frontend `web/src/components/CloudflareAnalytics.tsx` fetches the token from `GET /api/auth/config` and dynamically loads
+`beacon.min.js` — the token is delivered at runtime, so production and staging sharing one `web/dist` still won't cross wires (AGENTS.md §2).
 
-已知限制:
+Known limitations:
 
-- token 是公开值(会出现在浏览器里),不是 secret。
-- 广告拦截器会拦 `static.cloudflareinsights.com`,统计值应视为**下限**(常见 25%~40% 被拦)。
-- 国家按 IP 归属近似,VPN/代理会归到出口国;不做跨天用户识别、不写 cookie。
-- beacon 不覆盖 `/s/:slug` 生成站点(那需要在 `serve.ts` 另做服务端计数)。
+- The token is a public value (it appears in the browser), not a secret.
+- Ad blockers block `static.cloudflareinsights.com`; treat the numbers as a **lower bound** (commonly 25%–40% blocked).
+- Country is approximated from IP; VPN/proxy users get attributed to the exit country; no cross-day user identification, no cookies.
+- The beacon doesn't cover `/s/:slug` generated sites (that would need separate server-side counting in `serve.ts`).
 
-## 23. 首页精选案例与克隆(2026-10-23)
+## 23. Homepage showcase and cloning (2026-10-23)
 
-目标:运营在后台给已发布产物打标签、决定是否上首页;首页展示真实案例,登录用户可一键克隆示例的
-源码与构建产物,在工作台继续对话改成自己的站点。
+Goal: let operations tag published artifacts in the admin and decide whether they go on the homepage; the homepage shows real cases,
+and logged-in users can clone an example's source and build artifacts with one click, then keep chatting in the workspace to turn it
+into their own site.
 
-### 23.1 数据层
+### 23.1 Data layer
 
-`projects` 新增三列(增量迁移 `schema.migrate-showcase.sql`,新库 `schema.sql` 已含):
+`projects` gains three columns (incremental migration `schema.migrate-showcase.sql`; a fresh `schema.sql` already includes them):
 
-| 列 | 含义 |
+| Column | Meaning |
 | --- | --- |
-| `featured` | 1 = 上首页精选;默认 0 |
-| `featured_tags` | 逗号分隔的展示标签,最多 5 个、每个 20 字(写入前归一化) |
-| `featured_at` | 上首页时间,首页按它倒序;下首页清空 |
+| `featured` | 1 = featured on the homepage; default 0 |
+| `featured_tags` | Comma-separated display tags, at most 5, 20 characters each (normalized before writing) |
+| `featured_at` | Time it was featured; the homepage sorts by it descending; cleared when unfeatured |
 
-索引 `idx_projects_featured(featured, featured_at)`。
+Index `idx_projects_featured(featured, featured_at)`.
 
-### 23.2 后台
+### 23.2 Admin
 
-- `POST /api/admin/projects/:id/featured`(`requireAdmin`,body `{ featured?, tags? }`):
-  - `featured=true` 要求项目 `status='published'` 且 `published_version >= 1`,否则 400;
-  - `tags` 为空串 = 清空;不传则保留;
-  - 不更新 `updated_at`(打标签不该改变用户项目排序)。
-- `/admin` 列表新增「首页」列(快捷上下首页 + 标签摘要);`/admin/projects/:id` 新增「首页展示」面板
-  (标签输入、保存标签、上下首页)。管理后台仍保持中文,不接 i18n。
+- `POST /api/admin/projects/:id/featured` (`requireAdmin`, body `{ featured?, tags? }`):
+  - `featured=true` requires the project to be `status='published'` with `published_version >= 1`, otherwise 400;
+  - an empty `tags` string = clear; omitting it keeps the current value;
+  - `updated_at` is not touched (tagging shouldn't reorder the user's project list).
+- The `/admin` list gains a 「首页」 column (quick feature/unfeature + tag summary); `/admin/projects/:id` gains a 「首页展示」 panel
+  (tag input, save tags, feature/unfeature). The admin console stays Chinese, no i18n.
 
-### 23.3 公开接口与首页
+### 23.3 Public API and homepage
 
-- `GET /api/showcase`(公开):只返回 `featured = 1` 且已发布、`published_version >= 1` 的项目,
-  `featured_at DESC` 最多 12 条;字段仅 `id/slug/name/description/tags/featured_at/updated_at`。
-- 首页(`Landing.tsx`)在示例想法与价格区之间渲染「精选案例」;列表为空时整块不渲染。
-  卡片封面是线上站点的**实时预览**:`<iframe src="/s/:slug/">` 以 400% 尺寸挂载再 `scale(0.25)`
-  缩进 `aspect-[16/10]` 的框里(等价 1200px 宽桌面视口),`loading="lazy"` 只在滚到附近时加载。
-  没有截图服务,实时嵌入是唯一「内容随站点更新」的实现;站点本身由服务端
-  `Content-Security-Policy: sandbox …`(opaque origin)下发,嵌入页面拿不到本页 origin。
-  卡片整体只保留「名称 + 一行标签/描述 + 克隆」,点封面在新标签页打开站点。
+- `GET /api/showcase` (public): returns only `featured = 1` published projects with `published_version >= 1`,
+  at most 12 by `featured_at DESC`; fields limited to `id/slug/name/description/tags/featured_at/updated_at`.
+- The homepage (`Landing.tsx`) renders 「精选案例」 between the example-ideas and pricing sections; when the list is empty the whole
+  block isn't rendered. The card cover is a **live preview** of the online site: `<iframe src="/s/:slug/">` mounted at 400% size then
+  `scale(0.25)` shrunk into an `aspect-[16/10]` box (equivalent to a 1200px-wide desktop viewport), with `loading="lazy"` so it loads
+  only when scrolled near. There is no screenshot service, so live embedding is the only implementation where "content updates with
+  the site"; the site itself is served by the server with `Content-Security-Policy: sandbox …` (opaque origin), so the embedded page
+  can't reach this page's origin. The card keeps only "name + one line of tags/description + clone"; clicking the cover opens the site
+  in a new tab.
 
-### 23.4 克隆
+### 23.4 Cloning
 
-`POST /api/showcase/:id/clone`(登录用户):
+`POST /api/showcase/:id/clone` (logged-in users):
 
-1. 再次校验源项目仍是「精选 + 已发布」;
-2. 新建项目(新 UUID、唯一 slug、沿用名称/描述);
-3. 把源项目**线上版本**的 `src_json` / `manifest_json` 写成新项目的草稿 `versions(version_no = 0)`;
-4. 用 `copyArtifactsAcross`(R2 没有服务端 copy,只能逐个 get + put)复制构建产物到新项目草稿目录;
-5. 任一步失败回滚项目行与已写入的 R2 对象。
+1. Re-validate that the source project is still "featured + published";
+2. Create a new project (new UUID, unique slug, reuse name/description);
+3. Write the source project's **online version's** `src_json` / `manifest_json` as the new project's draft `versions(version_no = 0)`;
+4. Copy build artifacts into the new project's draft directory with `copyArtifactsAcross` (R2 has no server-side copy — only
+   get + put one by one);
+5. On any step's failure, roll back the project row and the R2 objects already written.
 
-不复制:站点数据(项目独立 SQLite)、连接器、对话记录、`prompt`;不扣积分(不调用模型)。
-新项目 `current_version = 0` + 草稿存在 → 工作区打开即可预览,输入框直接走 `chat`(以草稿为基线),
-不会重新 `generate`。
+Not copied: site data (per-project SQLite), connectors, chat history, `prompt`; no credits charged (no model calls).
+The new project has `current_version = 0` + a draft → the workspace opens straight into preview, and the input box goes through
+`chat` (with the draft as baseline) instead of re-running `generate`.
 
-未登录点「克隆同款」→ `/login?clone=<id>`;登录页把 id 另存进 `sessionStorage`
-(`web/src/lib/pendingClone.ts`),因此注册走邮箱验证、Google 登录走 OAuth 回调后**也能续跑**:
-`App.tsx` 里的 `CloneResumer` 在拿到会话后取出待办、调用克隆接口并跳进新项目工作区。
-当前 URL 带 `clone` 参数时由登录页自己处理(要显示「正在克隆」状态),`CloneResumer` 跳过以免克隆两次。
-待办只存 sessionStorage,关掉标签页即放弃。
+Clicking 「克隆同款」 while logged out → `/login?clone=<id>`; the login page stashes the id in `sessionStorage`
+(`web/src/lib/pendingClone.ts`), so the flow **still resumes** after email-verification signup or a Google OAuth callback:
+`CloneResumer` in `App.tsx` picks up the pending clone once a session exists, calls the clone API and jumps into the new project's
+workspace. When the current URL already carries a `clone` parameter, the login page handles it itself (it needs to show the
+「正在克隆」 state) and `CloneResumer` skips to avoid cloning twice. The pending item lives only in sessionStorage; closing the
+tab abandons it.
 
-### 23.5 上线顺序
+### 23.5 Rollout order
 
 ```bash
 # 1) 先迁移
@@ -1231,38 +1239,63 @@ npm run typecheck && npm run build && npm run deploy:staging
 npm run db:migrate:showcase:remote
 ```
 
-### 23.6 已知边界
+### 23.6 Known limits
 
-- 精选项目后续被下线/删除:首页自动隐藏,克隆接口返回 404,无需额外清理;
-- 克隆不复制站点数据,示例里的动态数据在新项目为空;
-- 不做每用户克隆次数上限(克隆不产生模型成本),如出现刷项目再补;
-- 首页卡片没有截图服务:封面是 `/s/:slug/` 的实时 iframe(`loading="lazy"`),代价是访客滚到卡片附近时
-  会加载该生成应用的资源与数据接口(每张卡一次)。若以后要压流量,可给卡片加 IntersectionObserver
-  只挂载可视区域内的 1–2 个,或另接截图链路;需要真实缩略图时必须另建(本方案只是实时预览)。
+- If a featured project is later unpublished/deleted: the homepage hides it automatically and the clone API returns 404 — no extra cleanup needed;
+- Cloning doesn't copy site data, so dynamic data in the example starts empty in the new project;
+- No per-user clone cap (cloning incurs no model cost); add one if project spam shows up;
+- No screenshot service for homepage cards: the cover is a live iframe of `/s/:slug/` (`loading="lazy"`), and the cost is that when a
+  visitor scrolls near a card, that generated app's assets and data endpoints get loaded (once per card). To cut traffic later, you could
+  give cards an IntersectionObserver that mounts only the 1–2 in view, or hook up a screenshot pipeline instead; real thumbnails require
+  building one (this design is live preview only).
 
-## 24. 源码开放与自托管边界(2026-11-03)
+## 24. Source-available licensing and the self-hosting boundary (2026-11-03)
 
-仓库由 GitHub Organization **Pixie Agent** 公开维护,采用「源码可见 + 非商业授权」而非 OSI 定义的开源模式:
+The repo is publicly maintained by the GitHub Organization **Pixie Agent** under a "source-available + noncommercial license" model
+rather than OSI-defined open source:
 
-- Worker、Web、Agent 与其余平台代码适用 **PolyForm Noncommercial 1.0.0**;个人、教育、研究及其他非商业用途按 `LICENSE` 授权,商业部署、企业内部使用、托管服务、付费集成等须另签书面商业许可证(`COMMERCIAL-LICENSE.md`)。
-- `agent/template/` 会随源码导出进入用户生成的应用,所以单独采用 **Apache-2.0**。模板内的 `LICENSE`、`THIRD_PARTY_NOTICES.md` 与 `package-lock.json` 会被 `copyTemplate()` 一并复制并由 `restorePlatformFiles()` 防止模型改写,最终进入源码树与下载 ZIP;Vite 构建还会把许可证与 notices 复制进 `dist`,随发布产物提供。这保证用户可独立使用自己的生成应用,不把平台的非商业限制传递给产物。
-- 第三方依赖保持各自许可证;根 `THIRD_PARTY_NOTICES.md` 只做入口,精确版本以四份 lockfile 为准。分发 Cloud Run 镜像时还要扫描 Node/Debian 与模板 `node_modules`。
-- 外部代码贡献在 CLA 机制落地前可以评审但不合并,避免外部贡献的版权阻断 Pixie Agent 的商业再授权。公开协作规则见 `CONTRIBUTING.md`、`SECURITY.md` 与 `.github/`。
+- Worker, Web, Agent and the rest of the platform code are covered by **PolyForm Noncommercial 1.0.0**; personal, educational, research
+  and other noncommercial use is granted per `LICENSE`, while commercial deployment, enterprise internal use, hosted services, paid
+  integrations and the like require a separately signed written commercial license (`COMMERCIAL-LICENSE.md`).
+- `agent/template/` gets exported with the source into users' generated apps, so it is separately **Apache-2.0**. The `LICENSE`,
+  `THIRD_PARTY_NOTICES.md` and `package-lock.json` inside the template are copied along by `copyTemplate()` and protected from model
+  rewrites by `restorePlatformFiles()`, ending up in the source tree and the download ZIP; the Vite build also copies the license and
+  notices into `dist`, shipped with published artifacts. This guarantees users can use their generated app standalone, without the
+  platform's noncommercial restrictions propagating to the artifact.
+- Third-party dependencies keep their own licenses; the root `THIRD_PARTY_NOTICES.md` is only an entry point — exact versions are
+  governed by the four lockfiles. Distributing the Cloud Run image additionally requires scanning Node/Debian and the template's `node_modules`.
+- External code contributions may be reviewed but not merged until a CLA mechanism is in place, preventing external contributions'
+  copyright from blocking Pixie Agent's commercial re-licensing. Public collaboration rules live in `CONTRIBUTING.md`, `SECURITY.md`
+  and `.github/`.
 
-公共自托管入口是 `wrangler.example.jsonc` 与 `docs/SELF_HOSTING.md`;仓库当前的 `wrangler.jsonc` 仍是 Pixie Agent 维护环境的运行配置。资源 ID、服务 URL、商品 ID 和 Analytics token 不是 secret,但自托管者不得复用。真正的 secret 只允许放 Cloudflare secrets、Google Secret Manager、被忽略的 `.dev.vars` 或 `agent/.env`。
+The public self-hosting entry points are `wrangler.example.jsonc` and `docs/SELF_HOSTING.md`; the repo's current `wrangler.jsonc`
+remains the runtime config for Pixie Agent-maintained environments. Resource IDs, service URLs, product IDs and the Analytics token
+are not secrets, but self-hosters must not reuse them. Real secrets may only go into Cloudflare secrets, Google Secret Manager, the
+ignored `.dev.vars`, or `agent/.env`.
 
-本地统一入口:
+Unified local entry points:
 
-- `npm run bootstrap`:按四份 lockfile 安装 Worker / Web / Agent / 模板依赖;
-- `npm run dev:agent`:加载 `agent/.env`,并把本地模板路径转换成绝对路径;
-- 本地 `.dev.vars` 必须把 `AGENT_URL` 与 `AGENT_URL_FREE` 都显式指向 `http://localhost:8080`;顶层 `wrangler.jsonc` 已有生产 `AGENT_URL_FREE`,不覆盖会让免费任务误派到生产执行体;
-- `npm run check`:Worker + Web + Agent 类型检查,再构建 Web、Agent 与模板;
-- GitHub Actions 对 `main`、`staging` 和 PR 执行同一 `check`。
+- `npm run bootstrap`: installs Worker / Web / Agent / template dependencies per the four lockfiles;
+- `npm run dev:agent`: loads `agent/.env` and converts local template paths to absolute ones;
+- a local `.dev.vars` must explicitly point both `AGENT_URL` and `AGENT_URL_FREE` at `http://localhost:8080`; the top-level
+  `wrangler.jsonc` already has a production `AGENT_URL_FREE`, and without overriding it, free jobs would be mis-dispatched to the
+  production executor;
+- `npm run check`: Worker + Web + Agent typecheck, then builds Web, Agent and templates;
+- GitHub Actions runs the same `check` against `main`, `staging` and PRs.
 
-为避免 fork 在邮件配置缺失时继续冒用 1forgen 身份,Resend 发信现在同时要求 `RESEND_API_KEY` 与 `EMAIL_FROM`;到账通知只使用必填的 `PUBLIC_BASE_URL`,不再回落到 `app.1forgen.site`。未配置邮件时仍沿用原有降级语义:账号可落库,接口返回发送失败并允许重试。
+So that a fork can't keep borrowing the 1forgen identity when mail config is missing, Resend sending now requires both
+`RESEND_API_KEY` and `EMAIL_FROM`; payment-arrival notifications use only the required `PUBLIC_BASE_URL` and no longer fall back to
+`app.1forgen.site`. Without mail configured, the original degradation semantics still apply: the account is persisted, the API
+reports send failure and allows retry.
 
-Agent 依赖从已弃用的 `@mariozechner/pi-coding-agent@0.66.1` 迁到 `@earendil-works/pi-coding-agent@^1.5.0`;保持 SDK 嵌入方式不变,并清除了旧 scope 在 npm audit 中报告的运行时漏洞。生产发布前仍须执行 `npm run check`,Agent 改动先在 staging 验证。
+The Agent dependency moved from the deprecated `@mariozechner/pi-coding-agent@0.66.1` to `@earendil-works/pi-coding-agent@^1.5.0`;
+the SDK embedding approach is unchanged, and the runtime vulnerabilities the old scope reported in npm audit were cleared.
+`npm run check` is still mandatory before a production release, and Agent changes get validated on staging first.
 
-Forge Agent 本地启动改为先编译 TypeScript、再执行 `dist/index.js`;Node 的 strip-types 不会把源码中的 `.js` import 映射到 `.ts`,直接跑 `src/index.ts` 会报 `ERR_MODULE_NOT_FOUND`。
+Forge Agent's local startup now compiles TypeScript first and then runs `dist/index.js`; Node's strip-types doesn't map `.js`
+imports in source to `.ts`, and running `src/index.ts` directly fails with `ERR_MODULE_NOT_FOUND`.
 
-Cloud Run 镜像三阶段都固定 `node:22.22.1-bookworm-slim`,依赖安装均改用 `npm ci` 锁定依赖树,最终进程以镜像内置的非 root `node` 用户运行;工作区仍只写 `/tmp/forge-agent`,模板目录只读复用。Docker 构建必须继续保留 `.dockerignore` / `.gcloudignore` 对宿主 `node_modules` 的排除。
+All three stages of the Cloud Run image pin `node:22.22.1-bookworm-slim`, dependency installation switched to `npm ci` to lock the
+dependency tree, and the final process runs as the image's built-in non-root `node` user; the workspace is still writable only at
+`/tmp/forge-agent`, and the template directory is read-only and reused. Docker builds must keep excluding the host `node_modules`
+via `.dockerignore` / `.gcloudignore`.

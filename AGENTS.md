@@ -1,130 +1,137 @@
-# AGENTS.md — Forge 2.0 开发约束
+# AGENTS.md — Forge 2.0 development constraints
 
-本项目是 **Forge 2.0**:Cloudflare Worker(`forge-v2`,Hono + D1 + R2 + KV + 每项目 × 每环境 Durable Object SQLite)负责编排,Google Cloud Run 上的 `pi` coding agent(`forge-agent`)负责执行。
+This project is **Forge 2.0**: a Cloudflare Worker (`forge-v2`, Hono + D1 + R2 + KV + per-project × per-environment Durable Object SQLite) orchestrates, and the `pi` coding agent on Google Cloud Run (`forge-agent`) executes.
 
-架构与设计细节全在 `docs/FORGE2.md`(改动平台行为时**必须**同步更新它)。本文件只放**必须遵守的约束**。
+All architecture and design details live in `docs/FORGE2.md` (**must** be kept in sync when changing platform behavior). This file holds only the **binding constraints**.
 
 ---
 
-## 1. 环境与分支(最重要的约束)
+## 1. Environments and branches (the most important constraint)
 
-两套**完全隔离**的环境,同一仓库、同一份 `web/dist`、同一份 `agent/` 源码:
+Two **fully isolated** environments sharing the same repository, the same `web/dist`, and the same `agent/` sources:
 
-| | 生产 | staging |
+| | Production | Staging |
 | --- | --- | --- |
-| 分支 | `main` | `staging` |
+| Branch | `main` | `staging` |
 | Worker | `forge-v2` | `forge-v2-staging` |
-| 对外域名 | `app.1forgen.site`(Custom Domain,根域名留空) | `app-staging.1forgen.site`(同上) |
-| workers.dev | `forge-v2.needle.workers.dev`(保留,旧链接依赖它) | `forge-v2-staging.needle.workers.dev`(同上) |
-| wrangler 环境 | 顶层(不带 `--env`) | `env.staging` |
-| Cloud Run(VIP 通道) | `forge-agent`(`--timeout 3600 --concurrency 1`;运行预算由后台 `max_run_ms` 下发,上限 3400s) | `forge-agent-staging`(`--timeout 3600 --concurrency 1 --max-instances 1`) |
-| Cloud Run(免费通道) | `forge-agent-free`(MiniMax-M3.1-Flash,Anthropic 方言,`--timeout 3600 --concurrency 8 --no-cpu-throttling --max-instances 1`;任务并发由后台 free 配置的 `queue_concurrency` 下发,env `AGENT_QUEUE_CONCURRENCY` 只是回落值) | `forge-agent-free-staging`(同左,另开 `PI_MODEL_INPUT_IMAGE=true`) |
-| D1 | `forge-v2`(`6fd724ad-…`) | `forge-v2-staging`(`da94e0ba-…`) |
+| Public domain | `app.1forgen.site` (Custom Domain, apex left empty) | `app-staging.1forgen.site` (same) |
+| workers.dev | `forge-v2.needle.workers.dev` (kept — old links depend on it) | `forge-v2-staging.needle.workers.dev` (same) |
+| wrangler environment | top level (no `--env`) | `env.staging` |
+| Cloud Run (VIP channel) | `forge-agent` (`--timeout 3600 --concurrency 1`; run budget delivered via admin `max_run_ms`, cap 3400s) | `forge-agent-staging` (`--timeout 3600 --concurrency 1 --max-instances 1`) |
+| Cloud Run (free channel) | `forge-agent-free` (MiniMax-M3.1-Flash, Anthropic dialect, `--timeout 3600 --concurrency 8 --no-cpu-throttling --max-instances 1`; job concurrency delivered via admin free config `queue_concurrency`, env `AGENT_QUEUE_CONCURRENCY` is only the fallback) | `forge-agent-free-staging` (same, plus `PI_MODEL_INPUT_IMAGE=true`) |
+| D1 | `forge-v2` (`6fd724ad-…`) | `forge-v2-staging` (`da94e0ba-…`) |
 | R2 | `forge-v2-artifacts` | `forge-v2-artifacts-staging` |
 | KV | `f6b66c90…` | `67e46b44…` |
-| 内部密钥 | Secret `agent-secret` | Secret `agent-secret-staging` |
-| LLM 密钥 | VIP 执行体:`llm-api-key`(DeepSeek)+ `llm-api-key-free`(GLM)+ `llm-api-key-minimax`(MiniMax);免费执行体:`llm-api-key-minimax`(MiniMax)+ `llm-api-key-free`(GLM)。**每个执行体一次绑多把 key**,后台 `model_configs.api_key_env` 按行选变量名(只存变量名,不存密钥值) | VIP 执行体:`llm-api-key-staging`(GLM)+ `llm-api-key-minimax-staging`(MiniMax);免费执行体:`llm-api-key-minimax-staging` + `llm-api-key-staging`。变量名同上 |
-| LLM 模型 | VIP `deepseek-flash`(Anthropic 方言);免费默认 `MiniMax-M3.1-Flash`(Anthropic 方言,`api.minimaxi.com/anthropic`),后台可切 `glm-5.3-flash`(bigmodel Anthropic 方言) | VIP `glm-5.3-flash`(OpenAI 兼容 + `zai`);免费 `MiniMax-M3.1-Flash`(Anthropic 方言) |
-| 用户上传图片给模型看 | 由后台 `model_configs.image_input` 决定(生产行已开;Cloud Run 不设 `PI_MODEL_INPUT_IMAGE`) | 开启(环境开关 `PI_MODEL_INPUT_IMAGE=true` + 后台行) |
-| 计费收款(MoR) | Creem **live 门店**:Secret `CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET`;`vars.CREEM_API_BASE=https://api.creem.io`;`vars.CREEM_PRODUCTS` 填 live 商品 id | Creem **测试门店**:两个 secret 加 `--env staging` 单独写,值用 test 模式;`CREEM_API_BASE=https://test-api.creem.io`;`CREEM_PRODUCTS` 填 test 商品 id |
-| 注册验证邮件 | Resend Secret `RESEND_API_KEY` + `vars.EMAIL_FROM=noreply@1forgen.site`(域名需在 Resend 后台验证) | 同左(secret 不可继承,`--env staging` 单独写) |
-| 环境标识 | 不设 `ENVIRONMENT` | `ENVIRONMENT=staging` |
+| Internal secret | Secret `agent-secret` | Secret `agent-secret-staging` |
+| LLM keys | VIP executor: `llm-api-key` (DeepSeek) + `llm-api-key-free` (GLM) + `llm-api-key-minimax` (MiniMax); free executor: `llm-api-key-minimax` (MiniMax) + `llm-api-key-free` (GLM). **Each executor binds multiple keys at once**; admin `model_configs.api_key_env` picks the variable name per row (only the variable name is stored, never the key value) | VIP executor: `llm-api-key-staging` (GLM) + `llm-api-key-minimax-staging` (MiniMax); free executor: `llm-api-key-minimax-staging` + `llm-api-key-staging`. Variable names as at left |
+| LLM models | VIP `deepseek-flash` (Anthropic dialect); free default `MiniMax-M3.1-Flash` (Anthropic dialect, `api.minimaxi.com/anthropic`), admin can switch to `glm-5.3-flash` (bigmodel Anthropic dialect) | VIP `glm-5.3-flash` (OpenAI-compatible + `zai`); free `MiniMax-M3.1-Flash` (Anthropic dialect) |
+| User-uploaded images shown to the model | Decided by admin `model_configs.image_input` (production rows enabled; Cloud Run does not set `PI_MODEL_INPUT_IMAGE`) | Enabled (env switch `PI_MODEL_INPUT_IMAGE=true` + admin row) |
+| Billing / collections (MoR) | Creem **live store**: Secrets `CREEM_API_KEY` / `CREEM_WEBHOOK_SECRET`; `vars.CREEM_API_BASE=https://api.creem.io`; `vars.CREEM_PRODUCTS` holds live product IDs | Creem **test store**: both secrets written separately with `--env staging`, test-mode values; `CREEM_API_BASE=https://test-api.creem.io`; `CREEM_PRODUCTS` holds test product IDs |
+| Signup verification email | Resend Secret `RESEND_API_KEY` + `vars.EMAIL_FROM=noreply@1forgen.site` (domain must be verified in the Resend console) | Same (secrets are not inherited; write separately with `--env staging`) |
+| Environment flag | No `ENVIRONMENT` set | `ENVIRONMENT=staging` |
 
-### 分支模型
+### Branch model
 
-**`staging` 分支开发测试 → 验证通过合并到 `main` → 从 `main` 上线。**
+**Develop and test on the `staging` branch → merge to `main` after verification → release from `main`.**
 
-- `main` 是「可上线」基线:每个提交都应已验收、可随时部署。不要在 `main` 上攒未验证的改动。
-- **「分支」管哪份代码,「wrangler 环境」管哪套资源,两者是独立的轴。** `staging` 分支不会自动发到 staging 环境——发到哪里由敲哪条命令决定;反之,在 `staging` 分支上敲 `npm run deploy` 会被守卫拦下。
+- `main` is the "releasable" baseline: every commit should be accepted and deployable at any time. Do not pile unverified changes onto `main`.
+- **"Branch" decides which code; "wrangler environment" decides which resources — two independent axes.** The `staging` branch is not automatically deployed to the staging environment — the target is decided by which command you run; conversely, running `npm run deploy` while on the `staging` branch is blocked by the guard.
 
-### 上线流程
+### Release flow
 
 ```bash
-git switch staging                                              # 1) 开发
+git switch staging                                              # 1) develop
 npm run typecheck && npm run build
-npm run deploy:staging                                          # 2) 发测试环境验证
-npm run agent:deploy:staging                                    #    只在改了 agent/ 时需要
-git switch main && git merge staging && git push origin main    # 3) 验证通过才合并
-npm run deploy                                                  # 4) 从 main 上线
-npm run agent:deploy:prod                                       #    只在改了 agent/ 时需要
+npm run deploy:staging                                          # 2) deploy staging and verify
+npm run agent:deploy:staging                                    #    only needed when agent/ changed
+git switch main && git merge staging && git push origin main    # 3) merge only after verification
+npm run deploy                                                  # 4) release from main
+npm run agent:deploy:prod                                       #    only needed when agent/ changed
 ```
 
-### 部署生产的硬门槛(脚本强制,不要绕)
+### Hard gates for production deploys (script-enforced, do not bypass)
 
-`npm run deploy`、`npm run agent:deploy:prod` 与 `npm run agent:deploy:free:prod` 都通过对应的 `pre*` 钩子执行 `scripts/guard-prod-deploy.mjs`,强制两条,任一不满足即中止:
+`npm run deploy`, `npm run agent:deploy:prod` and `npm run agent:deploy:free:prod` all run `scripts/guard-prod-deploy.mjs` through their `pre*` hooks, enforcing two rules; failing either aborts:
 
-1. 当前分支必须是 `main`
-2. 工作区必须干净(无未提交改动)
+1. The current branch must be `main`
+2. The working tree must be clean (no uncommitted changes)
 
-**不要为了部署去改守卫、`git stash` 或部分提交。** 唯一正确的路径是把改动合并到 `main`。`npm run deploy:staging` / `npm run agent:deploy:staging` / `npm run agent:deploy:free:staging` 故意**不挂**守卫——未合并、未提交的改动正是要靠它验证。
+**Do not modify the guard, `git stash`, or partially commit just to deploy.** The only correct path is merging the changes into `main`. `npm run deploy:staging` / `npm run agent:deploy:staging` / `npm run agent:deploy:free:staging` deliberately have **no** guard — unmerged, uncommitted changes are exactly what staging is for.
 
-### 禁止自动部署生产
+### Never auto-deploy production
 
-**不要主动执行 `npm run deploy` / `npm run agent:deploy:prod` / `npm run agent:deploy:free:prod`。** 先说明要发什么、影响范围,等用户明确放行(例如「发布吧」)后再执行。staging 部署不需要这道放行。
-
----
-
-## 2. 隔离纪律
-
-- **环境差异只能来自运行时配置**(wrangler 绑定 / `vars` / Cloud Run 的 env 与规格)。两套环境共用同一份 `web/dist` 与 `agent/` 源码,所以**禁止**用构建期变量(如 Vite `import.meta.env`)表达环境差异——那会把 staging 的东西打进生产包。
-- **wrangler 的绑定类配置不可继承**:`vars` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `durable_objects` / secrets 必须在顶层与 `env.staging` 里**各写一遍**。漏写不会在部署时报错,而是运行时 `c.env.XXX === undefined`(例如漏 `PROJECT_DB` 会让生成应用的数据面板直接 500)。**新增任何绑定必须两边同时加。**
-- **`routes` 反过来是「可继承」的**:顶层写了 `routes`,`env.staging` 不显式覆盖就会继承 → 发 staging 会去抢生产的域名;而且 `publishCustomDomains` 是 `replace_state` 语义,会把该 Worker 上**没写进配置**的 Custom Domain 删掉。所以两套环境各写各的 `routes`。
-- **配了 `routes` 就必须显式 `workers_dev: true`**:wrangler 的规则是「配置里有 routes 时 workers.dev 默认关闭」,不写会把 `*.needle.workers.dev` 关掉,已发布链接与还没切过去的回调地址一起断。
-- **前端环境角标**走运行时下发:staging 的 `vars.ENVIRONMENT=staging` → `GET /api/auth/config` 返回 `environment` → `<EnvBadge>` 渲染琥珀色角标。生产不设该变量,回落 `production`、不渲染。
-- **Worker secret 只写不可读**:没有任何 API 或命令能把已写入的 secret 读回来(`secrets` 接口只返回名字)。换环境只能由持有原始值的人重新输入,不要承诺「把生产的复制过去」。
-- **模型的多模态能力也是环境差异**:模型是否声明 `input: ['text','image']` 由后台 `model_configs.image_input` 决定(逐任务覆盖 Cloud Run 的 `PI_MODEL_INPUT_IMAGE`,后者只是回落)。上游网关方言不一定认 image 块,声明了却发不出去会直接 400;2026-10-25 已实测生产 GLM(`open.bigmodel.cn/api/anthropic`)与 DeepSeek(`api.deepseek.com/anthropic`)都接受 image 块,所以生产行维持 `image_input=1`;换新供应商前仍需先实测。
-- **任务级模型参数以 `model_configs` 为准,Cloud Run env 只是回落**:`model_id` / `base_url` / `api_dialect` / `thinking_level` / `reasoning` / `image_input` / `max_tokens` / `max_run_ms` / `polish_max_ms` / `queue_concurrency` 都由后台随任务下发并覆盖 env(`agent/src/config.ts` 的 `applyModelOverride`);`api_key_env` 只决定用哪把**已绑定**的 Secret,密钥值仍来自 Cloud Run。`--timeout 3600s` 是 Cloud Run 硬上限,后台 `max_run_ms` 上限 3400s;env 的 `AGENT_MAX_RUN_MS`(1500s)只在配置行缺失/非法时兜底。
+**Do not run `npm run deploy` / `npm run agent:deploy:prod` / `npm run agent:deploy:free:prod` on your own initiative.** First state what is being released and the blast radius, then wait for explicit user approval (e.g. "release it") before executing. Staging deploys need no such approval.
 
 ---
 
-## 3. 数据层 / schema
+## 2. Isolation discipline
 
-- 已存在的库改 schema 用**增量迁移** `schema.migrate-*.sql`;直接跑 `schema.sql` 会在已有库上报 `no such column`。全新库才用 `schema.sql`。staging 对应 `db:init:staging` / `db:migrate:google:staging`。
-- `wrangler d1 execute --remote --file=…` 前面加 `yes |`,否则会卡在交互确认。
-- **已部署的 Durable Object 类名与 migration tag 一经部署即固化**,不可改名或改 tag(会要求删库重来)。DO 数据在 Cloudflare 面板不可见,平台自己的 SQL 控制台是唯一入口。
-
----
-
-## 4. 改完必做
-
-- `npm run typecheck && npm run build` 必须通过再部署。
-- 多文件改动后重新 `grep` / `read` 确认真的落盘(发生过编辑静默失败)。
-- 平台行为、部署方式、资源拓扑有变 → 同步 `docs/FORGE2.md`;本文件里的行事规则有变 → 同步本文件。
+- **Environment differences may come only from runtime configuration** (wrangler bindings / `vars` / Cloud Run env and sizing). Both environments share the same `web/dist` and `agent/` sources, so **never** express environment differences through build-time variables (e.g. Vite `import.meta.env`) — that would bake staging values into the production bundle.
+- **wrangler binding-type config does not inherit**: `vars` / `d1_databases` / `kv_namespaces` / `r2_buckets` / `durable_objects` / secrets must be written **twice**, at top level and in `env.staging`. A missing binding does not fail at deploy time; it becomes a runtime `c.env.XXX === undefined` (e.g. missing `PROJECT_DB` makes the generated app's data panel 500 outright). **Any new binding must be added on both sides at once.**
+- **`routes` is the opposite — it inherits**: if `routes` is set at top level and `env.staging` does not explicitly override it, staging inherits it → deploying staging steals the production domain; moreover `publishCustomDomains` has `replace_state` semantics and deletes any Custom Domain on that Worker **not present in the config**. So each environment declares its own `routes`.
+- **With `routes` set, `workers_dev: true` must be explicit**: wrangler's rule is "workers.dev defaults to off when routes are present"; omitting it turns `*.needle.workers.dev` off, breaking published links and not-yet-migrated callback URLs together.
+- **The frontend environment badge is delivered at runtime**: staging's `vars.ENVIRONMENT=staging` → `GET /api/auth/config` returns `environment` → `<EnvBadge>` renders an amber badge. Production does not set it, falls back to `production`, and renders nothing.
+- **Worker secrets are write-only**: no API or command can read a written secret back (the `secrets` API returns names only). Rotating environments requires whoever holds the original value to re-enter it; never promise to "copy production over".
+- **Model multimodal capability is also an environment difference**: whether a model declares `input: ['text','image']` is decided by admin `model_configs.image_input` (per-job override of Cloud Run's `PI_MODEL_INPUT_IMAGE`, which is only a fallback). Upstream gateway dialects do not necessarily accept image blocks — declaring them but failing to send yields an immediate 400; on 2026-10-25 production GLM (`open.bigmodel.cn/api/anthropic`) and DeepSeek (`api.deepseek.com/anthropic`) were both verified to accept image blocks, so production rows keep `image_input=1`; re-verify before adopting a new provider.
+- **Per-job model parameters come from `model_configs`; Cloud Run env is only a fallback**: `model_id` / `base_url` / `api_dialect` / `thinking_level` / `reasoning` / `image_input` / `max_tokens` / `max_run_ms` / `polish_max_ms` / `queue_concurrency` are delivered with each job and override env (`applyModelOverride` in `agent/src/config.ts`); `api_key_env` only selects which **already-bound** Secret to use — key values still come from Cloud Run. `--timeout 3600s` is the Cloud Run hard cap; admin `max_run_ms` caps at 3400s; env `AGENT_MAX_RUN_MS` (1500s) only backstops when the config row is missing/invalid.
 
 ---
 
-## 5. 常用命令
+## 3. Data layer / schema
+
+- Schema changes on an existing database use **incremental migrations** `schema.migrate-*.sql`; running `schema.sql` directly on an existing DB reports `no such column`. `schema.sql` is for brand-new databases only. Staging equivalents: `db:init:staging` / `db:migrate:google:staging`.
+- Prefix `wrangler d1 execute --remote --file=…` with `yes |`, otherwise it hangs on the interactive confirmation.
+- **Deployed Durable Object class names and migration tags are immutable once deployed** — renaming either demands wiping the database. DO data is invisible in the Cloudflare dashboard; the platform's own SQL console is the only entry point.
+
+---
+
+## 4. After every change
+
+- `npm run typecheck && npm run build` must pass before deploying.
+- After multi-file edits, re-`grep` / re-`read` to confirm the changes actually landed (silent edit failures have happened).
+- Platform behavior, deployment method or resource topology changed → update `docs/FORGE2.md`; rules in this file changed → update this file.
+
+### Documentation language policy (since 2026-11-14)
+
+- The repository is **English-first**: `README.md`, `AGENTS.md`, `agent/README.md` and everything in `docs/` are written in English. New docs are English-only; do not create new Chinese docs.
+- `README.zh-CN.md` is the maintained Chinese mirror of `README.md` — when the English README changes materially, update the mirror in the same change. No other doc carries a mirror.
+- Commit messages are English. Code comments default to English; do not bulk-translate existing Chinese comments opportunistically — rewrite them only when substantially editing the surrounding code.
+- Exception: the product's zh/en UI dictionaries (`web/src/lib/i18n/`, `src/lib/i18n.ts`) and the Chinese-only `/admin` pages (see §6) are **product features, not documentation** — they keep their Chinese and are untouched by this policy.
+
+---
+
+## 5. Common commands
 
 ```bash
-npm run typecheck               # Worker + Web + Agent 类型检查
-npm run build                   # 构建 web/dist(生产与 staging 共用同一份产物)
-npm run check                   # 类型检查 + Web / Agent / 生成模板全构建
-npm run deploy                  # 生产 Worker(守卫:必须 main 且工作区干净)
-npm run deploy:staging          # staging Worker(无守卫)
-npm run agent:deploy:prod       # 生产 Cloud Run agent(VIP 通道;守卫:必须 main 且工作区干净)
-npm run agent:deploy:staging    # staging Cloud Run agent(VIP 通道)
-npm run agent:deploy:free:prod     # 生产免费通道执行体(同一生产守卫 + MiniMax-M3.1-Flash + 进程内排队)
-npm run agent:deploy:free:staging  # staging 免费通道执行体
-npm run db:init:staging         # staging 库初始化(幂等)
+npm run typecheck               # Worker + Web + Agent type checks
+npm run build                   # build web/dist (production and staging share one artifact)
+npm run check                   # type checks + full builds of Web / Agent / generated template
+npm run deploy                  # production Worker (guard: must be main with a clean tree)
+npm run deploy:staging          # staging Worker (no guard)
+npm run agent:deploy:prod       # production Cloud Run agent (VIP channel; guard: main + clean tree)
+npm run agent:deploy:staging    # staging Cloud Run agent (VIP channel)
+npm run agent:deploy:free:prod     # production free-channel executor (same prod guard + MiniMax-M3.1-Flash + in-process queueing)
+npm run agent:deploy:free:staging  # staging free-channel executor
+npm run db:init:staging         # staging database init (idempotent)
 npm run db:migrate:google:staging
-npm run db:migrate:analytics:staging  # 用户大盘埋点(新列/新表);生产用 :remote
+npm run db:migrate:analytics:staging  # user-dashboard analytics (new columns/tables); production uses :remote
 ```
 
 ---
 
-## 6. 多语言(中 / 英)
+## 6. Languages (Chinese / English)
 
-- **用户可见文案一律走词典**,不许在组件里写死中文。词典在 `web/src/lib/i18n/`(`dict.zh.ts` 是基准,`dict.en.ts` 用 `Record<DictKey, string>` 约束,**漏译即编译错误**)。新增词条只改这两份文件 + 在组件里 `useT()`,加语言不必动组件。
-- **`/admin` 七个管理页面(产物 / 项目详情 / 用户 / 用户详情 / 模型 / 大盘 / 登录)刻意保持中文**(面向中文运营),不要给它们接 i18n。
-- 带行内格式的词条用 `web/src/components/RichText.tsx`(`**加粗**` / `` `代码` ``);**不要**往 DOM 里注入 HTML 字符串。列表连接符走词条 `chat.listSep`,不要写死 `、`。
-- 非组件代码(如 `lib/api.ts`)取词条用 `tStatic()`,写库前要定语言的文案见 `src/lib/i18n.ts`(Worker 侧那份独立于前端,两者不共享模块)。
-- **生成出来的应用用什么语言,不由界面语言决定**:产物语言跟随用户需求正文(agent 侧检测,见 `docs/FORGE2.md` §17.8)。改提示词时别把语言写死 —— `agent/src/prompt.ts` 的 `systemPrompt(lang, mode)` 是函数,语言块是提示词的第一段。
+- **All user-visible copy goes through the dictionary** — never hardcode Chinese in components. Dictionaries live in `web/src/lib/i18n/` (`dict.zh.ts` is the source of truth; `dict.en.ts` is typed as `Record<DictKey, string>`, so **a missing translation is a compile error**). Adding an entry means editing only those two files + using `useT()` in the component; adding a language requires no component changes.
+- **The seven `/admin` pages (artifacts / project detail / users / user detail / models / dashboard / login) deliberately stay Chinese** (built for Chinese-speaking operators); do not wire them into i18n.
+- Entries with inline formatting use `web/src/components/RichText.tsx` (`**bold**` / `` `code` ``); **never** inject HTML strings into the DOM. List separators use the `chat.listSep` entry, never a hardcoded `、`.
+- Non-component code (e.g. `lib/api.ts`) fetches entries with `tStatic()`; copy whose language must be decided before writing to the DB lives in `src/lib/i18n.ts` (the Worker-side copy is independent of the frontend; the two share no modules).
+- **The language of a generated app is not decided by the UI language**: artifact language follows the body of the user's request (detected agent-side, see `docs/FORGE2.md` §17.8). When editing prompts, never hardcode the language — `systemPrompt(lang, mode)` in `agent/src/prompt.ts` is a function, and the language block is the prompt's first section.
 
 ---
 
-## 7. 不要做
+## 7. Do not
 
-- **不要自动部署生产**(见 §1)。
-- 不要复用线上旧服务 `forge` 的任何 Worker / D1 / secrets / Cloud Run 服务;本项目资源全部自建。
-- **不要把 staging 的 `AGENT_MAX_RUN_MS` 调得比生产小**:真实的多文件生成需要 6 分钟以上,切短会被自身超时掐死(踩过:设 300s 时正常任务失败),失去验证价值。滥用闸门是 `--max-instances 1`,不是把超时切短。
-- 不要为了让部署通过而修改 `scripts/guard-prod-deploy.mjs`,或带着未完成的工作区部署。
+- **Never auto-deploy production** (see §1).
+- Do not reuse any Worker / D1 / secrets / Cloud Run service from the legacy online `forge` service; all resources in this project are standalone.
+- **Never set staging's `AGENT_MAX_RUN_MS` below production's**: real multi-file generation takes over 6 minutes; cutting it gets killed by its own timeout (burned once: at 300s normal jobs failed), destroying staging's validation value. The abuse gate is `--max-instances 1`, not shorter timeouts.
+- Do not modify `scripts/guard-prod-deploy.mjs` to make a deploy pass, or deploy with unfinished work in the tree.

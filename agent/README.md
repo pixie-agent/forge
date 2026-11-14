@@ -1,88 +1,88 @@
 # Forge Agent
 
-Forge Agent 是运行在 Google Cloud Run 上的执行体。它使用 [pi coding agent](https://github.com/earendil-works/pi) 在一次性工作目录内生成或修改多文件 React 应用，执行平台侧 Vite 构建，再将进度、断点和最终产物回调给 Cloudflare Worker。
+Forge Agent is the executor running on Google Cloud Run. It uses the [pi coding agent](https://github.com/earendil-works/pi) to generate or modify multi-file React apps inside a disposable working directory, runs the platform-side Vite build, and reports progress, checkpoints and final artifacts back to the Cloudflare Worker.
 
-Forge Web、账号、任务状态、计费、持久化和发布都在仓库根目录的 Cloudflare Worker 中。完整架构见 [`../docs/FORGE2.md`](../docs/FORGE2.md)。
+The Forge web app, accounts, job state, billing, persistence and publishing all live in the Cloudflare Worker at the repository root. For the full architecture see [`../docs/FORGE2.md`](../docs/FORGE2.md).
 
-## 接口
+## Interface
 
-- `GET /health`：公开健康检查，返回 `{ "ok": true }`。
-- `POST /run`：执行一次任务，必须携带与 Worker 相同的 `X-Agent-Secret`。
+- `GET /health`: public health check, returns `{ "ok": true }`.
+- `POST /run`: executes one job; must carry the same `X-Agent-Secret` as the Worker.
 
-请求体类型见 `src/types.ts` 的 `RunRequest`。Agent 会向请求中的 `callbackBase` 回调：
+The request body type is `RunRequest` in `src/types.ts`. The Agent calls back to the `callbackBase` from the request with:
 
-- 进度和心跳
-- 执行中追加要求与取消状态巡检
-- 源码断点快照
-- 模型用量
-- 最终 `commit` 或 `fail`
+- Progress and heartbeats
+- Follow-up requests during execution and cancellation polling
+- Source checkpoint snapshots
+- Model usage
+- The final `commit` or `fail`
 
-HTTP 请求体上限为 24 MiB。任务运行预算由环境变量提供默认值，并可由 Worker 下发的模型配置逐任务覆盖，最大为 3400 秒。
+The HTTP request body limit is 24 MiB. The job run budget defaults from environment variables and can be overridden per job by the Worker-provided model configuration, up to 3400 seconds.
 
-## 本地运行
+## Running locally
 
-从仓库根目录安装全部依赖：
+Install all dependencies from the repository root:
 
 ```bash
 npm run bootstrap
 cp agent/.env.example agent/.env
 ```
 
-编辑 `agent/.env`，至少配置：
+Edit `agent/.env` with at least:
 
 ```text
-AGENT_SECRET=与根目录 .dev.vars 相同的值
-LLM_BASE_URL=模型接口地址
-LLM_MODEL=模型 ID
-LLM_API_KEY=模型密钥
+AGENT_SECRET=same value as the root .dev.vars
+LLM_BASE_URL=model API endpoint
+LLM_MODEL=model ID
+LLM_API_KEY=model API key
 WORKSPACE_TEMPLATE_DIR=./template
 ```
 
-从根目录启动：
+Start from the repository root:
 
 ```bash
 npm run dev:agent
 curl -s http://localhost:8080/health
 ```
 
-`npm run dev:agent` 会加载 `agent/.env`，并将模板目录转换为绝对路径。也可以进入 `agent/` 后直接运行 `npm run dev`。
+`npm run dev:agent` loads `agent/.env` and converts the template directory to an absolute path. You can also `cd agent/` and run `npm run dev` directly.
 
-## 构建
+## Build
 
 ```bash
 npm run typecheck
 npm run build
 ```
 
-根目录的 `npm run check` 同时验证 Worker、Web、Agent 和模板。
+`npm run check` at the repository root verifies Worker, Web, Agent and template together.
 
 ## Cloud Run
 
-通用部署要求：
+General deployment requirements:
 
-- Node.js 22.19+ 容器（当前固定 `22.22.1-bookworm-slim`）
-- 请求超时 3600 秒
-- `AGENT_MAX_RUN_MS` 或任务级 `max_run_ms` 小于 Cloud Run 超时
-- VIP 执行体通常使用 `--concurrency 1`
-- 模型密钥和 `AGENT_SECRET` 通过 Secret Manager 注入
-- `WORKSPACE_ROOT` 指向可写的临时目录
+- Node.js 22.19+ container (currently pinned to `22.22.1-bookworm-slim`)
+- Request timeout of 3600 seconds
+- `AGENT_MAX_RUN_MS` or per-job `max_run_ms` below the Cloud Run timeout
+- VIP executors usually use `--concurrency 1`
+- Model keys and `AGENT_SECRET` injected via Secret Manager
+- `WORKSPACE_ROOT` pointing at a writable temp directory
 
-维护者专用部署参数位于根 `package.json`。自托管者不应复用其中的服务名、项目或 secret 名；请参阅 [`../docs/SELF_HOSTING.md`](../docs/SELF_HOSTING.md)。
+Maintainer-specific deployment parameters live in the root `package.json`. Self-hosters should not reuse its service names, projects or secret names; see [`../docs/SELF_HOSTING.md`](../docs/SELF_HOSTING.md).
 
-当前维护者部署允许未认证网络访问，但 `/run` 仍执行共享密钥校验。自托管环境应在可行时增加 Cloud Run IAM、受控 ingress、速率限制和异常调用告警。
+The current maintainer deployment allows unauthenticated network access, but `/run` still enforces the shared-secret check. Self-hosted environments should add Cloud Run IAM, restricted ingress, rate limiting and anomaly alerting where possible.
 
-## 目录
+## Layout
 
-| 路径 | 职责 |
+| Path | Responsibility |
 | --- | --- |
-| `src/index.ts` | HTTP、鉴权、请求校验和进程内队列 |
-| `src/runner.ts` | 工作目录、附件、pi 会话、构建、复查和产物收集 |
-| `src/session.ts` | pi provider 与编码工具装配 |
-| `src/prompt.ts` | 系统提示词、生成、修改和复查提示词 |
-| `src/callback.ts` | 进度、心跳、巡检、断点和终态回调 |
-| `src/config.ts` | 环境变量与任务级模型配置合并 |
-| `template/` | 预装依赖并复制到每个生成项目的 React 模板 |
+| `src/index.ts` | HTTP, auth, request validation and in-process queue |
+| `src/runner.ts` | Working directory, attachments, pi session, build, review and artifact collection |
+| `src/session.ts` | pi provider and coding-tool assembly |
+| `src/prompt.ts` | System prompt plus generation, modification and review prompts |
+| `src/callback.ts` | Progress, heartbeat, polling, checkpoint and terminal callbacks |
+| `src/config.ts` | Merging environment variables with per-job model configuration |
+| `template/` | React template with preinstalled dependencies, copied into every generated project |
 
-## 许可
+## License
 
-Agent 平台代码适用仓库根目录的 PolyForm Noncommercial 1.0.0。`template/` 会进入用户导出项目，因此单独采用 Apache-2.0。
+The agent platform code is covered by the PolyForm Noncommercial 1.0.0 license at the repository root. `template/` ends up inside users' exported projects and is therefore licensed separately under Apache-2.0.
