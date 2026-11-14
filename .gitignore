@@ -34,4 +34,10 @@ agent/.npm-cache/
 # (文案、截图、卡片、视频、录屏、生成脚本 —— 全在本地,不进仓库)
 marketing/
 
+# Local-only working material: design-system source docs, scratch files,
+# and local Claude skills. Kept on disk, never committed.
+design-system/
+.scratch/
+.claude/skills/
+
 .DS_Store
