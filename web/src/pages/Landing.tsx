@@ -81,6 +81,8 @@ export default function Landing() {
         <div className="mx-auto mb-7 h-0.5 w-11 bg-indigo-600" aria-hidden="true" />
         <h1 className="font-serif text-4xl font-medium leading-[1.12] tracking-[-0.01em] sm:text-6xl">
           {t('landing.heroPrefix')}
+          {/* 词与词之间的空格由词典决定:中日文不需要,拉丁/西里尔/谚文需要 */}
+          {t('landing.heroSep')}
           <em className="italic text-indigo-300">{t('landing.heroHighlight')}</em>
         </h1>
         <p className="mx-auto mt-5 max-w-xl leading-relaxed text-gray-400">{t('landing.subtitle')}</p>

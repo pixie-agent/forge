@@ -17,6 +17,8 @@ const CASES = [
   ['I want a simple website for my photography portfolio', 'en'],
   ['ペットアドOPTIONサイトを作って、里有。记得書き', 'ja'],
   ['반려동물 입양 사이트 만들어줘', 'ko'],
+  ['Сделай сайт для списка покупок с возможностью отмечать купленные', 'ru'],
+  ['Хочу сделать приложение для заметок с тегами', 'ru'],
   ['Crea una página web para una lista de tareas', 'es'],
   ['Ich möchte eine Website für eine Einkaufsliste erstellen', 'de'],
   ['Je veux créer un site web pour une liste de tâches', 'fr'],
@@ -25,10 +27,12 @@ const CASES = [
   ['Ik wil een website maken voor een takenlijst', 'nl'],
 ]
 
-/** 识别不出来 → 回落界面语言 */
+/** 识别不出来 → 回落界面语言(界面语言集合与产物语言集合一致,直接拿来当默认值) */
 const FALLBACK = [
   ['', 'zh'],
   ['', 'en'],
+  ['', 'ja'],
+  ['', 'ru'],
   ['🙂', 'zh'],
 ]
 
@@ -43,7 +47,7 @@ for (const [text, want] of CASES) {
 
 for (const [text, uiLang] of FALLBACK) {
   const got = resolveOutputLang({ type: 'generate', idea: text, lang: uiLang })
-  const want = uiLang === 'en' ? 'en' : 'zh'
+  const want = uiLang
   const ok = got === want
   if (!ok) failed++
   console.log(`${ok ? '✓' : '✗'} 回落 ${JSON.stringify(text.slice(0, 30))} lang=${uiLang} → ${got}(期望 ${want})`)

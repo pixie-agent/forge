@@ -11,6 +11,14 @@
         if (t === 'light') document.documentElement.dataset.theme = 'light'
       } catch (e) {}
     </script>
+    <script>
+      // 首屏就把 <html lang> 对上用户选的界面语言:词典是异步 chunk,React 挂载前先定好,
+      // 否则读屏软件会先用错误的语言念一遍首屏。词典到位后由 i18n provider 再校准一次。
+      try {
+        var l = localStorage.getItem('forge-lang')
+        if (l) document.documentElement.lang = l === 'zh' ? 'zh-CN' : l
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -4,6 +4,7 @@
  */
 
 import type { Env } from '../types'
+import type { Lang } from './i18n'
 
 const encoder = new TextEncoder()
 
@@ -135,12 +136,21 @@ export function contentTypeFor(path: string): string {
 /** 草稿预览角标:固定在左下角的高 z-index 胶囊,pointer-events:none 不挡交互。
  *  跟随页面本体下发,因此无论内嵌 iframe、新标签打开还是分享出去的测试链接,都能一眼看出「这是测试环境」。
  *  文案按预览者的界面语言渲染(URL 上的 ?lang=)—— 这是平台自己加的字,英文用户不该看到中文。 */
-const ENV_BADGE_TEXT = {
+const ENV_BADGE_TEXT: Record<Lang, string> = {
   zh: '测试环境 · 草稿预览',
   en: 'Test environment · draft preview',
-} as const
+  ja: 'テスト環境 · 下書きプレビュー',
+  ko: '테스트 환경 · 초안 미리보기',
+  ru: 'Тестовая среда · предпросмотр черновика',
+  es: 'Entorno de pruebas · vista previa del borrador',
+  fr: 'Environnement de test · aperçu du brouillon',
+  de: 'Testumgebung · Vorschau des Entwurfs',
+  it: 'Ambiente di test · anteprima della bozza',
+  pt: 'Ambiente de teste · pré-visualização do rascunho',
+  nl: 'Testomgeving · voorbeeld van het concept',
+}
 
-function envBadge(lang: 'zh' | 'en'): string {
+function envBadge(lang: Lang): string {
   const text = ENV_BADGE_TEXT[lang] ?? ENV_BADGE_TEXT.zh
   return (
     '<div aria-hidden="true" style="position:fixed;left:12px;bottom:12px;z-index:2147483647;pointer-events:none;display:flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;background:rgba(217,119,6,.95);color:#fff;font:600 12px/1 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif;letter-spacing:.02em;box-shadow:0 2px 10px rgba(0,0,0,.35)">' +
@@ -149,7 +159,7 @@ function envBadge(lang: 'zh' | 'en'): string {
 }
 
 /** 把角标插到 </body> 前;无 body 时追加到结尾 */
-function injectEnvBadge(html: string, lang: 'zh' | 'en'): string {
+function injectEnvBadge(html: string, lang: Lang): string {
   const badge = envBadge(lang)
   if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${badge}</body>`)
   return html + badge
@@ -190,7 +200,7 @@ export function injectRuntime(
   dataEnv: 'draft' | 'live',
   title?: string | null,
   connectors?: Record<string, Record<string, string>> | null,
-  lang: 'zh' | 'en' = 'zh'
+  lang: Lang = 'zh'
 ): string {
   let script = `window.__FORGE_API_BASE__=${JSON.stringify(apiBase)};window.__FORGE_ENV__=${JSON.stringify(dataEnv)}`
   if (connectors && Object.keys(connectors).length) {

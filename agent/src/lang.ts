@@ -16,11 +16,14 @@
 
 import type { RunRequest } from './types.js'
 
-/** 产物可能出现的语言 */
+/** 产物可能出现的语言(与平台界面语言集合一致,见 i18n.ts) */
 export type OutputLang = 'zh' | 'en' | 'ja' | 'ko' | 'ru' | 'es' | 'fr' | 'de' | 'it' | 'pt' | 'nl'
 
-/** 平台界面语言(Worker 传来的 `body.lang`);只影响平台自身的文案,不决定产物语言 */
-export type UiLang = 'zh' | 'en'
+const OUTPUT_LANGS: readonly OutputLang[] = ['zh', 'en', 'ja', 'ko', 'ru', 'es', 'fr', 'de', 'it', 'pt', 'nl']
+
+function isOutputLang(v: unknown): v is OutputLang {
+  return typeof v === 'string' && (OUTPUT_LANGS as readonly string[]).includes(v)
+}
 
 /** 汉字占「汉字 + 拉丁字母」的比例达到这个值就判为中文 */
 const HAN_RATIO = 0.2
@@ -157,12 +160,13 @@ export function requestText(req: Pick<RunRequest, 'type' | 'idea' | 'message' | 
 
 /**
  * 产物语言 = 检测到的需求语言;检测不到回落界面语言,再回落简体中文。
- * 界面语言是 Worker 传来的 body.lang(缺失即 zh)。
+ * 界面语言是 Worker 传来的 body.lang(缺失即 zh);界面语言与产物语言是同一组
+ * 语言代码,所以这里可以直接拿来当默认值,不需要映射表。
  */
 export function resolveOutputLang(req: Pick<RunRequest, 'type' | 'idea' | 'message' | 'note' | 'lang'>): OutputLang {
   const detected = detectRequestLang(requestText(req))
   if (detected) return detected
-  return req.lang === 'en' ? 'en' : 'zh'
+  return isOutputLang(req.lang) ? req.lang : 'zh'
 }
 
 /** 给模型看的语言名(写进提示词) */
@@ -202,6 +206,9 @@ export function matchesLang(text: string, lang: OutputLang): boolean {
 /**
  * 给脚手架 setLocale() 用的代码。模板只内置中英两套默认文案,
  * 其它语言的应用回落到英文(总比留中文强)。
+ *
+ * ⚠️ 已知限制:产物语言支持 11 种,但脚手架默认文案只有中英 —— 产物里的
+ * `setLocale()` 只能切中/英,其余语言的默认文案由 agent 自己生成。
  */
 export function localeCode(lang: OutputLang): 'zh' | 'en' {
   return lang === 'zh' ? 'zh' : 'en'
