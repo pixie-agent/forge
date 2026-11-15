@@ -121,7 +121,19 @@ export function I18nProvider({ children }: { children: ReactNode }) {
         if (alive) setDict(d)
       })
       .catch(() => {
-        // chunk 加载失败:保留现有语言,不让页面崩掉
+        // 目标语言的 chunk 拉取失败(网络抖动 / CDN 故障)→ 回落英文。
+        // 宁可界面语言不是用户选的那个,也不能白屏 —— 首屏渲染完全依赖这份词典。
+        // 只改内存状态,不写 localStorage:刷新后网络正常的话仍回到用户选的语言。
+        loadLang('en')
+          .then((d) => {
+            if (alive) {
+              setDict(d)
+              setLangState('en')
+            }
+          })
+          .catch(() => {
+            // 两个 chunk 都拉不到:保持现状,不再往下退
+          })
       })
     return () => {
       alive = false
