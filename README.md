@@ -17,7 +17,7 @@ Live instance: [app.1forgen.site](https://app.1forgen.site)
 - Image and text attachments, follow-up requests during execution, and resume from failure checkpoints
 - Email verification, Google sign-in, credits and Creem billing
 - Generated-app connectors such as GA4 and Stripe
-- Chinese and English user interfaces, plus a separate admin console
+- 11-language user interface (Chinese, English, Japanese, Korean, Russian, Spanish, French, German, Italian, Portuguese, Dutch), plus a separate admin console
 
 ## Architecture
 

@@ -1,48 +1,68 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { zh, type DictKey } from './dict.zh'
-import { en } from './dict.en'
+import type { DictKey } from './dict.zh'
 import { SERVER_MESSAGES } from './serverMessages'
+import { htmlLang, isLang, LANG_OPTIONS, LANGS, parseLang, type Lang } from './langs'
+
+export type { DictKey, Lang }
+export { LANG_OPTIONS, LANGS, isLang, parseLang, htmlLang }
+
+type Dict = Record<DictKey, string>
 
 /**
- * 极简 i18n:**不引第三方库**,只做三件事 —— 中/英两份同构字典、一个 React context、一个 t()。
+ * 每种语言一个独立 chunk。
  *
- * 加一门语言 = 新增一份 `Record<DictKey, string>` 字典 + 在 DICTS/LANG_OPTIONS 里各加一行,
- * **组件一行都不用改**(键名才是契约)。
- *
- * 刻意不做的事:复数规则、日期/数字本地化(时间格式化在 lib/format.ts,本身就是数字型格式)、
- * 服务端渲染 —— 目前都不需要,加进来只会让这份文件变复杂。
+ * 11 份词典全量打进主包会让首屏 JS 体积翻倍(每份 ~10 KB gzip),而语言切换是
+ * 低频操作 —— 所以按需加载:首屏只下载当前语言,切换时再拉对应 chunk。
  */
-export type Lang = 'zh' | 'en'
-
-/** 词条键(来自基准字典)。组件里做「值 → 键」映射时可用它约束类型 */
-export type { DictKey } from './dict.zh'
-
-export const DICTS: Record<Lang, Record<DictKey, string>> = { zh, en }
-
-/** 语言切换器的选项(新增语言只改这里) */
-export const LANG_OPTIONS: { code: Lang; label: string }[] = [
-  { code: 'zh', label: '中文' },
-  { code: 'en', label: 'English' },
-]
-
-const STORAGE_KEY = 'forge-lang'
-
-/**
- * 首次访问的默认语言:浏览器语言是中文就中文,否则英文。
- * 产品面向海外,所以「非中文一律英文」比「非英文一律中文」更合理(法语用户看到英文好过看到中文)。
- */
-function detectLang(): Lang {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved === 'zh' || saved === 'en') return saved
-  } catch {
-    // 隐私模式等场景读不到 localStorage:走下面的浏览器语言判断
-  }
-  return typeof navigator !== 'undefined' && navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en'
+const LOADERS: Record<Lang, () => Promise<Dict>> = {
+  zh: () => import('./dict.zh').then((m) => m.zh),
+  en: () => import('./dict.en').then((m) => m.en),
+  ja: () => import('./dict.ja').then((m) => m.ja),
+  ko: () => import('./dict.ko').then((m) => m.ko),
+  ru: () => import('./dict.ru').then((m) => m.ru),
+  es: () => import('./dict.es').then((m) => m.es),
+  fr: () => import('./dict.fr').then((m) => m.fr),
+  de: () => import('./dict.de').then((m) => m.de),
+  it: () => import('./dict.it').then((m) => m.it),
+  pt: () => import('./dict.pt').then((m) => m.pt),
+  nl: () => import('./dict.nl').then((m) => m.nl),
 }
 
-/** `{name}` 占位符替换;缺参时原样保留占位符,方便一眼看出漏传 */
-function interpolate(text: string, vars?: Record<string, string | number>): string {
+const STORAGE_KEY = 'forge-lang'
+const cache = new Map<Lang, Dict>()
+
+/** 加载并缓存某门语言的词典。 */
+export async function loadLang(lang: Lang): Promise<Dict> {
+  const hit = cache.get(lang)
+  if (hit) return hit
+  const dict = await LOADERS[lang]()
+  cache.set(lang, dict)
+  return dict
+}
+
+/** 预取词典(悬停语言列表时调用,让点击时几乎无延迟)。 */
+export function preloadLang(lang: Lang): void {
+  if (!cache.has(lang)) void loadLang(lang).catch(() => {})
+}
+
+export function detectLang(): Lang {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    if (isLang(saved)) return saved
+  } catch {
+    // localStorage 不可用(隐私模式 / SSR)时忽略
+  }
+  try {
+    const nav = typeof navigator !== 'undefined' ? navigator.language.toLowerCase() : ''
+    const base = nav.split('-')[0]
+    if (isLang(base)) return base
+  } catch {
+    // navigator 不可用时忽略
+  }
+  return 'en'
+}
+
+export function interpolate(text: string, vars?: Record<string, string | number>): string {
   if (!vars) return text
   return text.replace(/\{(\w+)\}/g, (whole, key: string) => (key in vars ? String(vars[key]) : whole))
 }
@@ -50,77 +70,99 @@ function interpolate(text: string, vars?: Record<string, string | number>): stri
 export interface I18n {
   lang: Lang
   setLang: (lang: Lang) => void
-  /** 取词条。传未知键时原样返回键名(开发期一眼可见),不抛错、不空白 */
   t: (key: DictKey, vars?: Record<string, string | number>) => string
-  /** 把服务端返回的中文文案翻成当前语言;无映射时原样返回 */
   tServer: (message: string) => string
 }
 
-const I18nCtx = createContext<I18n>({
-  lang: 'zh',
-  setLang: () => {},
-  t: (key) => zh[key] ?? key,
-  tServer: (message) => message,
-})
-
-export function useI18n(): I18n {
-  return useContext(I18nCtx)
-}
-
-/** 组件里最常用的一层糖:const t = useT() */
-export function useT(): I18n['t'] {
-  return useContext(I18nCtx).t
-}
+const I18nCtx = createContext<I18n | null>(null)
 
 /**
- * React 之外(如 lib/api.ts 里的 fetch 封装)没有 context,这里留一份「当前语言」的模块级副本,
- * 由 Provider 在 effect 里同步。只为这两处非组件代码服务,组件一律用 useI18n()/useT()。
+ * 模块级当前语言:供 React 之外的代码取词(`lib/api.ts`、`lib/attachments.ts`)。
+ * 这些地方不在 React 树里,拿不到 context,只能读模块状态。
  */
-let activeLang: Lang = 'zh'
+let activeLang: Lang = 'en'
 export function setActiveLang(lang: Lang): void {
   activeLang = lang
 }
-
-/**
- * 当前语言的读取口(非组件环境用)。服务端有少量文案(附件/连接器清单、任务收尾的 assistant 消息)
- * 需要**在写库时就定下语言**,请求体里带上它;回调时刻(commit/cancel)才能按用户当时的语言渲染。
- */
 export function getActiveLang(): Lang {
   return activeLang
 }
 
-/** 非组件环境下的取词条 */
 export function tStatic(key: DictKey, vars?: Record<string, string | number>): string {
-  return interpolate(DICTS[activeLang][key] ?? zh[key] ?? key, vars)
+  const dict = cache.get(activeLang)
+  const text = dict?.[key] ?? cache.get('en')?.[key] ?? key
+  return interpolate(text, vars)
 }
 
-/** 非组件环境下的服务端文案翻译 */
 export function translateServer(message: string): string {
   const key = SERVER_MESSAGES[message]
   return key ? tStatic(key) : message
 }
 
+export function useI18n(): I18n {
+  const ctx = useContext(I18nCtx)
+  if (!ctx) throw new Error('useI18n must be used inside I18nProvider')
+  return ctx
+}
+
+export function useT(): I18n['t'] {
+  return useI18n().t
+}
+
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [lang, setLangState] = useState<Lang>(detectLang)
+  const [dict, setDict] = useState<Dict | null>(null)
+
+  // 切换语言时保留上一次的词典继续渲染,新词典到位后再替换 —— 避免整页闪白。
+  useEffect(() => {
+    let alive = true
+    loadLang(lang)
+      .then((d) => {
+        if (alive) setDict(d)
+      })
+      .catch(() => {
+        // 目标语言的 chunk 拉取失败(网络抖动 / CDN 故障)→ 回落英文。
+        // 宁可界面语言不是用户选的那个,也不能白屏 —— 首屏渲染完全依赖这份词典。
+        // 只改内存状态,不写 localStorage:刷新后网络正常的话仍回到用户选的语言。
+        loadLang('en')
+          .then((d) => {
+            if (alive) {
+              setDict(d)
+              setLangState('en')
+            }
+          })
+          .catch(() => {
+            // 两个 chunk 都拉不到:保持现状,不再往下退
+          })
+      })
+    return () => {
+      alive = false
+    }
+  }, [lang])
+
+  useEffect(() => {
+    document.documentElement.lang = htmlLang(lang)
+    setActiveLang(lang)
+  }, [lang])
+
+  // 词典到位后同步浏览器标签标题(index.html 里写死的是中文,只作首屏与 SEO 兜底)
+  useEffect(() => {
+    if (!dict) return
+    document.title = dict['app.title']
+  }, [dict])
 
   const setLang = useCallback((next: Lang) => {
     setLangState(next)
     try {
       localStorage.setItem(STORAGE_KEY, next)
     } catch {
-      // 存不进就只在本次会话生效
+      // localStorage 不可用时忽略:本次会话内依然生效
     }
   }, [])
 
-  // 同步 <html lang>:影响屏幕阅读器与浏览器翻译提示,不发请求
-  useEffect(() => {
-    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en'
-    setActiveLang(lang)
-  }, [lang])
-
   const value = useMemo<I18n>(() => {
-    const dict = DICTS[lang]
-    const t: I18n['t'] = (key, vars) => interpolate(dict[key] ?? zh[key] ?? key, vars)
+    // 词典缺键时回落到英文,再回落到键名(类型已保证不缺,这里是兜底)
+    const t: I18n['t'] = (key, vars) => interpolate(dict?.[key] ?? cache.get('en')?.[key] ?? key, vars)
     return {
       lang,
       setLang,
@@ -130,7 +172,10 @@ export function I18nProvider({ children }: { children: ReactNode }) {
         return key ? t(key) : message
       },
     }
-  }, [lang, setLang])
+  }, [lang, setLang, dict])
+
+  // 首屏:词典是异步 chunk,到位前不渲染子树(否则会先用错误语言闪一下)。
+  if (!dict) return null
 
   return <I18nCtx.Provider value={value}>{children}</I18nCtx.Provider>
 }

@@ -10,7 +10,7 @@ import type { ProgressReporter, StreamLogger } from './callback.js'
 import type { AgentSession } from '@earendil-works/pi-coding-agent'
 import { polishPrompt, buildUserPrompt, parsePlan, deliveryNotePrompt } from './prompt.js'
 import { resolveOutputLang, localeCode, matchesLang } from './lang.js'
-import { t, type UiLang } from './i18n.js'
+import { isUiLang, t, type UiLang } from './i18n.js'
 import { createForgeSession } from './session.js'
 import { ATTACHMENT_DIR, attachmentFileName } from './attachments.js'
 import { CONNECTOR_DIR, materializeConnectors } from './connectors.js'
@@ -355,7 +355,7 @@ export async function runJob(
   onCheckpoint?: (source: FileMap) => Promise<boolean>,
 ): Promise<RunResult> {
   // 冷启动期间就被停止:连工作目录都不用建
-  const uiLang: UiLang = req.lang === 'en' ? 'en' : 'zh'
+  const uiLang: UiLang = isUiLang(req.lang) ? req.lang : 'zh'
   if (signal?.aborted) throw new CancelledError(uiLang)
   // 凭证缺失必须在接活前就失败:pi 解析不到环境变量时会把变量名当字面量发出去,
   // 上游 401 → pi 降级成空轮次(见 error.modelFailed / error.emptyModelRun 的兜底)。

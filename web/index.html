@@ -11,6 +11,21 @@
         if (t === 'light') document.documentElement.dataset.theme = 'light'
       } catch (e) {}
     </script>
+    <script>
+      // 首屏就把 <html lang> 对上用户选的界面语言:词典是异步 chunk,React 挂载前先定好,
+      // 否则读屏软件会先用错误的语言念一遍首屏。词典到位后由 i18n provider 再校准一次。
+      // 判定顺序与 detectLang() 一致:localStorage → 浏览器语言前缀 → 英文。
+      // 这里只改 lang 属性(不涉及文案),所以不需要等词典到位。
+      try {
+        var l = localStorage.getItem('forge-lang')
+        var ok = 'zh en ja ko ru es fr de it pt nl'.split(' ')
+        if (ok.indexOf(l) < 0) {
+          var b = (navigator.language || 'en').toLowerCase().split('-')[0]
+          l = ok.indexOf(b) >= 0 ? b : 'en'
+        }
+        document.documentElement.lang = l === 'zh' ? 'zh-CN' : l
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

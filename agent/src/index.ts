@@ -14,7 +14,7 @@ import {
 import { applyModelOverride, loadConfig, type AgentConfig } from './config.js'
 import { FifoQueue } from './queue.js'
 import { runJob } from './runner.js'
-import { t, type UiLang } from './i18n.js'
+import { isUiLang, t, type UiLang } from './i18n.js'
 import type { AgentSession } from '@earendil-works/pi-coding-agent'
 import type { FileMap, RunAttachment, RunRequest, RunUsage, SteerMessage } from './types.js'
 
@@ -96,7 +96,7 @@ const server = createServer((req, res) => {
   void (async () => {
     const url = new URL(req.url ?? '/', 'http://localhost')
     // 界面语言:Worker 放在请求头里(请求体之前失败时也要能回对语言),请求体里的 lang 优先
-    const headerLang: UiLang = req.headers['x-forge-lang'] === 'en' ? 'en' : 'zh'
+    const headerLang: UiLang = isUiLang(req.headers['x-forge-lang']) ? req.headers['x-forge-lang'] : 'zh'
 
     if (req.method === 'GET' && url.pathname === '/health') {
       send(res, 200, { ok: true })
@@ -122,7 +122,7 @@ const server = createServer((req, res) => {
       send(res, 400, { error: t(headerLang, 'error.incomplete') })
       return
     }
-    const uiLang: UiLang = body.lang === 'en' ? 'en' : headerLang
+    const uiLang: UiLang = isUiLang(body.lang) ? body.lang : headerLang
 
     // 后台配置的模型覆盖(见 docs/FORGE2.md §21):每次请求独立生效,不改进程级 config,
     // 也不碰密钥 —— baseUrl/modelId/思考档位/复查轮/运行上限都从这里合并,非法值回落 env。

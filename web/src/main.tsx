@@ -2,7 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import CloudflareAnalytics from './components/CloudflareAnalytics'
-import { I18nProvider } from './lib/i18n'
+import { I18nProvider, detectLang, preloadLang } from './lib/i18n'
 // 自托管字体(不请求 Google CDN):Inter 为全局无衬线,Playfair Display + Noto Serif SC
 // 是「Atelier」主题的衬线展示字体;Noto Serif SC 按 unicode-range 切片,只下载用到的字形。
 import '@fontsource/inter/400.css'
@@ -13,6 +13,9 @@ import '@fontsource/playfair-display/500-italic.css'
 import '@fontsource/playfair-display/600.css'
 import '@fontsource/noto-serif-sc/600.css'
 import './index.css'
+
+// 词典是按语言切分的异步 chunk:在 React 挂载之前就开始拉当前语言,少等一个往返
+preloadLang(detectLang())
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

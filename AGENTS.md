@@ -96,7 +96,7 @@ npm run agent:deploy:prod                                       #    only needed
 - The repository is **English-first**: `README.md`, `AGENTS.md`, `agent/README.md` and everything in `docs/` are written in English. New docs are English-only; do not create new Chinese docs.
 - `README.zh-CN.md` is the maintained Chinese mirror of `README.md` — when the English README changes materially, update the mirror in the same change. No other doc carries a mirror.
 - Commit messages are English. Code comments default to English; do not bulk-translate existing Chinese comments opportunistically — rewrite them only when substantially editing the surrounding code.
-- Exception: the product's zh/en UI dictionaries (`web/src/lib/i18n/`, `src/lib/i18n.ts`) and the Chinese-only `/admin` pages (see §6) are **product features, not documentation** — they keep their Chinese and are untouched by this policy.
+- Exception: the product's UI dictionaries (`web/src/lib/i18n/`, `src/lib/messages/`, `agent/src/messages/`) and the Chinese-only `/admin` pages (see §6) are **product features, not documentation** — the Chinese source tables and the `/admin` pages keep their Chinese and are untouched by this policy.
 
 ---
 
@@ -119,12 +119,15 @@ npm run db:migrate:analytics:staging  # user-dashboard analytics (new columns/ta
 
 ---
 
-## 6. Languages (Chinese / English)
+## 6. Languages (11 UI languages)
 
-- **All user-visible copy goes through the dictionary** — never hardcode Chinese in components. Dictionaries live in `web/src/lib/i18n/` (`dict.zh.ts` is the source of truth; `dict.en.ts` is typed as `Record<DictKey, string>`, so **a missing translation is a compile error**). Adding an entry means editing only those two files + using `useT()` in the component; adding a language requires no component changes.
+- **The platform UI speaks 11 languages**: `zh, en, ja, ko, ru, es, fr, de, it, pt, nl` — the **same set as the artifact language set** (`agent/src/lang.ts`), so the UI language can double as the artifact-language default without a mapping table. The list lives in `web/src/lib/i18n/langs.ts` (`LANGS` / `LANG_OPTIONS`); each language has its own dictionary `web/src/lib/i18n/dict.<lang>.ts`, loaded as a **separate chunk** (dynamic import) so the initial bundle only carries the active language.
+- **All user-visible copy goes through the dictionary** — never hardcode Chinese in components. `dict.zh.ts` is the source of truth for the key set (`DictKey = keyof typeof zh`); every other dictionary is typed `Record<DictKey, string>`, so **a missing translation is a compile error**. Adding an entry means editing `dict.zh.ts` + every `dict.<lang>.ts` + using `useT()` in the component; adding a language requires no component changes. Run `npm run i18n:check` after touching dictionaries — it verifies key sets and `{placeholder}` sets across all languages on all three layers (frontend / Worker / agent), which is not checkable by eye at this scale.
+- **Legal documents are not in the UI dictionary**: they live in `web/src/lib/i18n/legal/` and only reviewed translations ship (`zh`, `en`); other languages fall back to the English original with a visible notice. Do **not** machine-translate the Privacy Policy / Terms / AUP — Creem's account review depends on the "pornography / adult / NSFW content is prohibited" clauses surviving verbatim.
 - **The seven `/admin` pages (artifacts / project detail / users / user detail / models / dashboard / login) deliberately stay Chinese** (built for Chinese-speaking operators); do not wire them into i18n.
 - Entries with inline formatting use `web/src/components/RichText.tsx` (`**bold**` / `` `code` ``); **never** inject HTML strings into the DOM. List separators use the `chat.listSep` entry, never a hardcoded `、`.
-- Non-component code (e.g. `lib/api.ts`) fetches entries with `tStatic()`; copy whose language must be decided before writing to the DB lives in `src/lib/i18n.ts` (the Worker-side copy is independent of the frontend; the two share no modules).
+- **拼接两段文案时,空格由词典显式给出**:不要把空格藏在文案值里(首尾空格在编辑、复制粘贴、格式化时最容易悄悄丢掉,英文首屏曾因此渲染成 "Forge your idea intoa shippable website")。约定是加一个显式分隔位条目,如 `landing.heroSep` —— 中日文是空串,拉丁 / 西里尔 / 谚文是单个空格。`scripts/check-i18n.mjs` 会把「值首尾有多余空格」判为失败(碎片型条目 `*Suffix` / `*Prefix` / `*Hint` 与分隔位除外)。
+- Non-component code (e.g. `lib/api.ts`) fetches entries with `tStatic()`; copy whose language must be decided before writing to the DB lives in `src/lib/messages/` (the Worker-side copy is independent of the frontend; the two share no modules). The agent's own progress/error copy is a third, independent set: `agent/src/messages/`. All three sets use the same language codes.
 - **The language of a generated app is not decided by the UI language**: artifact language follows the body of the user's request (detected agent-side, see `docs/FORGE2.md` §17.8). When editing prompts, never hardcode the language — `systemPrompt(lang, mode)` in `agent/src/prompt.ts` is a function, and the language block is the prompt's first section.
 
 ---

@@ -196,6 +196,7 @@ function Guard({ children }: { children: ReactNode }) {
 
 /** 管理后台门禁:用独立口令校验(/api/admin/me),未通过则显示口令登录 */
 function AdminGate({ children }: { children: ReactNode }) {
+  const t = useT()
   const [admin, setAdmin] = useState<boolean | null>(null)
   const check = useCallback(() => {
     api<{ admin: boolean }>('/api/admin/me')
@@ -206,7 +207,7 @@ function AdminGate({ children }: { children: ReactNode }) {
     check()
   }, [check])
   if (admin === null)
-    return <div className="flex h-screen items-center justify-center bg-gray-950 text-sm text-gray-400">加载中…</div>
+    return <div className="flex h-screen items-center justify-center bg-gray-950 text-sm text-gray-400">{t('common.loading')}</div>
   if (!admin) return <AdminLogin onSuccess={check} />
   return <>{children}</>
 }

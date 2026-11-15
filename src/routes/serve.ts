@@ -10,6 +10,7 @@ import type { Context } from 'hono'
 import type { ArtifactManifest, Env } from '../types'
 import { CORS_HEADERS, handleAppApi } from '../lib/appdata'
 import { artifactPrefix, contentTypeFor, injectRuntime, normalizeAssetPath, verifyPreviewToken } from '../lib/artifacts'
+import { parseLang, type Lang } from '../lib/i18n'
 import { publicConfig } from '../lib/connectors/store'
 
 const app = new Hono<{ Bindings: Env }>()
@@ -34,7 +35,7 @@ async function manifestOf(env: Env, projectId: string, versionNo: number): Promi
 }
 
 /** 服务某个版本:subpath 为空或含扩展名 → 静态产物;以 api/ 开头 → 后端数据 API */
-async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo: number, dataEnv: 'draft' | 'live', apiBase: string, subpath: string, title?: string | null, lang: 'zh' | 'en' = 'zh'): Promise<Response> {
+async function serve(c: Context<{ Bindings: Env }>, projectId: string, versionNo: number, dataEnv: 'draft' | 'live', apiBase: string, subpath: string, title?: string | null, lang: Lang = 'zh'): Promise<Response> {
   const env = c.env
   if (subpath.startsWith('api/') || subpath === 'api') {
     if (c.req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS })
@@ -110,7 +111,7 @@ app.all('/p/:token/*', async (c) => {
   const name = await c.env.DB.prepare('SELECT name FROM projects WHERE id = ?').bind(loc.projectId).first<{ name: string }>()
   const subpath = c.req.path.slice(`/p/${token}/`.length)
   // 预览页的平台角标按预览者的界面语言渲染(前端在 iframe 的 URL 上带 ?lang=)
-  const lang = c.req.query('lang') === 'en' ? 'en' : 'zh'
+  const lang = parseLang(c.req.query('lang'), 'zh')
   return serve(c, loc.projectId, loc.versionNo, 'draft', `/p/${token}/api`, subpath, name?.name, lang)
 })
 

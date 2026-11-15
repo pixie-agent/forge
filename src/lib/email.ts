@@ -1,6 +1,6 @@
 import type { Env } from '../types'
 import { newToken } from './auth'
-import { srv, type Lang } from './i18n'
+import { grant, interpolate, srv, type Lang } from './i18n'
 
 const encoder = new TextEncoder()
 
@@ -83,9 +83,9 @@ export async function sendCreditGrantEmail(env: Env, to: string, amount: number,
   const base = env.PUBLIC_BASE_URL.replace(/\/+$/, '')
   const link = new URL('/', base).toString()
   const vars = { amount, balance, link }
-  const subject = `${srv('zh', 'grant.subject')} · ${srv('en', 'grant.subject')}`
-  const text = `${srv('zh', 'grant.text', vars)}\n\n---\n\n${srv('en', 'grant.text', vars)}`
-  const html = `${srv('zh', 'grant.html', vars)}${srv('en', 'grant.html', vars)}`
+  const subject = `${grant.zh.subject} · ${grant.en.subject}`
+  const text = `${interpolate(grant.zh.text, vars)}\n\n---\n\n${interpolate(grant.en.text, vars)}`
+  const html = `${interpolate(grant.zh.html, vars)}${interpolate(grant.en.html, vars)}`
   return sendEmail(env, to, subject, text, html)
 }
 
