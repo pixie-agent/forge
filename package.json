@@ -76,7 +76,7 @@
     "agent:deploy:free:staging": "gcloud run deploy forge-agent-free-staging --source agent --region us-central1 --timeout 3600 --concurrency 8 --no-cpu-throttling --min-instances 0 --max-instances 1 --cpu 1 --memory 1Gi --allow-unauthenticated --set-env-vars LLM_BASE_URL=https://api.minimaxi.com/anthropic,LLM_MODEL=MiniMax-M3.1-Flash,PI_LLM_API=anthropic-messages,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,PI_MODEL_INPUT_IMAGE=true,AGENT_MAX_RUN_MS=1500000,AGENT_QUEUE_CONCURRENCY=2,WORKSPACE_ROOT=/tmp/forge-agent --set-secrets LLM_API_KEY=llm-api-key-minimax-staging:latest,LLM_API_KEY_MINIMAX=llm-api-key-minimax-staging:latest,LLM_API_KEY_GLM=llm-api-key-staging:latest,AGENT_SECRET=agent-secret-staging:latest"
   },
   "dependencies": {
-    "hono": "^4.7.6"
+    "hono": "^4.13.16"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260926.1",
