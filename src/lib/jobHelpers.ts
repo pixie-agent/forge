@@ -1,9 +1,16 @@
 /** 与任务相关的公共小工具(供 generate 路由与 jobs 执行体共用) */
 
-/** 未完成任务判定:任务创建互斥与断线恢复共用同一语义 */
-export const ACTIVE_STATUS_SQL = "status IN ('pending','running')"
+import type { Env } from '../types'
+import { loadWaiting, type WaitingInfo } from './checkpoints'
 
-/** 终态判定:SSE 推完即关流、前端停止订阅,统一以此为准(cancelled 也是终态) */
+/** 未完成任务判定:任务创建互斥、断线恢复、取消共用同一语义(等待人应答也算未完成,仍占项目锁) */
+export const ACTIVE_STATUS_SQL = "status IN ('pending','running','waiting_human')"
+
+/** 可运行状态:仍可能被 agent 接活或正在执行;等待人应答(waiting_human)不在此列,
+ *  巡检/heartbeat 判死与生成中追加要求都不该把它当成「执行中」 */
+export const RUNNABLE_STATUS_SQL = "status IN ('pending','running')"
+
+/** 终态判定:SSE 推完即关流、前端停止订阅,统一以此为准(cancelled 也是终态;waiting_human 不是) */
 export function isTerminalStatus(status: string): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'cancelled'
 }
@@ -49,7 +56,26 @@ interface SnapshotRow {
   chat_message: string | null
 }
 
-function snapshotFromRow(row: SnapshotRow) {
+/** 任务状态快照(轮询/SSE 响应体):只暴露前端需要的字段,elapsed 由服务端计算 */
+export interface JobSnapshot {
+  id: string
+  type: 'generate' | 'chat'
+  status: string
+  stage: string
+  progress: string | null
+  files_preview: { path: string; content: string } | null
+  agent_log: string | null
+  idea: string | null
+  prompt: string | null
+  plan: unknown
+  error: string | null
+  version: number | null
+  elapsed: number
+  /** 人门节点暂停时的人读等待信息(问题/选项/门类型);非等待态为 null */
+  waiting: WaitingInfo | null
+}
+
+function snapshotFromRow(row: SnapshotRow): JobSnapshot {
   let filesPreview: { path: string; content: string } | null = null
   if (row.files_preview) {
     try {
@@ -76,23 +102,26 @@ function snapshotFromRow(row: SnapshotRow) {
     elapsed: row.started_at
       ? Math.max(0, Math.floor((Date.now() - Date.parse(row.started_at.replace(' ', 'T') + 'Z')) / 1000))
       : 0,
+    waiting: null,
   }
 }
 
-/** 任务状态快照(轮询/SSE 响应体):只暴露前端需要的字段,elapsed 由服务端计算;
- *  传入 userId 时同时校验属主,非属主与不存在一样返回 null */
-export async function jobSnapshot(db: D1Database, jobId: string, userId?: string) {
-  const row = await db
-    .prepare(`SELECT ${SNAPSHOT_COLUMNS} FROM jobs WHERE id = ?`)
+/** 任务状态快照(轮询/SSE 响应体);传入 userId 时同时校验属主,非属主与不存在一样返回 null。
+ *  等待人应答的任务额外带上人读等待信息,供前端渲染确认/选择面板。 */
+export async function jobSnapshot(env: Env, jobId: string, userId?: string) {
+  const row = await env.DB
+    .prepare(`SELECT ${SNAPSHOT_COLUMNS}, project_id FROM jobs WHERE id = ?`)
     .bind(jobId)
-    .first<SnapshotRow>()
+    .first<SnapshotRow & { project_id: string }>()
   if (!row || (userId !== undefined && row.user_id !== userId)) return null
-  return snapshotFromRow(row)
+  const snap = snapshotFromRow(row)
+  if (snap.status === 'waiting_human') snap.waiting = await loadWaiting(env, row.project_id, jobId)
+  return snap
 }
 
 /** 项目的活动任务快照(断线/刷新恢复),单查询完成属主校验;无则返回 null */
-export async function activeJobSnapshot(db: D1Database, projectId: string, userId: string) {
-  const row = await db
+export async function activeJobSnapshot(env: Env, projectId: string, userId: string) {
+  const row = await env.DB
     .prepare(
       `SELECT ${SNAPSHOT_COLUMNS} FROM jobs WHERE project_id = ? AND ${ACTIVE_STATUS_SQL}
        AND EXISTS (SELECT 1 FROM projects WHERE projects.id = jobs.project_id AND projects.user_id = ?)
@@ -100,7 +129,10 @@ export async function activeJobSnapshot(db: D1Database, projectId: string, userI
     )
     .bind(projectId, userId)
     .first<SnapshotRow>()
-  return row ? snapshotFromRow(row) : null
+  if (!row) return null
+  const snap = snapshotFromRow(row)
+  if (snap.status === 'waiting_human') snap.waiting = await loadWaiting(env, projectId, row.id)
+  return snap
 }
 
 /**
@@ -129,5 +161,3 @@ export async function lastFailedJobSnapshot(db: D1Database, projectId: string, u
     checkpoint_files: row.checkpoint_files ?? null,
   }
 }
-
-export type JobSnapshot = NonNullable<Awaited<ReturnType<typeof jobSnapshot>>>

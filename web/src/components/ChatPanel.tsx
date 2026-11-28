@@ -54,6 +54,12 @@ interface Props {
   onStop?: () => void
   /** 停止请求在途 */
   stopping?: boolean
+  /** 人门节点暂停时的等待信息;非 null 时渲染确认/选择面板 */
+  waiting?: { question: string; options?: string[]; kind: 'approve' | 'choose' } | null
+  /** 用户作答(choice/decline/feedback);waiting 非 null 时由面板调用 */
+  onRespond?: (choice?: string, decline?: boolean, feedback?: string) => void
+  /** 作答请求在途 */
+  responding?: boolean
   /** 输入框上方的「本轮可用外部系统」能力条(由 Workspace 组装成 chip,见 ConnectorChips) */
   connectorsBar?: React.ReactNode
   /**
@@ -109,11 +115,18 @@ function storeWidth(w: number): void {
   }
 }
 
-export default function ChatPanel({ messages, plan, streaming, error, stage, elapsed, progressText, jobType, idlePlaceholder, mobileHidden, onSend, onSteer, onRetry, onResume, resumeFiles, stoppedResumable, onStop, stopping, connectorsBar, credentialCard }: Props) {
+export default function ChatPanel({ messages, plan, streaming, error, stage, elapsed, progressText, jobType, idlePlaceholder, mobileHidden, onSend, onSteer, onRetry, onResume, resumeFiles, stoppedResumable, onStop, stopping, waiting, onRespond, responding, connectorsBar, credentialCard }: Props) {
   const t = useT()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [attachError, setAttachError] = useState('')
+  // 人门等待(approve/choose):作答选择与补充反馈;问题切换时重置
+  const [choice, setChoice] = useState('')
+  const [feedback, setFeedback] = useState('')
+  useEffect(() => {
+    setChoice('')
+    setFeedback('')
+  }, [waiting?.question])
   const listRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   // 输入法组词中(中文/日文等):回车用来确认候选词,不能顺手把半截内容发出去
@@ -369,6 +382,62 @@ export default function ChatPanel({ messages, plan, streaming, error, stage, ela
                 ))}
               </div>
             )}
+          </div>
+        )}
+        {waiting && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3">
+            <div className="mb-2 flex items-center gap-2 text-sm font-medium text-amber-200">
+              <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-400" />
+              <span>{t('ws.wait.title')}</span>
+            </div>
+            <p className="mb-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-gray-200">{waiting.question}</p>
+            {waiting.kind === 'choose' && waiting.options?.length ? (
+              <div className="mb-3 space-y-1.5">
+                {waiting.options.map((opt) => (
+                  <label
+                    key={opt}
+                    className="flex cursor-pointer items-center gap-2 rounded-lg border border-amber-500/20 px-3 py-2 text-sm text-gray-200 hover:bg-amber-500/10"
+                  >
+                    <input
+                      type="radio"
+                      name="respond-choice"
+                      checked={choice === opt}
+                      onChange={() => setChoice(opt)}
+                      className="accent-amber-400"
+                    />
+                    <span>{opt}</span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <textarea
+                value={feedback}
+                onChange={(e) => setFeedback(e.target.value)}
+                placeholder={t('ws.wait.feedbackPlaceholder')}
+                rows={2}
+                className="mb-3 w-full resize-none rounded-lg border border-amber-500/20 bg-black/20 px-3 py-2 text-sm text-gray-100 placeholder:text-gray-500 focus:border-amber-400 focus:outline-none"
+              />
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() =>
+                  onRespond?.(waiting.kind === 'choose' ? choice : undefined, false, waiting.kind === 'approve' ? feedback : undefined)
+                }
+                disabled={responding || (waiting.kind === 'choose' && !choice)}
+                className="rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-black hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {responding ? t('chat.stopping') : waiting.kind === 'choose' ? t('ws.wait.confirm') : t('ws.wait.approve')}
+              </button>
+              {waiting.kind === 'approve' && (
+                <button
+                  onClick={() => onRespond?.(undefined, true)}
+                  disabled={responding}
+                  className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-500/20 disabled:opacity-50"
+                >
+                  {t('ws.wait.decline')}
+                </button>
+              )}
+            </div>
           </div>
         )}
         {error && (

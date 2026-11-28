@@ -5,7 +5,7 @@ import { clearJobMessages, insertMessage } from './jobHelpers'
 import { releaseJobCredits } from './credits'
 import { langOfPayload, srv, type Lang } from './i18n'
 import { clearArtifacts, DRAFT_VERSION_NO, putArtifacts } from './artifacts'
-import { deleteCheckpoint } from './checkpoints'
+import { deleteCheckpoint, deleteResume } from './checkpoints'
 import { logEvent } from './events'
 import type { AgentRunResult, FileMap } from './agent'
 
@@ -121,13 +121,15 @@ export async function markJobFailed(env: Env, jobId: string, error: string): Pro
   const row = await env.DB
     .prepare(
       `UPDATE jobs SET status = 'failed', error = ?, updated_at = datetime('now')
-       WHERE id = ? AND status IN ('pending','running') RETURNING user_id`
+       WHERE id = ? AND status IN ('pending','running','waiting_human') RETURNING user_id, project_id`
     )
     .bind(error.slice(0, 300), jobId)
-    .first<{ user_id: string }>()
+    .first<{ user_id: string; project_id: string }>()
     .catch(() => null)
   if (!row) return false
   await clearJobMessages(env.DB, jobId)
+  // 人门等待任务被判死:恢复对象一并清掉(不存在也无害,见 docs/FORGE2.md §17.14)
+  await deleteResume(env, row.project_id, jobId).catch(() => {})
   await releaseJobCredits(env.DB, jobId, '任务未完成,已退还积分').catch(() => 0)
   await logEvent(env.DB, row.user_id, 'job_end', { jobId, status: 'failed' })
   return true
@@ -163,15 +165,22 @@ async function jobLang(env: Env, jobId: string): Promise<Lang> {
 export async function cancelJob(env: Env, jobId: string): Promise<boolean> {
   // 「已手动停止」按任务发起时的语言渲染(语言随 payload 落库,见 src/lib/i18n.ts)
   const lang = await jobLang(env, jobId)
+  const row = await env.DB
+    .prepare('SELECT project_id FROM jobs WHERE id = ?')
+    .bind(jobId)
+    .first<{ project_id: string }>()
+    .catch(() => null)
   const res = await env.DB
     .prepare(
       `UPDATE jobs SET status = 'cancelled', error = ?, updated_at = datetime('now')
-       WHERE id = ? AND status IN ('pending','running')`
+       WHERE id = ? AND status IN ('pending','running','waiting_human')`
     )
     .bind(srv(lang, 'job.cancelled'), jobId)
     .run()
     .catch(() => null)
   if (!res?.meta.changes) return false
+  // 停止等待人应答的任务:恢复对象一并清掉
+  if (row?.project_id) await deleteResume(env, row.project_id, jobId).catch(() => {})
   await clearJobMessages(env.DB, jobId)
   await releaseJobCredits(env.DB, jobId, '已停止,退还积分').catch(() => 0)
   return true

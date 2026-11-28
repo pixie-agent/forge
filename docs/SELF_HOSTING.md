@@ -32,6 +32,7 @@ Choose unique names for your installation:
 ```bash
 npx wrangler d1 create forge-self-hosted
 npx wrangler r2 bucket create forge-self-hosted-artifacts
+npx wrangler r2 bucket create forge-self-hosted-prompts
 npx wrangler kv namespace create forge-self-hosted-appdata
 ```
 
@@ -40,6 +41,7 @@ Create separate staging resources if you will use `env.staging`:
 ```bash
 npx wrangler d1 create forge-self-hosted-staging
 npx wrangler r2 bucket create forge-self-hosted-artifacts-staging
+npx wrangler r2 bucket create forge-self-hosted-prompts-staging
 npx wrangler kv namespace create forge-self-hosted-appdata-staging
 ```
 
@@ -54,7 +56,14 @@ yes | npx wrangler d1 execute DB --remote --file=schema.sql
 yes | npx wrangler d1 execute DB --remote --env staging --file=schema.sql
 ```
 
-For an existing database, use the required incremental `schema.migrate-*.sql` files instead. Never run `schema.sql` as an upgrade procedure.
+For an existing database, use the required incremental `schema.migrate-*.sql` files instead. Never run `schema.sql` as an upgrade procedure. The orchestration feature in particular needs `schema.migrate-pipeline.sql` (creates the `platform_pipeline` table behind `/admin/pipeline`):
+
+```bash
+yes | npx wrangler d1 execute DB --remote --file=schema.migrate-pipeline.sql
+yes | npx wrangler d1 execute DB --remote --env staging --file=schema.migrate-pipeline.sql
+```
+
+The `PROMPTS` R2 bucket hosts the prompt tree, named-agent registry, and MCP config (`promptset.zip`, `agentset.json`, `mcpset.json`); create it even if you do not plan to customize those yet, since the Worker resolves `env.PROMPTS` at runtime.
 
 ## 4. Create shared secrets
 

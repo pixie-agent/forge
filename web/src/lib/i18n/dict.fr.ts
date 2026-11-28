@@ -330,6 +330,11 @@ export const fr: Record<DictKey, string> = {
   'ws.stage.coding': 'Écriture du code de l’application',
   'ws.stage.building': 'Construction des artefacts de l’application',
   'ws.stage.chat': 'Application de vos modifications demandées',
+  'ws.wait.title': 'En attente de votre confirmation',
+  'ws.wait.approve': 'Approuver et continuer',
+  'ws.wait.decline': 'Abandonner',
+  'ws.wait.confirm': 'Confirmer',
+  'ws.wait.feedbackPlaceholder': 'Ajouter des précisions (facultatif)',
   'ws.conn.missing':
     '{name} connecté, mais « {fields} » reste à renseigner — complétez avant de générer',
   'ws.conn.writable':

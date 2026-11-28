@@ -1,5 +1,6 @@
 /** 运行期配置:全部来自环境变量(Cloud Run 上以 --set-env-vars / Secret Manager 注入) */
 
+import { join } from 'node:path'
 import type { ModelOverride } from './types.js'
 
 function required(name: string): string {
@@ -17,6 +18,13 @@ export interface AgentConfig {
   workspaceRoot: string
   /** 预装的 Vite+React 脚手架目录(含 node_modules),每个 job 从这里拷贝出工作目录 */
   templateDir: string
+  /**
+   * 编排目录:pipeline.default.json + prompts/ 提示词树同住这里(见 agent/orchestration/AGENTS.md)。
+   * 运行时从这两个文件加载内置默认编排与提示词 —— 改文件即可调试,不必重编译。
+   */
+  orchestrationDir: string
+  /** 提示词文件树目录(shared/ system/ user/ 下的 {{变量}} 模板),默认 = orchestrationDir/prompts */
+  promptsDir: string
   /** pi 自定义 provider 标识与模型 id */
   providerId: string
   modelId: string
@@ -67,12 +75,15 @@ export interface AgentConfig {
 }
 
 export function loadConfig(): AgentConfig {
+  const orchestrationDir = process.env.ORCHESTRATION_DIR ?? '/app/orchestration'
   return {
     port: Number(process.env.PORT ?? 8080),
     agentSecret: required('AGENT_SECRET'),
     maxRunMs: Number(process.env.AGENT_MAX_RUN_MS ?? 1_500_000),
     workspaceRoot: process.env.WORKSPACE_ROOT ?? '/tmp/forge-agent',
     templateDir: process.env.WORKSPACE_TEMPLATE_DIR ?? '/opt/forge-template',
+    orchestrationDir,
+    promptsDir: process.env.PROMPTS_DIR ?? join(orchestrationDir, 'prompts'),
     providerId: process.env.PI_PROVIDER_ID ?? 'forge',
     modelId: required('LLM_MODEL'),
     llm: {

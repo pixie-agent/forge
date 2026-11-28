@@ -25,6 +25,8 @@ ENV NODE_ENV=production PORT=8080
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
+# 编排目录(pipeline.default.json + prompts/ 提示词树),ORCHESTRATION_DIR 默认即此路径
+COPY orchestration ./orchestration
 # 预装脚手架(含 node_modules)挂到 agent 的模板目录(WORKSPACE_TEMPLATE_DIR 默认即此路径)
 COPY --from=template /opt/forge-template /opt/forge-template
 # pi 的 bash 工具需要 bash;bookworm-slim 已带 bash,这里补上常用小工具便于 agent 自检

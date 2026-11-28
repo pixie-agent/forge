@@ -64,11 +64,12 @@ Reuses the existing `jobs` table's `stage/progress/plan_json/files_preview/agent
   - First write of `plan.json` → fills back `plan_json` (frontend plan card)
   - Writing/modifying source files → `stage=coding`, `progress=正在编写 {path} · 已修改 {count} 个文件`, and the file's content becomes `files_preview` (frontend "Code" tab updates as files are written)
   - `vite build` before finishing → `stage=building`, `progress=正在构建应用产物`
-  - **Design review round** (generate only, see §17.4): after the first draft builds successfully, the same session runs another round of "design-director review and polish" → `stage` **remains `coding`**, `progress=正在做设计总监复查与打磨` (when rebuilding it returns to `building`/`正在重新构建应用产物`), and a milestone line is appended to `agent_log`. **No new stage**: the stage whitelist in `src/routes/internal.ts` is `planning|coding|building`; adding a new value would just be silently ignored, and the payoff doesn't justify it.
+  - **Design review round** (generate only, see §17.4): after the first draft builds successfully, a separate **reviewer sub-agent session** runs another round of "design-director review and polish" → `stage` **remains `coding`**, `progress=正在做设计总监复查与打磨` (when rebuilding it returns to `building`/`正在重新构建应用产物`), and a milestone line is appended to `agent_log`. **No new stage**: the stage whitelist in `src/routes/internal.ts` is `planning|coding|building`; adding a new value would just be silently ignored, and the payoff doesn't justify it.
   - `message_update` (per-token increments of thinking/body) + `tool_execution_start/end` → **written only to Cloud Run stdout** (batched every 5s; ops use `gcloud logging read` for troubleshooting); **no longer goes into D1**. D1's `agent_log` keeps only milestones (review round start/end, delivery-language re-ask, etc.) and alerts; the frontend shows only "stage + current file + number of files changed" — these key nodes. We once used per-token logs as a message bus, which in practice produced 36k `POST /log` calls and 73k D1 write rows per day that users never looked at.
+  - **Local-dev exception (full log streaming)**: when the Worker runs with `ENVIRONMENT=local` (set only in the gitignored `.dev.vars`), it dispatches `streamLog=true` in the `/run` body; the agent then also routes the full per-token stream (`raw`) into the milestone logger, so `agent_log` carries the complete process. The `/admin` project/user detail pages return the full `agent_log` (instead of the 8 KB tail) and poll every 2s while a job is active, rendering a live, auto-scrolling log. This never happens in staging/production.
 - Callbacks go through the Worker's internal endpoints (validated with `X-Agent-Secret`), allowing only field-level updates, never touching the state machine:
   - `POST /internal/jobs/:id/progress`: progress / plan / current file preview / heartbeat
-  - `POST /internal/jobs/:id/log`: milestone log increments; **atomic append** `agent_log = substr(COALESCE(agent_log,'') || ?, -20000)` keeps the tail, avoiding read-modify-write; the agent side serially flushes at ~800ms intervals and `stop()` flushes the remainder before the final state. **Do not immediately re-issue recursively after a flush completes**, otherwise D1 gets written once per network round trip (measured ~11 times/second).
+  - `POST /internal/jobs/:id/log`: milestone log increments; **atomic append** `agent_log = substr(COALESCE(agent_log,'') || ?, -300000)` keeps the tail, avoiding read-modify-write; the agent side serially flushes at ~800ms intervals and `stop()` flushes the remainder before the final state. **Do not immediately re-issue recursively after a flush completes**, otherwise D1 gets written once per network round trip (measured ~11 times/second). The 300 KB cap is sized for the local-dev full-stream case (§4 local-dev exception); online, only milestones reach this endpoint, so the cap is never approached.
   - `POST /internal/jobs/:id/checkpoint`: source tree checkpoint snapshot (see below)
   - `GET /internal/jobs/:id/state`: read-only `{status, cancelled, messages}`, used for the agent's cancellation inspection + steering pickup (see §5.2)
 - **Checkpoint snapshots / resume after failure**: the agent uploads the whole source tree every 60s (only when the tree's SHA-256 changed) and during exceptional shutdowns; the Worker stores it in R2 at `cp/<projectId>/<jobId>.json`, and `jobs` records only `checkpoint_key/checkpoint_files/checkpoint_bytes/checkpoint_at` — source code never enters D1. On a successful commit the checkpoint for this run is deleted (along with the checkpoint of the older job referenced by the payload's `resumeOf`); on failure/stop it is kept 7 days and cleaned up by cron inspection. `POST /api/projects/:id/resume` reads the snapshot out and dispatches it as the `currentFiles` baseline of a new `chat` round — the agent continues on the files already written instead of rewriting everything from the template scaffold.
@@ -87,11 +88,10 @@ Reuses the existing `jobs` table's `stage/progress/plan_json/files_preview/agent
 - The custom provider is declared via `models.json`, pointing at the existing gateway (`LLM_BASE_URL/LLM_API_KEY/LLM_MODEL`). **The gateway dialect is determined by `PI_LLM_API`**: `openai-completions` (default, OpenAI-compatible) / `anthropic-messages` (Anthropic-compatible) / `openai-responses`.
 - **Current actual production values (measured 2026-10-17; the Cloud Run service's env is authoritative)**: `LLM_BASE_URL=https://api.deepseek.com/anthropic`, `LLM_MODEL=deepseek-flash`, `PI_LLM_API=anthropic-messages`, `PI_PROVIDER_ID=forge`, `PI_MODEL_REASONING=true` — i.e., DeepSeek's **Anthropic protocol** endpoint, not the OpenAI-compatible endpoint. The GLM/`zai` combination written earlier in the docs (`PI_THINKING_LEVEL/PI_THINKING_FORMAT=zai/PI_SUPPORTS_DEVELOPER_ROLE=…`) is **outdated** and only needed with the corresponding OpenAI-compatible gateway.
 - Remaining tuning switches (see `agent/src/config.ts`): `PI_THINKING_LEVEL` (off…xhigh), `PI_MODEL_REASONING` (whether the model declares reasoning support), `PI_THINKING_FORMAT` (openai|zai|qwen|qwen-chat-template), `PI_SUPPORTS_DEVELOPER_ROLE` / `PI_SUPPORTS_REASONING_EFFORT` (default true; set false to route via system when the gateway doesn't recognize the `developer` role), `PI_MODEL_INPUT_IMAGE` (default false; only when true does the model declare image input support, see §5.1).
-- Toolset: `createCodingTools(workspace)` (read/bash/write/edit), `sessionManager: inMemory`; each job gets a fresh session and a fresh working directory → discarded after use.
-- The system prompt is injected via `DefaultResourceLoader({ systemPrompt })`: it stipulates a **multi-file React app** (Vite+Tailwind, responsive, no external images, real copy, `src/lib/forge.js` data interface); **the copy language follows the body of the user's request** (see §17.8), no longer hardcoded to Chinese.
-  Starting 2026-10-17 the system prompt was extended to "design contract + component catalog + data layer + state coverage + self-check checklist" (~23 KB); the core is writing the **design system** and **component API** as a vocabulary the model can copy directly — see §17.
+- Toolset: a job runs as **three sequential sub-agents**, each its own pi session (`sessionManager: inMemory`; fresh session + fresh working directory → discarded after use) with a dedicated system prompt and a minimal toolset: **Planner** (generate only) `read/write` → writes `spec.md` + `plan.json`; **Coder** `read/bash/edit/write` → implements the app; **Reviewer** (design review round) `read/edit/write` → polish only. All three share one `ModelRuntime` (one `models.json`).
+- Each sub-agent's system prompt is injected via `DefaultResourceLoader({ systemPrompt })`. The **Coder** system prompt (`coderSystemPrompt(lang, mode)`) stipulates the **multi-file React app** (Vite+Tailwind, responsive, no external images, real copy, `src/lib/forge.js` data interface) and carries the "design contract + component catalog + data layer + state coverage + self-check checklist" (~23 KB) — see §17. The **Planner** (`plannerSystemPrompt(lang)`) carries only the requirement-clarification contract + a data-capability overview (to fill `plan.json.data`); the **Reviewer** (`reviewerSystemPrompt(lang, mode)`) carries the design-system/component vocabulary + a polish-only file-permission contract. **Copy language follows the body of the user's request** (see §17.8), no longer hardcoded to Chinese.
 - **Mandatory restoration of platform-owned files**: `restorePlatformFiles()` overwrites `LICENSE` / `THIRD_PARTY_NOTICES.md` / `package.json` / `package-lock.json` / `index.html` / `vite.config.js` / `src/main.jsx` / `src/index.css` / `src/lib/*` / `src/components/ui/**` / `src/styles/**` back into the working directory from the template, at two moments — ① before the agent starts (rebuilding the platform directories together, wiping drift from the previous version's source); ② after each agent round and before build (overwrite only, no deletion, preserving files the model added). The sole exception is `src/styles/tokens.css` — the file where the model picks colors per `plan.palette`; it is preserved at all times. This way neither chat-version source drift nor the model's own drift can break the scaffold contract, the design system, or the backend SDK, and none of it enters the artifacts or the source tree.
-- `generate`: first writes `plan.json` (→ frontend plan card), then implements the React components under `src/` per the plan.
+- `generate`: the **Planner** first writes `spec.md` (requirement brief) + `plan.json` (→ frontend plan card), then the **Coder** implements the React components under `src/` per the plan.
 - `chat`: the Worker puts the current source tree into the dispatch payload; Cloud Run pre-writes it into the working directory and prompts "change only what the request asks".
 - Before finishing, the platform side runs `vite build` and returns the collected source tree + build artifacts + manifest (see §13.7); generate also runs a design review round after the build passes (see §17.4).
 - New tuning switches: `AGENT_DESIGN_REVIEW` (`off|generate|always`, default `generate`; `generate` = run the review round only for from-scratch generation), `AGENT_POLISH_MAX_MS` (upper bound on the review round's duration, default 300000). **The defaults live in code and take effect even when not explicitly declared**; the review round uses the smaller of "remaining total budget" and `AGENT_POLISH_MAX_MS`, and is skipped automatically when less than 30s remains.
@@ -144,7 +144,7 @@ Flow: `ChatPanel` (input stays usable during generation; Enter = "append") → `
 ## 8. Additions/Changes List
 
 New (Cloud Run side, `agent/`):
-- `index.ts` (HTTP: `POST /run`, `GET /health`), `runner.ts` (pi session + events→progress + platform-owned file restoration + user attachments to disk/multimodal input + platform-side build + design-review round rollback + `AbortSignal` cooperative cancellation + periodic checkpoint snapshots), `session.ts` (model/tool assembly), `prompt.ts` (system / `POLISH_PROMPT` / generate / chat), `attachments.ts` (attachment disk naming and prompt checklist, see §5.1), `callback.ts` (progress/heartbeat/milestone log/checkpoint/commit/fail + `startJobWatcher`: one 5s inspection doing both cooperative cancellation and steering pickup, see §5.2), `config.ts`; `template/` (Vite+React scaffold with preinstalled dependencies + design system, see §17), `Dockerfile`, `package.json`, `tsconfig.json`.
+- `index.ts` (HTTP: `POST /run`, `GET /health`), `runner.ts` (three sub-agent sessions + events→progress + platform-owned file restoration + user attachments to disk/multimodal input + platform-side build + design-review round rollback + `AbortSignal` cooperative cancellation + periodic checkpoint snapshots), `session.ts` (shared `ModelRuntime` + per-node session assembly), `prompt.ts` (planner/coder/reviewer system prompts + generate/chat/polish), `attachments.ts` (attachment disk naming and prompt checklist, see §5.1), `callback.ts` (progress/heartbeat/milestone log/checkpoint/commit/fail + `startJobWatcher`: one 5s inspection doing both cooperative cancellation and steering pickup, see §5.2), `config.ts`; `template/` (Vite+React scaffold with preinstalled dependencies + design system, see §17), `Dockerfile`, `package.json`, `tsconfig.json`.
 
 Changes (Cloudflare side):
 - `src/workflow.ts`: **deleted** (replaced by `waitUntil` async dispatch + callbacks instead of durable orchestration).
@@ -334,6 +334,8 @@ The staging environment exists for "develop and validate on staging first, then 
 | Signup verification email | Resend Secret `RESEND_API_KEY` + `noreply@1forgen.site` (free tier 3,000 emails/month) | Same Resend account; secret written separately with `--env staging` |
 | Environment badge | No `ENVIRONMENT` set (frontend assumes production, no badge) | `ENVIRONMENT=staging` (frontend shows an amber STAGING badge) |
 
+> **Local dev** (`wrangler dev`) is not a deploy target — it runs against local D1/R2/KV and a local agent on `:8080`. Its gitignored `.dev.vars` sets `ENVIRONMENT=local` (drives the full-log streaming in §4 and the amber `LOCAL` badge); never commit it.
+
 > Multi-file artifacts added two extra steps: **(1)** `npx wrangler kv namespace create forge-v2-appdata` and fill the returned id into `APPDATA.id` in `wrangler.jsonc` (currently a placeholder; deployment fails without it); **(2)** run `schema.migrate-multifile.sql` once against the existing v2 database (rebuilds `versions`/`jobs`; old single-file artifacts and job history are not preserved). Fresh installs can just run `schema.sql`. Then `npm run deploy` deploys the Worker; on the Cloud Run side, since the Dockerfile now preinstalls the `template/` dependencies, one more `gcloud run deploy` is needed.
 
 > Enabling Google login takes one more step: run `schema.migrate-google.sql` once against the existing v2 database (`npm run db:migrate:google:remote`), adding `users.google_sub` and its unique index; skip it if not enabling (the login page automatically hides the Google button).
@@ -416,8 +418,8 @@ The backend here is a **platform-provided generic capability** (D1/KV/R2 namespa
 
 **Execution chain (agent/Cloud Run)**
 - `agent/template/`: scaffold with preinstalled Vite + React + Tailwind + **design system** (`src/styles/{tokens,theme,base}.css`, `src/components/ui/**` 30+ component primitives, `src/lib/motion.jsx`, `src/lib/cx.js`) + **backend SDK** (`src/lib/forge.js`'s db/kv/counter/blob/storage, `src/lib/store.js`'s hooks); the Dockerfile runs `npm install` on its dependencies at build time (including `lucide-react`, `motion`), and at runtime each job copies the template + symlinks `node_modules` (no runtime install anymore). See §17 for details.
-- `agent/src/prompt.ts`: the system prompt stipulates the multi-file React output spec + design system contract + component catalog + data layer usage + state coverage checklist; generate first writes `plan.json`, then writes `palette` into `tokens.css`, then implements the app; chat edits the existing source tree; `POLISH_PROMPT` is the prompt for the second design review round.
-- `agent/src/runner.ts`: copy template → pre-write current source (chat) → **restore platform-owned files** → run the pi session → **platform-side deterministic `vite build`** → (generate) design review round + rebuild (rollback to the first round's source on failure) → collect `src` (source tree, skipping node_modules/dist/plan.json/package-lock.json) + `dist` (build artifacts) + `manifest`.
+- `agent/src/prompt.ts`: three system prompts — `plannerSystemPrompt` (clarify requirements + fill `plan.json.data`), `coderSystemPrompt` (multi-file React output spec + design system contract + component catalog + data layer usage + state coverage checklist), `reviewerSystemPrompt` (design-system vocabulary + polish-only contract). Generate: Planner writes `spec.md` + `plan.json` → Coder writes `palette` into `tokens.css` then implements the app; chat skips the Planner and edits the existing source tree; `polishPrompt` is the Reviewer's checklist for the design review round.
+- `agent/src/runner.ts`: copy template → pre-write current source (chat) → **restore platform-owned files** → run the sub-agent sessions (Planner → Coder → **platform-side deterministic `vite build`** → Reviewer → rebuild, rolling back to the Coder's source on failure) → collect `src` (source tree, skipping node_modules/dist/plan.json/spec.md/package-lock.json) + `dist` (build artifacts) + `manifest`.
 - The commit callback returns `{src, dist, manifest, plan}`; the Worker side's `commit.ts` writes `src` to D1, `dist` to R2, and generates and stores `manifest`.
 
 **Service and backend API**
@@ -633,17 +635,17 @@ src/App.jsx                       示例应用(留言墙)= 模板自身的冒烟
 
 ### 17.3 Prompt Structure (agent/src/prompt.ts, ≈23 KB)
 
-`systemPrompt(lang, mode)` is a **function** (both the artifact language and the job type are parameters, see §17.8), ordered: role and runtime environment → **output language block** (highest priority, see §17.8) → **file permissions** (may edit `src/**` and the two lines of `tokens.css`; platform files are off-limits, violations get force-restored) → **design system contract** (color/typography/rhythm/motion) → **component library catalog** (signatures and "when to use" of the 30+ exports) → **page structure** (nav/Hero/core features/stats/optional/footer, anchors and ids mapped) → **interaction and state coverage checklist** → data layer (`DATA_SDK`) → state linkage → **pre-finish self-check** (walk the main flow with real clicks + error paths + data capability coverage + visual checklist) → delivery-notes format.
+`coderSystemPrompt(lang, mode)` is a **function** (both the artifact language and the job type are parameters, see §17.8), ordered: role and runtime environment → **output language block** (highest priority, see §17.8) → **file permissions** (may edit `src/**` and the two lines of `tokens.css`; platform files are off-limits, violations get force-restored) → **design system contract** (color/typography/rhythm/motion) → **component library catalog** (signatures and "when to use" of the 30+ exports) → **page structure** (nav/Hero/core features/stats/optional/footer, anchors and ids mapped) → **interaction and state coverage checklist** → data layer (`DATA_SDK`) → state linkage → **pre-finish self-check** (walk the main flow with real clicks + error paths + data capability coverage + visual checklist) → delivery-notes format. The **Planner** and **Reviewer** sub-agents carry only the slices they need (`plannerSystemPrompt` = clarify-requirements contract + data-capability overview; `reviewerSystemPrompt` = design/component vocabulary + polish-only permissions).
 
-`DATA_SDK` is not just "usage documentation" but a **coverage requirement**: the platform has four backend capabilities (db / counter / kv / blob); first judge which ones this app can use, **and every one it can use must be used** (normally ≥2), with decidable trigger conditions given — any summary figures like "today X / total X / X times in all" must use `counter` to maintain the summary (details go into db, summaries via counter; don't pull all details down and compute on the fly); any "settings/announcements/toggles/store profile" must use `kv`; any image/file upload must use `blob`. `generatePrompt` requires the selection to be written into `plan.json`'s `data` field (`{collections,counters,kv,blob}`); `POLISH_PROMPT`'s review checklist gains a 9th item specifically verifying "the capability is actually wired into the UI", and item 8 remains "is the data real/paginated/server-side searchable".
+`DATA_SDK` is not just "usage documentation" but a **coverage requirement**: the platform has four backend capabilities (db / counter / kv / blob); first judge which ones this app can use, **and every one it can use must be used** (normally ≥2), with decidable trigger conditions given — any summary figures like "today X / total X / X times in all" must use `counter` to maintain the summary (details go into db, summaries via counter; don't pull all details down and compute on the fly); any "settings/announcements/toggles/store profile" must use `kv`; any image/file upload must use `blob`. The **Planner**'s system prompt requires the selection to be written into `plan.json`'s `data` field (`{collections,counters,kv,blob}`); `polishPrompt`'s review checklist gains a 9th item specifically verifying "the capability is actually wired into the UI", and item 8 remains "is the data real/paginated/server-side searchable".
 
-`generatePrompt`'s steps are pinned as: read the scaffold → write `plan.json` → **write `palette[0]/[1]` into `tokens.css`** → implement pages → self-check. The plan card's color swatch and the finished product's primary color therefore necessarily match (token-first).
+The **Coder**'s steps (`generatePrompt`) are pinned as: read the scaffold + `spec.md` + `plan.json` → **write `palette[0]/[1]` into `tokens.css`** → implement pages → self-check. (The `plan.json` itself is now written by the **Planner** sub-agent, a separate session that runs before the Coder.) The plan card's color swatch and the finished product's primary color therefore necessarily match (token-first).
 
 `polishPrompt(lang, mode)`'s review checklist diverges at item 10 by mode: generate checks "is all copy in the target language (the scaffold's Chinese sample copy, any missed component defaults)"; chat checks "is the copy added/modified this time in the target language, with untouched old copy left as is". The closing sentence likewise uses the target language.
 
 ### 17.4 Design Review Loop (runner.ts)
 
-After the first draft's build passes, the **same session** runs another round with `POLISH_PROMPT` ("design-director review and polish", a 10-item checklist: color/hierarchy/rhythm/components/three states/feedback/motion/data/data-capability coverage/copy), doing only fine polish — no overturning structure, no changing data interfaces. Engineering guardrails:
+After the first draft's build passes, a **separate reviewer sub-agent session** runs another round with `polishPrompt` ("design-director review and polish", a 10-item checklist: color/hierarchy/rhythm/components/three states/feedback/motion/data/data-capability coverage/copy), doing only fine polish — no overturning structure, no changing data interfaces. Engineering guardrails:
 
 1. **Build before review**: the first round's source tree is stored via `collectSource` as the baseline; the review round only starts once the first draft has passed the build.
 2. **A failed review round doesn't fail the job**: timeout or exception only writes one `agent_log` warning line; the first round's result is kept.
@@ -700,7 +702,7 @@ Two "completeness" details, both surfaced in the staging full-chain E2E:
 
 The detection logic is the only branch-heavy code in this change and has its own self-check script: `node --experimental-strip-types agent/scripts/lang-check.mjs` (zh/en/ja/ko/ru/es/fr/de/it/pt/nl + mixed text + fallbacks).
 
-**How the prompts implement it** (`agent/src/prompt.ts`): `systemPrompt(lang, mode)` / `polishPrompt(lang, mode)` / `generatePrompt(req, lang)` / `chatPrompt(req, lang)` are all parameterized by target language; the system prompt gets an **output language block** at the top that **names** the target language — the instructions themselves are written in Chinese, and without naming it the model would most likely follow the Chinese. Generate requires all copy in the target language; chat requires only **what is added/modified this time** in the target language, with existing copy untouched (saying "add a dark mode" on an English app won't translate the whole site).
+**How the prompts implement it** (`agent/src/prompt.ts`): `coderSystemPrompt(lang, mode)` / `plannerSystemPrompt(lang)` / `reviewerSystemPrompt(lang, mode)` / `polishPrompt(lang, mode)` / `generatePrompt(req, lang)` / `chatPrompt(req, lang)` are all parameterized by target language; each sub-agent's system prompt names the target language up front — the instructions themselves are written in Chinese, and without naming it the model would most likely follow the Chinese. Generate requires all copy in the target language; chat requires only **what is added/modified this time** in the target language, with existing copy untouched (saying "add a dark mode" on an English app won't translate the whole site).
 
 **Scaffold locale** (`agent/template/src/lib/locale.js`): a zh/en pair of the platform default copy, switched by `setLocale()` and fetched with `t('key')`. Default strings in platform files always go through `t()`, never hardcoded Chinese literals. The app side has exactly one line: `setLocale('en')`.
 
@@ -716,6 +718,275 @@ The detection logic is the only branch-heavy code in this change and has its own
 
 **Known limit**: the scaffold locale ships only zh and en — for artifacts in Japanese/Korean etc., the platform default copy falls back to English (the app's own copy is still in the target language).
 
+### 17.9 Pipeline DSL — admin-editable orchestration, a TeamAI-workflow subset (2026-11-16)
+
+> Target architecture for **full** configurability (agents / skills / MCP / HITL) and the admin UI + CLI to edit it: see [ORCHESTRATION-CONFIGURABILITY.md](ORCHESTRATION-CONFIGURABILITY.md). This section documents the shipped v1alpha1 subset.
+
+The three sub-agents (Planner → Coder → build → Reviewer → rebuild, §5 / §17.4) are **no longer hardcoded in the runner**: the generation flow is now a **workflow definition** delivered as data. The DSL is a **subset of [Tencent/teamai-cli](https://github.com/Tencent/teamai-cli)'s `workflows` (MIT)** — same `schemaVersion` / `steps[]` / `needs` / `agent` / `prompt` / `command` / `continue_on_failure` / `{{ … }}` vocabulary, trimmed to what Forge needs and carried as JSON (not YAML) so both Worker and agent parse it with native `JSON.parse`.
+
+**Storage and delivery — decoupled from the model config**: it is a **single global pipeline** (one row in `platform_pipeline`, key `global`), edited at `/admin/orchestration?r=pipeline` (the pipeline section of the single orchestration page), and shipped per-job as a top-level `body.pipeline` string (not inside `body.model`). Empty string = the built-in default. The model config (`model_configs`) is untouched by this feature.
+
+```jsonc
+{
+  "schemaVersion": "v1alpha1",
+  "name": "forge-default",
+  "description": "内置默认编排(原执行流程):Planner → Coder → build → Reviewer → rebuild",
+  "steps": [
+    { "id": "planner", "agent": "planner", "prompt": "{{ plannerPrompt }}", "images": true },
+    { "id": "coder", "needs": ["planner"], "agent": "coder", "prompt": "{{ coderPrompt }}", "images": true, "deliver": true },
+    { "id": "baseline", "needs": ["coder"], "command": "build" },
+    { "id": "reviewer", "needs": ["baseline"], "agent": "reviewer", "prompt": "{{ reviewerPrompt }}", "min_budget_ms": 30000, "continue_on_failure": true },
+    { "id": "rebuild", "needs": ["reviewer"], "command": "build", "rollback": true }
+  ]
+}
+```
+
+**The DAG is expressed with `needs`**, exactly as in teamai (not a separate `edges` array): each step lists the ids it waits for; a step with no `needs` is a root; a cycle, a missing id, or a duplicate id makes the whole definition invalid. Execution is the **topological order** of that graph (`topologicalOrder` in `agent/src/pipeline.ts`).
+
+**Step kinds** — each step is one of three actions (teamai's "exactly one action" rule):
+
+| | agent step (`agent` + `prompt`) | build step (`command: "build"`) | gate step (`approve` or `choose`) |
+| --- | --- | --- | --- |
+| meaning | a sub-agent session with the named agent's system prompt + default tools, given `prompt` | the platform deterministic build (`restorePlatformFiles` + `ensureLocaleCall` + `vite build`) | pause and wait for the user (§17.14) |
+| `agent` | a **named agent** — built-in `planner` \| `coder` \| `reviewer`, or any `agentset.json` name — **or an inline object** `{ systemPrompt, tools, skills, mcp, model }` (§17.11) | — | — |
+| `tools` (optional) | override the agent's default tool set, ⊆ `{read,bash,edit,write,grep,find,ls}` | — | — |
+| `rollback` (optional) | — | on build failure restore the last good baseline and rebuild (`true`) | — |
+| `approve` (optional) | — | — | `"question text"` — the user confirms (with optional feedback) or declines |
+| `choose` (optional) | — | — | `{ "question": "…", "options": ["A","B"] }` — the user picks one of ≥2 options |
+
+**Shared step fields**: `id` (required), `needs` (optional), `continue_on_failure` (a failure logs one warning and does not fail the job; dependents still run — this is the semantics behind the review round), `if` (a skip condition, below), plus Forge extensions `images` (attach user images as multimodal input), `deliver` (use this node's closing body as the delivery note), `budget_ms` / `min_budget_ms` (per-node budget / skip threshold), `progress` (progress copy, `{{ }}` interpolated), and `output` (agent steps only — typed output fields, below).
+
+**Typed `output` and `if`** (P5): an agent step may declare `output: ["sections", "palette"]` — a list of identifier fields (`^[a-zA-Z_][a-zA-Z0-9_]*$`, ≤ 10) the step's closing body should emit as a JSON object. `extractJsonObject` pulls the first `{…}` out of the closing text; each declared field becomes `{{ steps.<id>.outputs.<field> }}` for downstream prompts (missing fields become the empty string), and `{{ steps.<id>.outputs.summary }}` is always the full closing text. Any step may declare `if: "{{ answer }} == 确认"` — a skip condition evaluated by `evalCondition` (a tiny evaluator in `agent/src/condition.ts`, **no general code**): `a == b` / `a != b` (right side may be quoted), `a contains b` (substring), or a bare variable (non-empty = true). The left side resolves through `vars` (so `steps.<id>.outputs.<field>`, `answer`, `answerChoice` all work); an unresolvable left side is `true` (the step is not skipped). A false `if` marks the step as done and continues the DAG.
+
+**Template variables** (interpolated into `prompt`/`progress`; `interpolate` in `agent/src/prompts.ts` accepts optional whitespace inside the braces):
+
+- `{{ plannerPrompt }} {{ coderPrompt }} {{ reviewerPrompt }}` — the **resolved user prompts** from the prompt filesystem (§17.10), mode-aware; the built-in pipeline references them, so its *structure* is data while the prompt *text* lives in the files.
+- `{{ idea }} {{ note }} {{ message }} {{ history }}` — the raw request fields (idea / extra note / chat message / prior conversation).
+- `{{ connectors }} {{ attachments }}` — the connectors brief / attachments brief (for custom prompts that want to assemble them by hand).
+- `{{ langName }} {{ langCode }} {{ localeCode }}` — target language name / code / locale code.
+
+**The built-in default is itself data** (`DEFAULT_PIPELINE` in `agent/src/pipeline.ts` — the JSON shown in the orchestration page's pipeline editor as "填入内置默认"), with the prompts as `{{ plannerPrompt }}`-style placeholders. `defaultPipeline()` derives the executed steps from it and applies the *runtime-only* bits that can't live in static JSON: the planner step is dropped for chat, the Reviewer→rebuild round is kept only when `designReview` allows and ≥ `MIN_POLISH_BUDGET_MS` remains, and the reviewer's `budget_ms`/`progress` come from `config.polishMaxMs` / `t(uiLang, …)`.
+
+**What admin *cannot* change — the interpreter owns these invariants** (`agent/src/runner.ts`), regardless of graph shape:
+
+- `restorePlatformFiles` + `ensureLocaleCall` run before **every** build node (platform files can't be altered by any sub-agent; the scaffold `setLocale` is enforced before the deterministic `vite build`).
+- **Empty-run detection** for generate runs before the *first* build node (a source tree that never changed is a model failure, not a deliverable — and it must be checked before build because `ensureLocaleCall` itself rewrites `App.jsx` for non-zh targets).
+- **Rollback** on `rollback: true` build failure restores the last good baseline (`restoreFromMap`).
+- `providerError` on any non-`continue_on_failure` agent step throws `error.modelFailed`; the overall `max_run_ms` cap still applies.
+- Delivery-note resolution and the language-retry ask (`prompts.user('deliveryNote')`, §17.10) run once at the end, on whichever session produced the `deliver` note (or the last agent node).
+- The final safety net: if no build node ran, or the last node in topological order was an agent, one more non-rollback build runs so `dist` is always fresh.
+
+**Failure semantics**: an invalid definition (`parsePipeline` returns `null`) falls back to the built-in default *for that job* — a dirty config never blocks generation. The worker validates at save time (`validatePipelineJson` in `src/lib/pipeline.ts`: schemaVersion, step shape (agent / build / gate kinds incl. `approve`/`choose`, typed `output`, `if`), id uniqueness, `needs` referencing, cycle detection — duplicated from the agent since the two codebases share no modules); the agent re-validates defensively.
+
+**Config plumbing** (mirrored on both sides, as always): `platform_pipeline.pipeline_json` (migration `schema.migrate-pipeline.sql`) → `GET/PUT /api/admin/pipeline` → `getPlatformPipeline` → `body.pipeline` (worker `src/lib/agent.ts` `AgentRunRequest.pipeline`) → `RunRequest.pipeline` (agent `src/types.ts`) → `parsePipeline` (agent `src/pipeline.ts`).
+
+**Known limits**:
+
+- **Parallel branches run sequentially**: the DAG is scheduled in topological order but steps execute one at a time — all sub-agents share one workspace (one source tree), so concurrent editing would corrupt it. TeamAI avoids this with per-step workspaces/branches, which Forge does not have. Fan-out/fan-in (a node waiting on several `needs`) is already correct; true parallelism needs workspace isolation, deferred.
+- **Steering during a build node**: a steer message (§5.2) that arrives while a `build` node is running is delivered to the *last created* agent session (no active turn to redirect into). With the built-in default this is the Coder, whose turn has finished — a steer sent in that ~30–60s build window is dropped unless the delivery-note language-retry happens to run another turn on that same session. Steering during an *agent* node works as before.
+- **Deferred to a later version** (structure reserved, not implemented): teamai's `ends`, `inputs`, `for_each`/loops, and scorers.
+
+### 17.10 Prompt filesystem — prompts as editable files (2026-11-16)
+
+The prompt **content** is no longer inline TS in `agent/src/prompt.ts` (that file is gone): it lives in a **file tree** under `agent/orchestration/prompts/`, each file a `{{变量}}` template, loaded and interpolated by `agent/src/prompts.ts`. The `pi` agent is filesystem-based, so prompts are delivered/edited as files — a custom prompt tree can later be zipped, uploaded, and extracted into the workspace to override the built-in tree wholesale (the "filesystem affinity" of this design).
+
+```
+agent/orchestration/prompts/
+  shared/                      # fragments injected as {{变量}} into the prompts below
+    data-sdk.md                # 后端 SDK 契约 → {{ dataSdk }}
+    data-capabilities.md       # 数据能力概览 → {{ dataCapabilities }}
+    design-system.md           # 设计系统契约 → {{ designSystem }}
+    components.md              # 组件库目录 → {{ components }}
+    lang-block.generate.md     # 语言块(generate)→ {{ langBlock }}
+    lang-block.chat.md
+    reviewer-lang.generate.md  # reviewer 系统提示词末尾的语言行 → {{ reviewerLang }}
+    reviewer-lang.chat.md
+    polish-lang.generate.md    # polish 清单第 10 条 → {{ polishLang }}
+    polish-lang.chat.md
+  system/                      # 每个命名 agent 的 system prompt
+    planner.md  coder.md  reviewer.md
+  user/                        # user prompt(即流水线里 {{plannerPrompt}} 等变量的内容)
+    planner.md  generate.md  chat.md  polish.md  delivery-note.md
+```
+
+- **mode (generate/chat) is a file-resolution rule, not hidden content**: `lang-block.*`, `reviewer-lang.*`, `polish-lang.*` come in generate/chat variants selected by `ctx.mode`; `user/generate.md` vs `user/chat.md` are genuinely different and stay separate. The only code left in the loader is "which file for which (agent, role, mode)" plus `{{ }}` interpolation — no prompt text hides in code.
+- **Variables** (computed in `loadPromptSet`): dynamic fields `{{ langName }} {{ localeCode }} {{ idea }} {{ note }} {{ message }} {{ history }} {{ connectors }} {{ attachments }}`, composed `{{ ideaWithNote }} {{ requirement }} {{ briefs }}`, the `shared/` fragments above, and the mode-resolved `{{ langBlock }} {{ reviewerLang }} {{ polishLang }}`.
+- **`AGENTS`** in `agent/src/pipeline.ts` now carries only the default **tool sets**; the system prompt comes from `prompts.system(agent)`. The delivery-note language retry uses `prompts.user('deliveryNote')`.
+- **Storage & delivery**: the default tree ships in the Cloud Run image at `/app/orchestration/prompts` (Dockerfile `COPY orchestration ./orchestration`; env `ORCHESTRATION_DIR`, default `/app/orchestration`; local dev sets it to `agent/orchestration`). A **custom archive** is a zip of the tree uploaded at `/admin/prompts` (the 「提示词」 admin page), stored in the `PROMPTS` R2 bucket under the single key `promptset.zip` (one object = one atomic version). The Worker validates and unzips it (`src/lib/prompts.ts`, fflate): only `shared|system|user/<one-level>.md` are kept, path traversal (`..` / leading `/`) is rejected, and the cap is 2 MB. On each job dispatch `getPromptFiles` re-unzips it into `body.promptFiles` (a path→text map); the agent writes those files under `<workspace>/.prompts/` (`materializePromptFiles` in `runner.ts`, that dir is in `SKIP_DIRS` so it never leaks into the source tree) and passes it as the `overrideDir` to `loadPromptSet`, which **overlays it on the bundled default per path** — a partial archive only overrides the files it carries, everything else falls back. `GET/PUT /api/admin/prompts` (all behind `requireAdmin`) are status / upload (base64). `GET` returns the **effective tree** (`promptEffectiveInfo`: default ⊕ custom overlay, so the admin editor always shows every file, even the 18 default ones when nothing custom is stored). The admin page is a full **inline editor**: `POST /api/admin/prompts/save { files: {path→content} }` validates the tree (`validatePromptFiles`, same rules as the zip validator) and archives it as a new version via `putPromptFiles` → `createZip` → `putPromptZip`. `GET /api/admin/prompts/download` returns the same effective tree as a zip (`createZip` in `src/lib/zip.ts`) for offline editing. The default part of the tree comes from `src/lib/prompt-defaults.ts`, a **build-time snapshot** of `agent/orchestration/prompts/*.md` generated by `scripts/sync-prompt-defaults.mjs` and re-run on every `typecheck`/`build`/`deploy`/`dev` — so it stays in sync as long as the Worker and agent are deployed together after prompt edits. **Version history**: every upload/save archives an immutable copy under `promptset-history/<ms>.zip` (capped at the latest 50, oldest pruned); `GET /api/admin/prompts/versions` lists them (newest first) and `POST /api/admin/prompts/restore { key }` copies one back over `promptset.zip` — `key: null` clears `promptset.zip` to fall back to the bundled default. There is no separate "reset" action: reset-to-default is just the virtual first entry in the history list.
+- **Two interpolation passes**: (1) the loader interpolates the prompt *files* into final system/user text; (2) the runner interpolates the pipeline step's `prompt` (`{{ plannerPrompt }}` etc.) with `prompts.vars()`, which carries the already-resolved user prompts plus the raw request fields.
+
+### 17.11 Named agents — `agentset.json`, admin-editable (2026-11-22)
+
+The three sub-agent *identities* are no longer a closed `planner|coder|reviewer` allowlist. A pipeline
+step's `agent` may now be (a) a **string name** — the built-in three, or any name in the platform's
+named-agent registry — or (b) an **inline object** `{ systemPrompt, tools, skills, mcp, model }` that
+declares the agent right in the step. This is the P1 slice of
+[ORCHESTRATION-CONFIGURABILITY.md](ORCHESTRATION-CONFIGURABILITY.md). `skills` and `mcp` are now
+**wired** (§17.12 / §17.13) and select subsets of the platform skillset / MCP config for that agent;
+`model` remains validated but reserved (per-agent model override is not yet applied).
+
+**Resolution** (`resolveAgent` in `agent/src/runner.ts`), per agent node:
+
+1. Built-in name → `AGENTS[name].tools` + `prompts.system(name)` (unchanged behavior).
+2. Registry entry (`body.agents[name]`) → its `systemPrompt` (falling back to
+   `prompts/system/<name>.md`, then the coder system prompt) + its `tools` (default coder set).
+3. Unknown name → `prompts.system('<name>.md')` if that file exists, else the coder system prompt;
+   coder default tools either way; a `[pipeline]` warning is logged. **A name that resolves nowhere
+   never fails the job** — it degrades to coder.
+4. Inline object → its `systemPrompt` (or coder's) + its `tools` (or coder's).
+
+`prompts.system(name)` is now `resolve('system/<name>.md')` for *any* name (missing file = empty
+string), so an arbitrary name can carry a system prompt just by adding a file to `prompts/system/`.
+
+**Storage & delivery — a third resource, decoupled like the other two**: the registry is a flat JSON
+object `{ "<name>": { systemPrompt?, tools?, skills?, mcp?, model? } }` stored in the `PROMPTS` R2
+bucket under the key `agentset.json` (reusing the existing bucket — no new binding). Empty/absent =
+built-in default only. `GET/PUT /api/admin/agents` (behind `requireAdmin`) read/write it; `PUT`
+validates shape (`validateAgents` in `src/lib/agents.ts`: name `^[a-z][a-z0-9_-]*$`, ≤ 50 agents,
+`tools ⊆ {read,bash,edit,write,grep,find,ls}`, `skills`/`mcp` string arrays, `model` string fields)
+and returns Chinese errors for the admin editor. Per job, `getAgents` reads it into `body.agents`
+(`AgentRunRequest.agents` → `RunRequest.agents`), delivered alongside `body.pipeline`/`body.promptFiles`.
+The CLI `agent/orchestration/push.mjs` gained `--agents-only` (and pushes `agents/*.json` when no
+`--X-only` flag is given); the seeded example `agent/orchestration/agents/clarify.json` is a read-only
+clarify agent, **not** wired into the default pipeline.
+
+The canonical tool set (`KNOWN_TOOLS` in `agent/src/pipeline.ts`, mirrored in `src/lib/pipeline.ts`)
+is exactly the pi built-in coding tools usable in the Linux sandbox: `read,bash,edit,write,grep,find,ls`
+(`powershell` is Windows-only and excluded). The `AGENT_NAMES`/`AGENT_TOOLS` hardcoding is gone; the
+built-in `AGENTS` map is now only the *default tool-set seed*, and the tools validation remains as a
+save-time typo guard, not an allowlist ceiling.
+
+### 17.12 Skills — pi skills delivered per job (2026-11-22)
+
+pi's skill system (`loadSkillsFromDir`) is re-enabled. A **skillset** is a directory tree
+`skills/<name>/<files>` (each skill a folder holding its files, typically `SKILL.md`), stored in the
+`PROMPTS` R2 bucket as a single zip under the key `skillset.zip` (one object = one atomic version, the
+same pattern as `promptset.zip`). `src/lib/skills.ts` validates it (path shape
+`^skills/[a-z][a-z0-9_-]*/…`, zip ≤ 2 MB) and unzips it; on each dispatch `getSkillFiles` ships it as
+`body.skillFiles` (a `skills/<name>/<file>` → content map). The agent writes those files under
+`<workspace>/.skills/` (`materializeSkillFiles`; `.skills` is in `SKIP_DIRS` so it never leaks into the
+source tree) and calls `loadSkillsFromDir({ dir: '.skills', source })`; the selected skills' text is
+appended to the system prompt via `formatSkillsForPrompt(selected, 'read')`.
+
+**Selection is per agent**: an `AgentDef`'s `skills: ["forge-ui"]` picks the subset to inject (empty/absent
+= none). The built-in three declare none, so the default pipeline is unchanged unless an admin opts in.
+`GET/PUT /api/admin/skills` and `POST /api/admin/skills/save` (the file-list editor at `/admin/orchestration?r=skills`)
+mirror the prompts page; `GET /api/admin/skills/download` returns the effective tree as a zip. The CLI
+`agent/orchestration/push.mjs` gained `--skills-only` and pushes `skills/` when no `--X-only` flag is
+given (the seeded `agent/orchestration/skills/forge-ui/SKILL.md` is a placeholder, not referenced by the
+default pipeline). Absent = no skills (unchanged behavior).
+
+### 17.13 MCP — model-context-protocol tools per job (2026-11-22)
+
+MCP is now wired via pi's `createMcpExtension`. (The §19.1 "why not MCP" note is about the **user-side**
+connector story — the generated site talking to external systems — which is a different question; this is
+the **agent-side** tool story, now supported.) The platform MCP config is a flat JSON
+`{ "servers": { "<name>": {…} }, "autoEnableCodemode": false }` stored in `PROMPTS` R2 under `mcpset.json`,
+edited at `/admin/orchestration?r=mcp` and pushed by `agent/orchestration/push.mjs --mcp-only` (seed
+`agent/orchestration/mcp.json`). Each server entry mirrors pi's `McpServerConfig`: a **stdio** server
+(`command`/`args`/`env`/`cwd`) or an **http** server (`url`/`headers`), plus `exposure` / `toolExposure` /
+`description` / `enabled` / `timeout`.
+
+`src/lib/mcp.ts` validates at save time: name shape, stdio-requires-`command`, http-requires-`url` (and
+`https` for non-localhost), exposure values, and a size cap. **Credentials are never stored, and the
+validator enforces it**: every `env` value, and every sensitive `headers` value (name matching
+`token|key|secret|auth|passw|credential|bearer`), must be a **single full `${NAME}` reference** — a raw
+token/password is rejected at save time rather than persisting to R2 and shipping to the agent. Non-sensitive
+headers (e.g. `Content-Type`) stay free-form. On dispatch `getMcp` ships the config as `body.mcp`; the agent maps it
+to pi's loaded config (`toLoadedMcpConfig` in `agent/src/session.ts`) and mounts one
+`createMcpExtension({ loadConfig })`. **Forge forces `exposure: "direct"`** when the config doesn't say
+otherwise — pi's default `codemode` would hide the tools from a headless agent. A server's tools are
+offered to an agent only when that agent's `AgentDef.mcp` names the server (empty/absent = no MCP).
+
+### 17.14 HITL gate + typed output / if (2026-11-22)
+
+**Gate nodes** (`approve`/`choose`, §17.9) pause the run and wait for the user. The cost model is **two
+requests per HITL round, split at the gate** — a Cloud Run instance is never held idle waiting for a human,
+and `--timeout 3600` can't kill the wait:
+
+1. The agent runs the DAG to a gate, force-writes a source checkpoint (`checkpointNow(true)`, the existing
+   `cp/<projectId>/<jobId>.json`), serializes a **resume context**, and POSTs it to the new
+   `/internal/jobs/:id/wait` callback, which stores it in R2 under `cp/<projectId>/<jobId>.resume.json`
+   (plus a compact `…waiting.json` with just `question`/`options`/`kind` for cheap snapshot polling) and
+   sets `status = 'waiting_human'`. The agent then returns 200 and the instance is freed — zero idle cost.
+2. The project page renders a confirm/choice panel from the snapshot's `waiting` field. On answer,
+   `POST /api/projects/:id/respond { choice | decline | feedback }` flips the job back to `running` and
+   dispatches a **fresh** `/run` carrying the checkpoint as `currentFiles`, the resume context, and the
+   answer — the **same job id**, so the launch-time credit freeze stays the single charge point (no
+   re-freeze). A `decline` on an approve gate instead fails the job and refunds.
+
+**Resume context** (`agent/src/types.ts` `ResumeContext`, mirrored in `src/lib/agent.ts`): `doneStepIds`
++ `gateStepId` (skip on resume), `kind`/`question`/`options` (the gate), `deliverSummary` /
+`lastAgentSummary` (accumulated delivery text), `baseline` + `built` (last good build for downstream
+`rollback`), `remainingMs` (clamp the resumed run's budget so it can't get a fresh 3600s), `sourceBefore`
+(empty-run baseline), `outputs` (typed step outputs so far), `stepsJson` (the exact pipeline steps the run
+was executing at pause time — the resume re-parses **this snapshot** instead of the freshly-dispatched
+`body.pipeline`, so an admin editing the pipeline while the job waits can't desynchronize `doneStepIds` /
+`gateStepId`), and `attachments`/`connectors` (replayed so downstream image/text/connector context survives
+the split). Usage accounting: the pause run reports usage
+normally; the resume run reports with `accumulate: true`, and `/internal/jobs/:id/usage` **sums** into the
+existing row instead of overwriting — one job, one merged cost row.
+
+**Status/lock semantics** (`src/lib/jobHelpers.ts`): `ACTIVE_STATUS_SQL` becomes
+`('pending','running','waiting_human')` — a waiting job still holds the project lock and is recovered as
+the "active job". A new `RUNNABLE_STATUS_SQL` (`('pending','running')`) is what the heartbeat/timeout
+sweeps judge by, so a dormant waiting job is never declared dead by the 45s/180s/3700s rules; a dedicated
+cron sweep fails `waiting_human` older than 24h (refund + delete resume). `markJobFailed` / `cancelJob`
+now accept `waiting_human` and clean up the resume objects.
+
+The 3700s total-age ceiling is measured from `jobs.dispatched_at`, **not** `created_at`
+(`schema.migrate-dispatched-at.sql`): a `/respond` resume refreshes it, so the time the user spent at the
+gate does not count against the resumed run (otherwise a wait longer than ~1h would be declared timed out
+within minutes of resuming, with a healthy heartbeat). `created_at` stays the creation time for analytics.
+Existing rows are backfilled with `created_at`; queries fall back to `created_at` when the column is missing.
+
+### 17.15 AI orchestration assistant — natural-language → validated JSON (2026-11-23)
+
+The orchestration page's **AI assistant** section (`/admin/orchestration?r=assistant`) lets an operator describe a
+change to **any or all** five orchestration resources in one sentence instead of hand-editing JSON. The flow is
+**suggest → review in the editors → save**; the suggestion is never persisted on its own:
+
+- The Worker holds **no LLM key** (keys live on the Cloud Run agent only), so `POST /api/admin/orchestration/suggest`
+  (`src/routes/admin.ts`, `requireAdmin`) proxies to a new agent endpoint `POST /suggest`
+  (`agent/src/index.ts`, guarded by `X-Agent-Secret` like `/run`), which does a one-shot completion via
+  `agent/src/llm.ts` `completeText` using the agent's env-default model/dialect (`config.llm` / `config.llmApi`) —
+  no `model_configs` override, no new secrets or bindings.
+- The prompt is assembled worker-side (`src/lib/orchestration.ts`): a system prompt plus per-resource rules
+  (pipeline / agents / mcp / skills / prompts, mirroring the same schemas the save routes enforce), the
+  **current** config (so "add an approve gate" modifies rather than replaces), and the operator's description.
+- The reply is parsed by `extractJsonObject` (outermost `{…}`, code-fence tolerant) and re-validated with the
+  **same** worker validators used at save time (`validatePipelineJson` / `validateAgents` / `validateMcp` /
+  `validateSkillFiles` / `validatePromptFiles`), plus a **cross-resource** pass (`crossReferenceErrors`): a pipeline
+  step's named `agent` must exist (built-in `planner|coder|reviewer` or in the registry), and an agent's
+  `skills`/`mcp` must name a skill / MCP server that actually exists in the effective (current ⊕ proposed) state.
+  `skills` / `prompts` changes are **merged onto the current trees** (not replaced); `pipeline` / `agents` / `mcp`
+  are full new states. The result is `{ summary, changes, notes[], valid, error }` — `notes` lists each resource's
+  change/validity, and `valid` is false when any per-resource or cross-resource check fails.
+- **写入编辑器** (per resource, or 全部写入) loads each proposal into the page's editors; the relationship
+  graph updates immediately, including the cross-resource picture. Nothing is stored until the operator saves
+  from an editor or the dirty bar, so a bad suggestion never reaches D1 / R2 unvalidated.
+- Admin-only and low-volume; `maxTokens` capped at 8192. This landing also closed a gap: `validatePipelineJson`
+  had not been synced for the P4/P5 step kinds, so a gate/output/`if` pipeline could not be saved from
+  the admin page at all — `validatePipelineJson` now covers agent / build / gate kinds with the same rules as
+  the agent's `parsePipeline`.
+
+### 17.16 Admin orchestration page — one page, relationship graph (2026-11-28)
+
+The five resources (pipeline / agents / prompts / skills / MCP) and the AI assistant used to be six top-level
+admin tabs; they are now sections of a single page, **`/admin/orchestration`**, selected by a side list and
+deep-linkable as `?r=<resource>` (`/admin/pipeline`, `/admin/agents`, `/admin/prompts`, `/admin/skills`,
+`/admin/mcp` redirect there). The former per-resource page components were removed; the API routes are
+unchanged.
+
+Layout: **relationship graph on top, editors below.** All five editors share one state, and the graph is computed client-side from the *unsaved* editor state (`web/src/lib/orchestrationGraph.ts`): each step in topological order → the agent it runs (built-in / registry / inline / undefined) → the prompt files it renders → the skills / MCP servers that agent declares. Hovering a resource dims the steps that don't use it; clicking one opens the matching editor. Beside it a **reference check** lists dangling references, undefined `{{ variables }}`, and defined-but-unused resources. A save bar appears whenever any editor is dirty ("保存全部" saves the dirty resources in sequence, stopping at the first failure). The graph is a mirror of the agent's resolution rules, not the enforcement — the agent still falls back on its own when a config is wrong.
+
+Rules mirrored by the graph (`web/src/lib/orchestrationGraph.ts`, kept in sync by hand with the agent's
+`pipeline.ts` / `prompts.ts`): an agent step's system prompt is inline `systemPrompt` → `system/<name>.md` →
+`system/coder.md`; `{{ plannerPrompt }}` / `{{ coderPrompt }}` / `{{ reviewerPrompt }}` resolve to
+`user/planner.md`, `user/generate.md` (+ `user/chat.md`), `user/polish.md`; a `shared/<kebab-name>.md` fragment is
+the variable `<camelName>`, and `langBlock` / `reviewerLang` / `polishLang` are the two mode fragments each.
+A prompt file's "用到它的节点" is transitive through those fragments.
+
 ## 18. Chat Pane Interactions (2026-10-18)
 
 Three UX reinforcements on the user-facing "submit a request" path, all in `web/src/components/ChatPanel.tsx` + `web/src/pages/Workspace.tsx`:
@@ -730,10 +1001,11 @@ Three UX reinforcements on the user-facing "submit a request" path, all in `web/
 
 The answer to "can I hook up payments/analytics/repos" on the user side is not MCP but **platform hand-written provider adapters**. Full design and trade-offs in `docs/CONNECTORS.md`; this section records only what landed in the platform and its runtime constraints.
 
-### 19.1 Why Not MCP
+### 19.1 Why Not MCP (for user-facing connectors)
 
-- pi **deliberately does not support MCP** (`pi-coding-agent/README.md:446`); the current session mounts only `createCodingTools`. Supporting MCP would mean writing a pi extension ourselves plus three new problem areas: process lifecycle, auth, and tool-name conflicts.
-- What generation needs — "use an external account to do a thing" — is achievable with **injected credentials + prompt explanation + the agent's own bash**, with zero new runtime.
+This section is about **user-facing** external systems — the generated site talking to payments/analytics/repos. That is a different question from the **agent-side** MCP now shipped in §17.13, which gives the *coding agent* extra tools, not the generated site.
+
+- What the generated site needs — "use an external account to do a thing" — is achievable with **injected credentials + prompt explanation + the agent's own bash**, with zero new runtime on the visitor side.
 - Runtime (visitor pages) is not an MCP client scenario: pages run in a CSP `sandbox` opaque origin and can only call external APIs with public values or a user-supplied backend.
 
 ### 19.2 Three Forms and This Phase's Scope

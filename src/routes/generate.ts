@@ -2,15 +2,20 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import type { AppEnv, ConnectorGrant, ProjectRow } from '../types'
 import { requireUser } from '../lib/auth'
-import { activeJobSnapshot, lastFailedJobSnapshot, insertMessage, ACTIVE_STATUS_SQL } from '../lib/jobHelpers'
+import { activeJobSnapshot, lastFailedJobSnapshot, insertMessage, ACTIVE_STATUS_SQL, RUNNABLE_STATUS_SQL } from '../lib/jobHelpers'
 import { dispatchAgent, AgentDispatchError, type FileMap } from '../lib/agent'
-import { loadCheckpoint } from '../lib/checkpoints'
+import { loadCheckpoint, loadResume, deleteResume } from '../lib/checkpoints'
 import { attachmentMarkdown, parseAttachments, SEND_LIMITS, STEER_LIMITS, type AgentAttachment } from '../lib/attachments'
 import { resolveGrants } from '../lib/connectors/store'
 import { DRAFT_VERSION_NO } from '../lib/artifacts'
 import { type JobType, createJob, settleJobIfStale } from '../lib/jobs'
 import { jobCost, releaseJobCredits, reserveCredits } from '../lib/credits'
 import { getModelConfigForUser, modelChannelForUser, modelOverrideOf } from '../lib/modelConfig'
+import { getPlatformPipeline } from '../lib/pipeline'
+import { getPromptFiles } from '../lib/prompts'
+import { getAgents } from '../lib/agents'
+import { getSkillFiles } from '../lib/skills'
+import { getMcp } from '../lib/mcp'
 import { listSep, parseLang, srv, type Lang } from '../lib/i18n'
 import { cancelJob, markJobFailed } from '../lib/commit'
 import { logEvent } from '../lib/events'
@@ -183,6 +188,18 @@ async function launchJob(
       attachments: attachments?.length ? attachments : undefined,
       connectors: grants.length ? grants : undefined,
       model: modelConfig ? modelOverrideOf(modelConfig) : undefined,
+      // 全局编排流水线(与模型配置解耦);空/非法时 agent 回落内置默认编排
+      pipeline: (await getPlatformPipeline(c.env.DB)) || undefined,
+      // 提示词文件树(后台上传的 zip 解包);无则 agent 用镜像内置默认提示词
+      promptFiles: (await getPromptFiles(c.env)) || undefined,
+      // 命名 agent 注册表(后台 agents 配置);空/非法时 agent 回落内置默认
+      agents: (await getAgents(c.env)) || undefined,
+      // 技能文件树(后台 skillset.zip 解包);无则 agent 不启用技能
+      skillFiles: (await getSkillFiles(c.env)) || undefined,
+      // MCP 服务配置(后台 mcpset.json);无则 agent 不启用 MCP
+      mcp: (await getMcp(c.env)) || undefined,
+      // 完整过程日志只在本地开发回传(线上保持里程碑日志,避免把 D1 当消息总线)
+      streamLog: c.env.ENVIRONMENT === 'local',
       // 任务并发只对免费通道生效;VIP 执行体保持 0(不排队)。
       // 与 Cloud Run 的 --concurrency 是两回事:那只决定单实例能接多少请求。
       queueConcurrency: channel === 'free' ? modelConfig?.queue_concurrency : undefined,
@@ -222,7 +239,7 @@ app.post('/:id/steer', async (c) => {
   if (!message && !attachments.length) return c.json({ error: '内容不能为空' }, 400)
 
   const job = await c.env.DB
-    .prepare(`SELECT id FROM jobs WHERE id = ? AND project_id = ? AND ${ACTIVE_STATUS_SQL}`)
+    .prepare(`SELECT id FROM jobs WHERE id = ? AND project_id = ? AND ${RUNNABLE_STATUS_SQL}`)
     .bind(String(body.jobId ?? ''), project.id)
     .first<{ id: string }>()
   if (!job) return c.json({ error: '任务已结束,请直接发送' }, 409)
@@ -336,10 +353,10 @@ app.post('/:id/resume', async (c) => {
 app.get('/:id/job/active', async (c) => {
   const userId = c.get('user').id
   const projectId = c.req.param('id')
-  let job = await activeJobSnapshot(c.env.DB, projectId, userId)
+  let job = await activeJobSnapshot(c.env, projectId, userId)
   if (job) {
     await settleJobIfStale(c.env, job.id)
-    job = await activeJobSnapshot(c.env.DB, projectId, userId)
+    job = await activeJobSnapshot(c.env, projectId, userId)
   }
   const resume = await lastFailedJobSnapshot(c.env.DB, projectId, userId)
   return c.json({ job, resume })
@@ -366,6 +383,136 @@ app.post('/:id/cancel', async (c) => {
   // 这是锦上添花,写失败不该让"已经停下来了"变成 500。语言取请求体(见 lib/i18n.ts)。
   const body = await c.req.json<{ lang?: unknown }>().catch(() => ({}) as { lang?: unknown })
   await insertMessage(c.env.DB, project.id, 'assistant', srv(parseLang(body.lang), 'cancel.message')).catch(() => {})
+  return c.json({ ok: true, jobId: job.id })
+})
+
+/**
+ * 人门应答(approve/choose,见 docs/FORGE2.md §17.14):对暂停的任务作答。
+ * - approve 门:确认 → 带着恢复上下文重新派发;拒绝 → 失败落定并退积分。
+ * - choose 门:选中一个选项 → 同样恢复。
+ * 恢复不是新任务:沿用同一 job id(不重新冻结积分),新实例带着断点从门后继续。
+ */
+app.post('/:id/respond', async (c) => {
+  const project = await ownedProject(c, c.req.param('id'))
+  if (!project) return c.json({ error: '项目不存在' }, 404)
+
+  const body = await c.req
+    .json<{ choice?: unknown; decline?: unknown; feedback?: unknown; lang?: unknown }>()
+    .catch(() => ({}) as { choice?: unknown; decline?: unknown; feedback?: unknown; lang?: unknown })
+  const choice = String(body.choice ?? '').trim()
+  const decline = body.decline === true
+  const feedback = String(body.feedback ?? '').trim()
+  const lang = parseLang(body.lang)
+
+  // channel 列来自增量迁移:没跑时退回不带通道的查询(恢复仍可用,只是按默认通道派发)
+  const job = await c.env.DB
+    .prepare(`SELECT id, type, channel, payload FROM jobs WHERE project_id = ? AND status = 'waiting_human' ORDER BY updated_at DESC LIMIT 1`)
+    .bind(project.id)
+    .first<{ id: string; type: string; channel: string; payload: string }>()
+    .catch(async () => {
+      const row = await c.env.DB
+        .prepare(`SELECT id, type, payload FROM jobs WHERE project_id = ? AND status = 'waiting_human' ORDER BY updated_at DESC LIMIT 1`)
+        .bind(project.id)
+        .first<{ id: string; type: string; payload: string }>()
+      return row ? { ...row, channel: '' } : null
+    })
+  if (!job) return c.json({ error: srv(lang, 'respond.noWaiting') }, 409)
+
+  const resume = await loadResume(c.env, project.id, job.id)
+  if (!resume) {
+    await markJobFailed(c.env, job.id, srv(lang, 'respond.lostContext'))
+    return c.json({ error: srv(lang, 'respond.lostContext') }, 500)
+  }
+
+  // choose 门必须选中一个合法选项;approve 门可选带补充反馈
+  if (resume.kind === 'choose') {
+    if (!choice || !(resume.options ?? []).includes(choice)) {
+      return c.json({ error: srv(lang, 'respond.invalidChoice') }, 400)
+    }
+  }
+
+  // 拒绝(approve 门):失败落定 + 退积分
+  if (decline) {
+    await deleteResume(c.env, project.id, job.id)
+    await markJobFailed(c.env, job.id, srv(lang, 'respond.declined'))
+    await insertMessage(c.env.DB, project.id, 'user', srv(lang, 'respond.declined')).catch(() => {})
+    return c.json({ ok: true, declined: true })
+  }
+
+  // 断点源码作为恢复基线:门前的代码成果都要带上
+  const source = await loadCheckpoint(c.env, project.id, job.id)
+  if (!source || !Object.keys(source).length) {
+    await deleteResume(c.env, project.id, job.id)
+    await markJobFailed(c.env, job.id, srv(lang, 'respond.lostContext'))
+    return c.json({ error: srv(lang, 'respond.lostContext') }, 500)
+  }
+
+  // 置回 running 再派发:同一 job id,不重新冻结积分(冻结的仍是原任务那笔)。
+  // dispatched_at 一并刷新:总龄上限从这次续跑重新计时,门上等用户的时间不算(没跑迁移时退回不带该列的写法)。
+  const claim = (withDispatched: boolean) =>
+    c.env.DB
+      .prepare(`UPDATE jobs SET status = 'running', updated_at = datetime('now')${withDispatched ? ", dispatched_at = datetime('now')" : ''} WHERE id = ? AND status = 'waiting_human'`)
+      .bind(job.id)
+      .run()
+  const claimed = await claim(true).catch((err) => {
+    if (!/no such column/i.test(err instanceof Error ? err.message : String(err))) throw err
+    return claim(false)
+  })
+  if (!claimed.meta.changes) return c.json({ error: srv(lang, 'respond.noWaiting') }, 409)
+
+  const userId = c.get('user').id
+  // channel 列存 'free' | 'vip' | ''(默认);恢复时按它选通道,未知值回落默认(由 getModelConfigForUser 内部决定)
+  const channel: 'free' | 'vip' | undefined = job.channel === 'free' || job.channel === 'vip' ? job.channel : undefined
+  const { config: modelConfig } = await getModelConfigForUser(c.env.DB, userId, channel)
+  const payload = JSON.parse(job.payload) as { idea?: string; message?: string; note?: string }
+  const answer = choice || feedback
+
+  // 人门应答写进对话历史:审计记录与后续对话上下文都能看到用户的批准/选择/补充反馈
+  const answerText =
+    resume.kind === 'choose'
+      ? srv(lang, 'respond.choose', { choice })
+      : feedback
+        ? srv(lang, 'respond.approveFeedback', { feedback })
+        : srv(lang, 'respond.approve')
+  await insertMessage(c.env.DB, project.id, 'user', answerText).catch(() => {})
+
+  const dispatch = async () => {
+    const history = job.type === 'chat' ? await recentHistory(c.env.DB, project.id) : undefined
+    await dispatchAgent(c.env, {
+      jobId: job.id,
+      projectId: project.id,
+      type: job.type as 'generate' | 'chat',
+      idea: payload.idea,
+      message: payload.message,
+      note: payload.note,
+      lang,
+      currentFiles: source,
+      history,
+      resume,
+      answer: answer || undefined,
+      answerChoice: choice || undefined,
+      attachments: resume.attachments?.length ? resume.attachments : undefined,
+      connectors: resume.connectors?.length ? resume.connectors : undefined,
+      model: modelConfig ? modelOverrideOf(modelConfig) : undefined,
+      pipeline: (await getPlatformPipeline(c.env.DB)) || undefined,
+      promptFiles: (await getPromptFiles(c.env)) || undefined,
+      agents: (await getAgents(c.env)) || undefined,
+      skillFiles: (await getSkillFiles(c.env)) || undefined,
+      mcp: (await getMcp(c.env)) || undefined,
+      streamLog: c.env.ENVIRONMENT === 'local',
+      queueConcurrency: channel === 'free' ? modelConfig?.queue_concurrency : undefined,
+    }, channel === 'free' ? c.env.AGENT_URL_FREE : undefined)
+  }
+  c.executionCtx.waitUntil(
+    dispatch().catch(async (err) => {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error(`[respond] ${job.id.slice(0, 8)} ${message}`)
+      if (err instanceof AgentDispatchError) await markJobFailed(c.env, job.id, message)
+    })
+  )
+  // 恢复对象已消费:断点保留(续跑失败时可从失败卡片「从断点继续」)
+  await deleteResume(c.env, project.id, job.id)
+
   return c.json({ ok: true, jobId: job.id })
 })
 

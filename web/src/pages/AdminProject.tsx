@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import AdminBar from '../components/AdminBar'
+import AdminJobLog from '../components/AdminJobLog'
 import { api } from '../lib/api'
 import { formatTime } from '../lib/format'
 import type { AdminProjectDetail, AdminVersionDetail, SiteDataItem } from '../lib/types'
@@ -51,6 +52,15 @@ export default function AdminProject() {
   useEffect(() => {
     void loadDetail()
   }, [loadDetail])
+
+  // 本地环境:存在活动任务时轮询刷新详情,让完整日志实时滚动(线上不轮询,只显示里程碑尾部)
+  const local = detail?.environment === 'local'
+  const hasActiveJob = detail?.jobs.some((j) => j.status === 'pending' || j.status === 'running') ?? false
+  useEffect(() => {
+    if (!local || !hasActiveJob) return
+    const timer = setInterval(() => void loadDetail(), 2000)
+    return () => clearInterval(timer)
+  }, [local, hasActiveJob, loadDetail])
 
   // 选中的版本 → 拉完整源码树 + 产物清单
   useEffect(() => {
@@ -399,9 +409,10 @@ export default function AdminProject() {
                     </summary>
                     {j.error && <div className="mt-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{j.error}</div>}
                     {j.agent_log && (
-                      <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-gray-950 p-3 font-mono text-xs leading-relaxed text-gray-400">
-                        {j.agent_log}
-                      </pre>
+                      <AdminJobLog
+                        text={j.agent_log}
+                        live={local && (j.status === 'pending' || j.status === 'running')}
+                      />
                     )}
                   </details>
                 ))}

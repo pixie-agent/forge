@@ -16,6 +16,7 @@ import AdminUsers from './pages/AdminUsers'
 import AdminUser from './pages/AdminUser'
 import AdminModels from './pages/AdminModels'
 import AdminDashboard from './pages/AdminDashboard'
+import AdminOrchestration from './pages/AdminOrchestration'
 import { api } from './lib/api'
 import { takePendingClone } from './lib/pendingClone'
 import { useT } from './lib/i18n'
@@ -142,6 +143,20 @@ export default function App() {
               </AdminGate>
             }
           />
+          <Route
+            path="/admin/orchestration"
+            element={
+              <AdminGate>
+                <AdminOrchestration />
+              </AdminGate>
+            }
+          />
+          {/* 编排的五类资源已合并进 /admin/orchestration 单页;旧地址按资源定位过去 */}
+          <Route path="/admin/pipeline" element={<Navigate to="/admin/orchestration" replace />} />
+          <Route path="/admin/agents" element={<Navigate to="/admin/orchestration?r=agents" replace />} />
+          <Route path="/admin/prompts" element={<Navigate to="/admin/orchestration?r=prompts" replace />} />
+          <Route path="/admin/skills" element={<Navigate to="/admin/orchestration?r=skills" replace />} />
+          <Route path="/admin/mcp" element={<Navigate to="/admin/orchestration?r=mcp" replace />} />
           <Route
             path="/admin/dashboard"
             element={

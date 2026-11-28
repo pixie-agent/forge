@@ -22,6 +22,10 @@
     {
       "binding": "ARTIFACTS",
       "bucket_name": "forge-self-hosted-artifacts"
+    },
+    {
+      "binding": "PROMPTS",
+      "bucket_name": "forge-self-hosted-prompts"
     }
   ],
   "kv_namespaces": [
@@ -66,6 +70,10 @@
         {
           "binding": "ARTIFACTS",
           "bucket_name": "forge-self-hosted-artifacts-staging"
+        },
+        {
+          "binding": "PROMPTS",
+          "bucket_name": "forge-self-hosted-prompts-staging"
         }
       ],
       "kv_namespaces": [

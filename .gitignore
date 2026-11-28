@@ -41,3 +41,6 @@ design-system/
 .claude/skills/
 
 .DS_Store
+
+# local pi tool state
+.pi/

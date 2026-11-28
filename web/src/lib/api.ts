@@ -142,6 +142,17 @@ export function steerJob(
   })
 }
 
+/** 人门应答(approve/choose):对暂停的任务作答,服务端带着断点重新派发(见 docs/FORGE2.md §17.14) */
+export function respondJob(
+  projectId: string,
+  body: { choice?: string; decline?: boolean; feedback?: string }
+): Promise<{ ok: boolean; declined?: boolean; jobId?: string }> {
+  return api<{ ok: boolean; declined?: boolean; jobId?: string }>(`/api/projects/${projectId}/respond`, {
+    method: 'POST',
+    body: { ...body, lang: getActiveLang() },
+  })
+}
+
 /** 活动任务(接管轮询)+ 可续任务(最近一次失败但有产物的任务,继续对话即续跑) */
 export async function getActiveJob(
   projectId: string

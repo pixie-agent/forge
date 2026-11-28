@@ -316,6 +316,11 @@ export const pt: Record<DictKey, string> = {
   'ws.stage.coding': 'Escrevendo o código do app',
   'ws.stage.building': 'Gerando os artefatos do app',
   'ws.stage.chat': 'Aplicando as alterações que você pediu',
+  'ws.wait.title': 'Aguardando sua confirmação',
+  'ws.wait.approve': 'Aprovar e continuar',
+  'ws.wait.decline': 'Descartar',
+  'ws.wait.confirm': 'Confirmar',
+  'ws.wait.feedbackPlaceholder': 'Adicionar observações (opcional)',
   'ws.conn.missing': '{name} conectado, mas ainda falta preencher “{fields}” — complete antes de gerar',
   'ws.conn.writable':
     '{name} conectado. Ele tem acesso de escrita, desligado por padrão — ative na barra de conversa nas execuções que precisarem dele',

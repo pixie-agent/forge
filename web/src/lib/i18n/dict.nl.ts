@@ -319,6 +319,11 @@ export const nl: Record<DictKey, string> = {
   'ws.stage.coding': 'De code van de app wordt geschreven',
   'ws.stage.building': 'De artefacten van de app worden gebouwd',
   'ws.stage.chat': 'Je gevraagde aanpassingen worden doorgevoerd',
+  'ws.wait.title': 'Wacht op je bevestiging',
+  'ws.wait.approve': 'Goedkeuren en doorgaan',
+  'ws.wait.decline': 'Verwerpen',
+  'ws.wait.confirm': 'Bevestigen',
+  'ws.wait.feedbackPlaceholder': 'Aanvullingen toevoegen (optioneel)',
   'ws.conn.missing': '{name} is verbonden, maar “{fields}” moet nog worden ingevuld — vul dat aan voordat je genereert',
   'ws.conn.writable':
     '{name} is verbonden. Het heeft schrijfrechten, die staan standaard uit — zet ze aan in de chatbalk voor een run die ze nodig heeft',

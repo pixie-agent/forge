@@ -1,4 +1,4 @@
-/** 单个 job 的执行:拷脚手架 → 跑 pi agent 写源码 → 构建 → 收集源码树 + 构建产物 */
+/** 单个 job 的执行:拷脚手架 → 规划 → 实现 → 构建 → 复查 → 收集源码树 + 构建产物 */
 
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -8,24 +8,38 @@ import { promisify } from 'node:util'
 import type { AgentConfig } from './config.js'
 import type { ProgressReporter, StreamLogger } from './callback.js'
 import type { AgentSession } from '@earendil-works/pi-coding-agent'
-import { polishPrompt, buildUserPrompt, parsePlan, deliveryNotePrompt } from './prompt.js'
+import { evalCondition } from './condition.js'
+import { parsePlan } from './plan.js'
+import { interpolate, loadPromptSet } from './prompts.js'
+import {
+  AGENTS,
+  defaultPipeline,
+  parsePipeline,
+  SCHEMA_VERSION,
+  topologicalOrder,
+  type PipelineAgentStep,
+  type PipelineGateStep,
+  type PipelineStep,
+} from './pipeline.js'
 import { resolveOutputLang, localeCode, matchesLang } from './lang.js'
 import { isUiLang, t, type UiLang } from './i18n.js'
-import { createForgeSession } from './session.js'
+import { createForgeSession, createModelContext } from './session.js'
 import { ATTACHMENT_DIR, attachmentFileName } from './attachments.js'
 import { CONNECTOR_DIR, materializeConnectors } from './connectors.js'
-import type { ArtifactManifest, FileMap, Plan, RunRequest, RunResult, RunUsage } from './types.js'
+import type { ArtifactManifest, FileMap, Plan, ResumeContext, RunRequest, RunResult, RunUsage } from './types.js'
 
 const execFileAsync = promisify(execFile)
 
-/** 收集源码树时跳过的目录(依赖、临时、构建产物、用户附件、连接器凭证) */
-const SKIP_DIRS = new Set(['node_modules', '.pi', '.git', 'dist', ATTACHMENT_DIR, CONNECTOR_DIR])
-/** 顶层不作为“源码”交付的文件(计划文件) */
-const SKIP_ROOT_FILES = new Set(['plan.json'])
+/** 提示词覆盖树在工作目录里的落点(后台上传的压缩包解包到这里,不进源码树) */
+const PROMPT_DIR = '.prompts'
+/** 技能树在工作目录里的落点(后台上传的 skillset.zip 解包到这里,不进源码树) */
+const SKILLS_DIR = '.skills'
+/** 收集源码树时跳过的目录(依赖、临时、构建产物、用户附件、连接器凭证、提示词覆盖树、技能树) */
+const SKIP_DIRS = new Set(['node_modules', '.pi', '.git', 'dist', ATTACHMENT_DIR, CONNECTOR_DIR, PROMPT_DIR, SKILLS_DIR])
+/** 顶层不作为“源码”交付的文件(计划文件 / 需求说明书) */
+const SKIP_ROOT_FILES = new Set(['plan.json', 'spec.md'])
 const BUILD_TIMEOUT_MS = 5 * 60 * 1000
 const MAX_FILE_PREVIEW = 20_000
-/** 复查轮至少要有这么多剩余预算才值得跑 */
-const MIN_POLISH_BUDGET_MS = 30_000
 /** 交付说明语言不对时的重问:预算上限与最低剩余量 */
 const DELIVERY_RETRY_BUDGET_MS = 90_000
 const DELIVERY_RETRY_MIN_MS = 120_000
@@ -89,6 +103,41 @@ function sourcesEqual(a: FileMap, b: FileMap): boolean {
   const ak = Object.keys(a)
   if (ak.length !== Object.keys(b).length) return false
   return ak.every((k) => a[k] === b[k])
+}
+
+/** 从文本里提取首个合法 JSON 对象(取第一个 { 到最后一个 },再 JSON.parse);失败返回 null */
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  const candidate = text.slice(start, end + 1)
+  try {
+    const v = JSON.parse(candidate) as unknown
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+/** 判别门节点(approve/choose 至少其一);用它做类型收窄(比裸 `in` 可靠:字段是可选的) */
+function isGateStep(s: PipelineStep): s is PipelineGateStep {
+  return 'approve' in s || 'choose' in s
+}
+
+/**
+ * 从恢复上下文还原暂停时的编排节点快照(固定版本)。快照缺失/损坏时返回 null,
+ * 由调用方回落「重新派生」—— 正常续跑路径总是带上快照,这里只是纵深防御。
+ */
+function restoreStepsSnapshot(json: string | undefined): PipelineStep[] | null {
+  if (!json) return null
+  try {
+    const raw = JSON.parse(json) as unknown
+    if (!Array.isArray(raw)) return null
+    // 复用 parsePipeline 的校验(与「校验通过」同一语义):包一层定义再解析
+    return parsePipeline(JSON.stringify({ schemaVersion: SCHEMA_VERSION, steps: raw }))
+  } catch {
+    return null
+  }
 }
 
 /** 递归拷贝模板(跳过 node_modules;node_modules 用符号链接复用,省时省空间) */
@@ -223,6 +272,45 @@ async function materializeAttachments(
   return images
 }
 
+/**
+ * 提示词覆盖树:把 Worker 解包下发的 { 路径 → 模板文本 } 落到 <workspace>/.prompts/。
+ * 返回该目录路径供 loader 按路径覆盖默认树;无覆盖时返回 undefined(用镜像内置默认)。
+ * 路径穿越/绝对路径/空内容一律跳过(Worker 已校验过一遍,这里是纵深防御)。
+ */
+async function materializePromptFiles(workspace: string, files: FileMap | undefined): Promise<string | undefined> {
+  if (!files || Object.keys(files).length === 0) return undefined
+  const dir = join(workspace, PROMPT_DIR)
+  await mkdir(dir, { recursive: true })
+  for (const [path, content] of Object.entries(files)) {
+    if (path.includes('..') || path.startsWith('/') || !content) continue
+    const abs = join(dir, path)
+    await mkdir(dirname(abs), { recursive: true })
+    await writeFile(abs, content, 'utf8')
+  }
+  return dir
+}
+
+/**
+ * 技能树:把 Worker 解包下发的 { skills/<name>/<file> → 内容 } 落到 <workspace>/.skills/<name>/<file>。
+ * 返回目录路径供 createForgeSession 用 loadSkillsFromDir 加载;无技能时返回 undefined。
+ * 路径穿越/绝对路径/空内容一律跳过(Worker 已校验过一遍,这里是纵深防御)。
+ */
+async function materializeSkillFiles(workspace: string, files: FileMap | undefined): Promise<string | undefined> {
+  if (!files || Object.keys(files).length === 0) return undefined
+  const root = join(workspace, SKILLS_DIR)
+  let count = 0
+  for (const [path, content] of Object.entries(files)) {
+    if (!path.startsWith('skills/') || !content) continue
+    const rel = path.slice('skills/'.length)
+    if (rel.includes('..') || rel.startsWith('/')) continue
+    const abs = join(root, rel)
+    await mkdir(dirname(abs), { recursive: true })
+    await writeFile(abs, content, 'utf8')
+    count++
+  }
+  return count ? root : undefined
+}
+
 /** 收集构建产物并生成清单 */
 async function collectDist(workspace: string): Promise<{ dist: FileMap; manifest: ArtifactManifest }> {
   const distDir = join(workspace, 'dist')
@@ -319,136 +407,68 @@ export class CancelledError extends Error {
   }
 }
 
-/**
- * 取本次会话累计的 token 用量。必须趁 session 还活着时读 —— dispose() 之后 agent state 就没了,
- * 而失败/被停止的任务同样烧了这些 token,所以要在 finally 里读、而不是只在成功路径上读。
- */
-function collectUsage(session: AgentSession, model: string): RunUsage {
-  const stats = session.getSessionStats()
-  return {
-    model,
-    input: stats.tokens.input,
-    output: stats.tokens.output,
-    cacheRead: stats.tokens.cacheRead,
-    cacheWrite: stats.tokens.cacheWrite,
-    turns: stats.assistantMessages,
+/** HITL 人门节点触发:runJob 抛它表示「暂停等用户」,index.ts 据此返回 200 { paused: true } 而非失败 */
+export class HumanGatePaused extends Error {
+  constructor() {
+    super('human gate reached, waiting for user')
+    this.name = 'HumanGatePaused'
   }
 }
 
-export async function runJob(
-  config: AgentConfig,
-  req: RunRequest,
-  report: ProgressReporter,
-  log: StreamLogger,
-  signal?: AbortSignal,
-  /** 会话建好后的回调:index.ts 借此拿到 session 引用,把用户追加的要求 steer 进去 */
-  onSession?: (session: AgentSession) => void,
-  /**
-   * 用量回调:在 session 销毁前触发一次,成功、失败、用户停止三种终态都会触发
-   * (index.ts 据此上报 /internal/jobs/:id/usage)。回调抛错不影响主流程。
-   */
-  onUsage?: (usage: RunUsage) => void,
-  /**
-   * 断点快照回调:任务运行期间周期性把当前源码树交给 Worker(存 R2),失败/停止后供「从断点继续」。
-   * 回调失败只打日志,不影响生成。
-   */
-  onCheckpoint?: (source: FileMap) => Promise<boolean>,
-): Promise<RunResult> {
-  // 冷启动期间就被停止:连工作目录都不用建
-  const uiLang: UiLang = isUiLang(req.lang) ? req.lang : 'zh'
-  if (signal?.aborted) throw new CancelledError(uiLang)
-  // 凭证缺失必须在接活前就失败:pi 解析不到环境变量时会把变量名当字面量发出去,
-  // 上游 401 → pi 降级成空轮次(见 error.modelFailed / error.emptyModelRun 的兜底)。
-  if (!process.env[config.apiKeyEnv]) throw new Error(t(uiLang, 'error.apiKeyMissing', { env: config.apiKeyEnv }))
-  // 产物语言:跟随需求正文的语言,识别不出才回落界面语言(见 lang.ts)
-  const outLang = resolveOutputLang(req)
-  const workspace = join(config.workspaceRoot, req.jobId)
-  await rm(workspace, { recursive: true, force: true })
-  await mkdir(workspace, { recursive: true })
-
-  // 从预装模板拷贝工作目录,node_modules 用符号链接复用(不重复安装依赖)
-  await copyTemplate(config.templateDir, workspace)
-  await symlink(join(config.templateDir, 'node_modules'), join(workspace, 'node_modules'), 'dir').catch(() => {})
-
-  // chat:把当前源码树覆盖进工作目录,agent 直接在其上修改
-  if (req.type === 'chat' && req.currentFiles) {
-    for (const [path, content] of Object.entries(req.currentFiles)) {
-      if (path.includes('..') || path.startsWith('/')) continue
-      const abs = join(workspace, path)
-      await mkdir(join(abs, '..'), { recursive: true })
-      await writeFile(abs, content, 'utf8')
-    }
+/**
+ * 汇总多个子 agent 会话的 token 用量。必须趁各 session 还活着时逐条读 —— dispose() 之后
+ * agent state 就没了,而失败/被停止的任务同样烧了这些 token,所以统一在 finally 里读。
+ */
+function usageAccumulator(model: string) {
+  const acc = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0 }
+  return {
+    absorb(session: AgentSession) {
+      const stats = session.getSessionStats()
+      acc.input += stats.tokens.input
+      acc.output += stats.tokens.output
+      acc.cacheRead += stats.tokens.cacheRead
+      acc.cacheWrite += stats.tokens.cacheWrite
+      acc.turns += stats.assistantMessages
+    },
+    total(): RunUsage {
+      return { model, ...acc }
+    },
   }
+}
 
-  // 平台自有文件强制还原(脚手架契约 / 设计系统 / 后端 SDK 不可被上一版源码或模型改坏)
-  await restorePlatformFiles(workspace, config.templateDir, true)
+/** 单个子 agent 节点跑完一轮后的产出(供调用方判断空转/截断/交付说明) */
+interface TurnOutput {
+  providerError: string
+  lastStopReason: string
+  summary: string
+  summaryAfterTool: string
+  usedTool: boolean
+}
 
-  // 用户附件:图片直接作为多模态输入,文本落到 .attachments/ 供模型 read(不进源码树)
-  const attachmentImages = await materializeAttachments(workspace, req.attachments, config.supportsImageInput)
-
-  // 本轮连接器:凭证明文落到 .forge/connectors.json(不进源码树、不进产物,随容器销毁)
-  await materializeConnectors(workspace, req.connectors)
-
-  // 生成前的源码快照:生成结束若一个字节都没变,说明模型空转(provider 401/空回复),
-  // 绝不能把未改动的脚手架当成"生成成功"交付。
-  const sourceBefore = req.type === 'generate' ? await collectSource(workspace) : null
-
-  report({
-    stage: req.type === 'chat' ? 'coding' : 'planning',
-    progress: t(uiLang, req.type === 'chat' ? 'progress.chatEdit' : 'progress.plan'),
-  })
-
-  const session = await createForgeSession(config, workspace, { outLang, uiLang, mode: req.type })
-  // 会话就绪:交给 index.ts,它在模型跑起来之前缓冲的「追加要求」此刻补投
-  onSession?.(session)
-  // 用户主动停止:signal 一响就 abort 当前轮次;每个阶段结束后再用 throwIfCancelled 把控制流拉出
-  // runJob —— abort 只保证"轮次尽快结束",不代表 prompt 会抛错,所以两条都要有。
-  const onAbort = () => void session.abort()
-  if (signal?.aborted) onAbort()
-  else signal?.addEventListener('abort', onAbort, { once: true })
-  const throwIfCancelled = () => {
-    if (signal?.aborted) throw new CancelledError(uiLang)
-  }
-  // 会话建好之前就被停止(冷启动 + 拷模板慢于巡检间隔):abort 一个还没跑过的会话是空操作,
-  // 这里直接退出,别让整整一轮生成白跑(不然会占满 --max-instances 1 的实例)
-  throwIfCancelled()
-  // tool_execution_end 不带入参,先用 start 事件按 toolCallId 记住本次调用的参数
+/**
+ * 跑一个子 agent 节点的一轮 prompt:订阅事件做进度/日志/文件预览/plan 上报,并在结束时自清理订阅。
+ * abort 由调用方统一接线(signal → 当前 session.abort),这里只管超时与收尾。
+ */
+async function runAgentTurn(input: {
+  session: AgentSession
+  prompt: string
+  images?: ImageBlock[]
+  budgetMs: number
+  workspace: string
+  report: ProgressReporter
+  uiLang: UiLang
+  raw: (text: string) => void
+  writtenFiles: Set<string>
+}): Promise<TurnOutput> {
+  const { session, prompt, images, budgetMs, workspace, report, uiLang, raw, writtenFiles } = input
   const pendingArgs = new Map<string, Record<string, unknown>>()
-  // 累积 agent 的正文输出;交付说明 = **最后一次工具调用之后**的那段正文,
-  // 回传后作为对话里的 assistant 回复。
-  // 为什么不能只取「最后一段正文」:有些模型(实测 MiniMax-M3.1-Flash)整轮只在开头说过一句话,
-  // 之后全是思考与工具调用、收尾时不再输出正文 —— 那样取到的会是开场白,不是交付说明。
   let textBuf = ''
   let summary = ''
-  /** 工具调用之后出现过的最后一段正文(那才是交付说明) */
   let summaryAfterTool = ''
-  /** 本轮是否调用过工具 */
   let usedTool = false
-  /**
-   * 最后一次 provider 错误。pi 的约定是:请求失败不抛异常,而是产出一条
-   * stopReason='error' 的 assistant 消息。必须在 prompt 结束后检查 —— 否则一次 401
-   * 会变成「空轮次 + 构建未改动的脚手架 + commit 成功」,用户看到的是"秒回旧页面"。
-   */
   let providerError = ''
-  /** 最后一条 assistant 消息的结束原因:length = 单轮输出被 max_tokens 截断(思考吃光了额度) */
   let lastStopReason = ''
-  /**
-   * 完整过程(逐 token 正文/思考/每次工具调用)只写 Cloud Run stdout,用于运维排查;
-   * D1 的 agent_log 只保留里程碑与告警,避免把日志当消息总线(实测会写出几万行/天)。
-   */
-  let rawBuf = ''
-  const flushRaw = () => {
-    if (!rawBuf) return
-    process.stdout.write(rawBuf.endsWith('\n') ? rawBuf : `${rawBuf}\n`)
-    rawBuf = ''
-  }
-  const raw = (text: string) => {
-    rawBuf += text
-    if (rawBuf.length > 200_000) flushRaw()
-  }
-  const rawTimer = setInterval(flushRaw, 5_000)
-  /** 本次已写入的文件(去重,用于进度里的计数) */
-  const writtenFiles = new Set<string>()
+
   const unsubscribe = session.subscribe((event) => {
     if (event.type === 'message_update') {
       const ev = event.assistantMessageEvent
@@ -472,7 +492,6 @@ export async function runJob(
       return
     }
     if (event.type === 'message_end') {
-      // 只关心 assistant 终态:成功消息会清掉之前 auto-retry 留下的错误
       const msg = event.message
       if (msg.role === 'assistant') {
         lastStopReason = msg.stopReason
@@ -516,109 +535,431 @@ export async function runJob(
     })
   })
 
+  try {
+    await withTimeout(
+      session.prompt(prompt, { images: images?.length ? images : undefined }),
+      budgetMs,
+      () => void session.abort(),
+      uiLang,
+    )
+  } finally {
+    unsubscribe()
+  }
+
+  return { providerError, lastStopReason, summary, summaryAfterTool, usedTool }
+}
+
+export async function runJob(
+  config: AgentConfig,
+  req: RunRequest,
+  report: ProgressReporter,
+  log: StreamLogger,
+  signal?: AbortSignal,
+  /** 会话建好后的回调:index.ts 借此拿到 session 引用,把用户追加的要求 steer 进去 */
+  onSession?: (session: AgentSession) => void,
+  /**
+   * 用量回调:在 session 销毁前触发一次,成功、失败、用户停止三种终态都会触发
+   * (index.ts 据此上报 /internal/jobs/:id/usage)。回调抛错不影响主流程。
+   */
+  onUsage?: (usage: RunUsage) => void,
+  /**
+   * 断点快照回调:任务运行期间周期性把当前源码树交给 Worker(存 R2),失败/停止后供「从断点继续」。
+   * 回调失败只打日志,不影响生成。
+   */
+  onCheckpoint?: (source: FileMap) => Promise<boolean>,
+  /** HITL 人门节点暂停回调:把恢复上下文交给 Worker(置 waiting_human),实例随后释放 */
+  onWait?: (resume: ResumeContext) => Promise<void>,
+): Promise<RunResult> {
+  // 冷启动期间就被停止:连工作目录都不用建
+  const uiLang: UiLang = isUiLang(req.lang) ? req.lang : 'zh'
+  if (signal?.aborted) throw new CancelledError(uiLang)
+  // 凭证缺失必须在接活前就失败:pi 解析不到环境变量时会把变量名当字面量发出去,
+  // 上游 401 → pi 降级成空轮次(见 error.modelFailed / error.emptyModelRun 的兜底)。
+  if (!process.env[config.apiKeyEnv]) throw new Error(t(uiLang, 'error.apiKeyMissing', { env: config.apiKeyEnv }))
+  // 产物语言:跟随需求正文的语言,识别不出才回落界面语言(见 lang.ts)
+  const outLang = resolveOutputLang(req)
+  const workspace = join(config.workspaceRoot, req.jobId)
+  await rm(workspace, { recursive: true, force: true })
+  await mkdir(workspace, { recursive: true })
+
+  // 从预装模板拷贝工作目录,node_modules 用符号链接复用(不重复安装依赖)
+  await copyTemplate(config.templateDir, workspace)
+  await symlink(join(config.templateDir, 'node_modules'), join(workspace, 'node_modules'), 'dir').catch(() => {})
+
+  // chat 或 HITL 恢复:把当前源码树覆盖进工作目录,agent 直接在其上修改/继续
+  if (req.currentFiles && (req.type === 'chat' || req.resume)) {
+    for (const [path, content] of Object.entries(req.currentFiles)) {
+      if (path.includes('..') || path.startsWith('/')) continue
+      const abs = join(workspace, path)
+      await mkdir(join(abs, '..'), { recursive: true })
+      await writeFile(abs, content, 'utf8')
+    }
+  }
+
+  // 平台自有文件强制还原(脚手架契约 / 设计系统 / 后端 SDK 不可被上一版源码或模型改坏)
+  await restorePlatformFiles(workspace, config.templateDir, true)
+
+  // 用户附件:图片直接作为多模态输入,文本落到 .attachments/ 供模型 read(不进源码树)
+  const attachmentImages = await materializeAttachments(workspace, req.attachments, config.supportsImageInput)
+
+  // 本轮连接器:凭证明文落到 .forge/connectors.json(不进源码树、不进产物,随容器销毁)
+  await materializeConnectors(workspace, req.connectors)
+
+  report({
+    stage: req.type === 'chat' ? 'coding' : 'planning',
+    progress: t(uiLang, req.type === 'chat' ? 'progress.chatEdit' : 'progress.plan'),
+  })
+
+  // 三个子 agent 共享同一份 models.json/provider(只解析一次),各节点用各自的 system prompt + 工具集
+  const modelCtx = await createModelContext(config, workspace, uiLang)
+  // ---- 会话生命周期:abort 始终指向「当前正在跑的那个子 agent」----
+  const sessions: AgentSession[] = []
+  const acc = usageAccumulator(config.modelId)
+  let currentSession: AgentSession | null = null
+  const onAbort = () => void currentSession?.abort()
+  if (signal?.aborted) throw new CancelledError(uiLang)
+  signal?.addEventListener('abort', onAbort, { once: true })
+  const throwIfCancelled = () => {
+    if (signal?.aborted) throw new CancelledError(uiLang)
+  }
+
+  /**
+   * 完整过程(逐 token 正文/思考/每次工具调用)默认只写 Cloud Run stdout,用于运维排查;
+   * D1 的 agent_log 只保留里程碑与告警,避免把日志当消息总线(实测会写出几万行/天)。
+   * 本地开发(Worker 派发时带 streamLog=true)时,同样的内容也追加进里程碑日志上报,
+   * 供后台实时看到完整生成过程;线上不带该字段,行为与从前完全一致。
+   */
+  let rawBuf = ''
+  const flushRaw = () => {
+    if (!rawBuf) return
+    const chunk = rawBuf.endsWith('\n') ? rawBuf : `${rawBuf}\n`
+    process.stdout.write(chunk)
+    if (req.streamLog) log.append(chunk)
+    rawBuf = ''
+  }
+  const raw = (text: string) => {
+    rawBuf += text
+    if (rawBuf.length > 200_000) flushRaw()
+  }
+  const rawTimer = setInterval(flushRaw, 5_000)
+  /** 本次已写入的文件(去重,跨节点共享,用于进度里的计数) */
+  const writtenFiles = new Set<string>()
+
+  // 技能覆盖树解包到 .skills/(不进源码树);每个节点按 agent 声明的 skills 子集注入 system prompt
+  const skillsDir = await materializeSkillFiles(workspace, req.skillFiles)
+
+  /** 为某个节点建一个独立会话:system prompt 与工具集各节点不同;建好即成为 steer 目标 */
+  const newSession = async (systemPrompt: string, tools: string[], skillNames?: string[], mcpNames?: string[]) => {
+    const s = await createForgeSession(config, workspace, modelCtx, {
+      uiLang,
+      systemPrompt,
+      tools,
+      skillsDir,
+      skillNames,
+      mcp: req.mcp,
+      mcpNames,
+    })
+    sessions.push(s)
+    currentSession = s
+    onSession?.(s)
+    // 会话建好之前就被停止(冷启动 + 拷模板慢于巡检间隔):abort 一个还没跑过的会话是空操作,
+    // 这里直接退出,别让整整一轮生成白跑(不然会占满 --max-instances 1 的实例)
+    throwIfCancelled()
+    return s
+  }
+  // (逐 token 事件订阅已移入 runAgentTurn,各子 agent 节点自行订阅并清理)
+
   /**
    * 断点:每 60s 或异常收尾时快照源码树。内容没变就不重复上报(长时间思考不该产生写入),
    * 快照失败只记日志 —— 它只是「失败后可续跑」的增强,绝不能影响主流程。
    */
-  let checkpointBusy = false
+  let checkpointBusy: Promise<void> | null = null
   let lastCheckpointHash = ''
-  const checkpointNow = async (force = false): Promise<void> => {
-    if (!onCheckpoint || checkpointBusy) return
-    checkpointBusy = true
-    try {
-      const src = await collectSource(workspace)
-      const hash = createHash('sha256').update(JSON.stringify(src)).digest('hex')
-      if (!force && hash === lastCheckpointHash) return
-      if (await onCheckpoint(src)) lastCheckpointHash = hash
-    } catch (err) {
-      console.error(`[checkpoint] ${err instanceof Error ? err.message : String(err)}`)
-    } finally {
-      checkpointBusy = false
+  const checkpointNow = (force = false): Promise<void> => {
+    if (!onCheckpoint) return Promise.resolve()
+    // 已有快照在途:普通调用复用其结果(内容没变就不重复上报);强制快照(门节点暂停 / 异常收尾)
+    // 等它结束后再补一次 —— 之前这里直接 return,门节点可能引用到稍旧的 checkpoint。
+    if (checkpointBusy) {
+      return force ? checkpointBusy.then(() => checkpointNow(true)) : checkpointBusy
     }
+    const run = async (): Promise<void> => {
+      try {
+        const src = await collectSource(workspace)
+        const hash = createHash('sha256').update(JSON.stringify(src)).digest('hex')
+        if (!force && hash === lastCheckpointHash) return
+        if (await onCheckpoint(src)) lastCheckpointHash = hash
+      } catch (err) {
+        console.error(`[checkpoint] ${err instanceof Error ? err.message : String(err)}`)
+      } finally {
+        checkpointBusy = null
+      }
+    }
+    checkpointBusy = run()
+    return checkpointBusy
   }
   const checkpointTimer = onCheckpoint ? setInterval(() => void checkpointNow(), 60_000) : undefined
 
-  const startedAt = Date.now()
+  // HITL 恢复:把「已消耗」的那段预算从钟上扣掉,remainingMs() 从恢复上下文的剩余预算开始倒数,
+  // 而不是拿新实例的全新 maxRunMs —— 否则一个任务能借 HITL 反复刷新预算,超时护栏形同虚设。
+  const startedAt = Date.now() - (req.resume ? Math.max(0, config.maxRunMs - req.resume.remainingMs) : 0)
   const remainingMs = () => config.maxRunMs - (Date.now() - startedAt)
-  /** 第一轮的交付说明(复查轮自己的收尾话术不适合当交付说明,所以优先用第一轮的) */
-  let deliverSummary = ''
+  /** 交付说明:取标记 deliver 的节点(默认最后一个 agent 节点)的收尾正文;恢复时带回暂停前的值 */
+  let deliverSummary = req.resume?.deliverSummary ?? ''
+
+  // 编排流水线:顶层 body.pipeline(全局、与模型配置解耦)优先,否则内置默认(Planner→Coder→build→Reviewer→rebuild)。
+  // 非法/空 → parsePipeline 返回 null → 回落内置默认,绝不因脏配置打断生成。
+  // HITL 续跑优先用暂停时快照的编排版本:后台在等待期间改了编排的话,doneStepIds/gateStepId 仍与快照一致。
+  const steps =
+    restoreStepsSnapshot(req.resume?.stepsJson) ??
+    (req.pipeline ? parsePipeline(req.pipeline) : null) ??
+    defaultPipeline(config, req, uiLang, remainingMs)
+  // 提示词文件系统:system prompt + user prompt + 流水线模板变量(含 {{plannerPrompt}} 等成品提示词)。
+  // 后台自定义压缩包解包到 <workspace>/.prompts/ 后按路径覆盖默认树(部分覆盖 = 部分回落默认)。
+  const promptOverrideDir = await materializePromptFiles(workspace, req.promptFiles)
+  const prompts = await loadPromptSet(
+    config.promptsDir,
+    {
+      req,
+      lang: outLang,
+      mode: req.type,
+      imageInputEnabled: config.supportsImageInput,
+    },
+    promptOverrideDir,
+  )
+  const vars = prompts.vars()
+  // 步骤类型化输出(见 docs/FORGE2.md §17.14):step id → field → 值。恢复时从上下文还原并注入 vars,
+  // 使下游 `{{ steps.<id>.outputs.<field> }}` 跨实例可用。
+  const stepsOutputs: Record<string, Record<string, string>> = {}
+  if (req.resume?.outputs) {
+    for (const [sid, fields] of Object.entries(req.resume.outputs)) {
+      stepsOutputs[sid] = { ...fields }
+      for (const [f, v] of Object.entries(fields)) vars[`steps.${sid}.outputs.${f}`] = v
+    }
+  }
+  // 拓扑序 = 实际执行序(默认线性流水线退化为原始顺序;有分支时先跑完被依赖的节点)。
+  const order = topologicalOrder(steps) ?? steps
 
   try {
-    await withTimeout(
-      session.prompt(buildUserPrompt(req, { imageInputEnabled: config.supportsImageInput, lang: outLang }), {
-        images: attachmentImages.length ? attachmentImages : undefined,
-      }),
-      config.maxRunMs,
-      () => void session.abort(),
-      uiLang,
-    )
-    throwIfCancelled()
-    // provider 失败(401/404/5xx)不会让 prompt 抛错,只会留下一轮空回复;
-    // 必须在构建前显式判失败,否则未改动的脚手架会被当成产物交付。
-    if (providerError) throw new Error(t(uiLang, 'error.modelFailed', { msg: providerError }))
-    if (sourceBefore && sourcesEqual(sourceBefore, await collectSource(workspace))) {
-      // 区分「模型什么都没干」与「思考吃光 max_tokens、输出被截断」:
-      // 后者不是凭证/方言问题,调大该配置的 max_tokens 即可(见 docs/FORGE2.md §21.1)。
-      throw new Error(t(uiLang, lastStopReason === 'length' ? 'error.modelTruncated' : 'error.emptyModelRun'))
-    }
-    // 工具调用之后没有正文 → 模型没写交付说明(返回空,让 Worker 用平台自己的收尾文案兜底)
-    deliverSummary = summaryAfterTool || (usedTool ? '' : summary.trim())
-    // 交付说明的语言跑偏了(模型有时会用提示词的中文写收尾)→ 专门再问一次。
-    // 这段提示词短、目标单一,比在长提示词末尾强调有效得多;问不到就保留原来那份。
-    if (deliverSummary && !matchesLang(deliverSummary, outLang) && remainingMs() > DELIVERY_RETRY_MIN_MS) {
-      const budget = Math.min(DELIVERY_RETRY_BUDGET_MS, remainingMs())
-      log.append(t(uiLang, 'log.deliveryLangRetry'))
-      try {
-        await withTimeout(
-          session.prompt(deliveryNotePrompt(outLang)),
-          budget,
-          () => void session.abort(),
-          uiLang,
-        )
-        const retry = summaryAfterTool || summary.trim()
-        if (retry && matchesLang(retry, outLang)) deliverSummary = retry
-      } catch {
-        // 重问失败(超时/异常):保留原来那份,别把交付说明弄丢
+    // HITL 恢复:基线/构建态/交付说明/空转基线都从恢复上下文还原(新实例没有这些内存态)
+    const sourceBefore = req.resume
+      ? (req.resume.sourceBefore ?? null)
+      : req.type === 'generate'
+        ? await collectSource(workspace)
+        : null
+    let lastStopReason = ''
+    let baseline: FileMap | null = req.resume?.baseline ?? null
+    let built = req.resume?.built ?? false
+    let emptyChecked = false
+    let deliverSession: AgentSession | null = null
+    let lastAgentSummary = req.resume?.lastAgentSummary ?? ''
+    let lastAgentSession: AgentSession | null = null
+    // 已完成(或条件跳过)的步骤 id;恢复时连同已作答的门一起跳过,下游从门后继续
+    const doneIds: string[] = [...(req.resume?.doneStepIds ?? [])]
+    const skipIds = new Set<string>([...doneIds, ...(req.resume ? [req.resume.gateStepId] : [])])
+
+    // 空转检测(仅 generate):首个构建节点之前 source 一个字节都没变 → 模型空转/provider 空回复,
+    // 绝不能把未改动的脚手架当成"生成成功"交付。放在构建之前 —— ensureLocaleCall 会改写 App.jsx
+    // 的 setLocale,放在构建之后会漏判(目标语言 ≠ 中文时一行之差就放过了空转)。
+    const checkEmptyRun = async () => {
+      if (emptyChecked || !sourceBefore) return
+      emptyChecked = true
+      if (sourcesEqual(sourceBefore, await collectSource(workspace))) {
+        throw new Error(t(uiLang, lastStopReason === 'length' ? 'error.modelTruncated' : 'error.emptyModelRun'))
       }
     }
-    // 构建前再覆盖一次平台文件:模型若无视约束改了组件/SDK,也不会进入产物与源码树
-    await restorePlatformFiles(workspace, config.templateDir, false)
 
-    // 第一轮先构建:既是对初稿的校验,也是复查轮回滚的基线
-    report({ stage: 'building', progress: t(uiLang, 'progress.building') })
-    throwIfCancelled()
-    await ensureLocaleCall(workspace, localeCode(outLang), req.type)
-    await build(workspace, signal, uiLang, localeCode(outLang))
-    const baseline = await collectSource(workspace)
-
-    // 第二轮:同会话的「设计总监复查与打磨」——只精修,不推翻;失败不判 job 失败
-    const wantPolish =
-      config.designReview === 'always' || (config.designReview === 'generate' && req.type === 'generate')
-    if (wantPolish && remainingMs() >= MIN_POLISH_BUDGET_MS) {
-      throwIfCancelled()
-      const budget = Math.min(config.polishMaxMs, remainingMs())
-      log.append(t(uiLang, 'log.polishStart'))
-      report({ stage: 'coding', progress: t(uiLang, 'progress.polish') })
+    // 构建节点:还原平台文件 + setLocale + 平台确定性构建;失败可回滚到最近一次成功构建的源码
+    const runBuild = async (rollback: boolean) => {
+      await restorePlatformFiles(workspace, config.templateDir, false)
+      report({ stage: 'building', progress: t(uiLang, built ? 'progress.rebuilding' : 'progress.building') })
+      await ensureLocaleCall(workspace, localeCode(outLang), req.type)
       try {
-        await withTimeout(session.prompt(polishPrompt(outLang, req.type)), budget, () => void session.abort(), uiLang)
-        throwIfCancelled()
-        await restorePlatformFiles(workspace, config.templateDir, false)
-        report({ stage: 'building', progress: t(uiLang, 'progress.rebuilding') })
-        try {
-          await ensureLocaleCall(workspace, localeCode(outLang), req.type)
-          await build(workspace, signal, uiLang, localeCode(outLang))
-        } catch {
-          // 复查轮把代码改坏了:回滚到已通过构建的初稿,保证交付可用
+        await build(workspace, signal, uiLang, localeCode(outLang))
+        baseline = await collectSource(workspace)
+        built = true
+      } catch (err) {
+        if (rollback && baseline) {
+          // 后续节点把代码改坏了:回滚到已通过构建的最近一次源码,保证交付可用
           await restoreFromMap(workspace, baseline)
           await build(workspace, signal, uiLang, localeCode(outLang))
           log.append(t(uiLang, 'log.polishFallback'))
+          baseline = await collectSource(workspace)
+        } else {
+          throw err
         }
-      } catch (err) {
-        // 复查轮本身失败不判 job 失败;但用户主动停止必须传播出去(别被这里吞成"保留第一轮结果")
-        throwIfCancelled()
-        log.append(t(uiLang, 'log.polishUndone', { msg: err instanceof Error ? err.message : String(err) }))
       }
-      log.append(t(uiLang, 'log.polishEnd'))
+    }
+
+    // 解析节点引用的 agent → { systemPrompt, tools, skillNames?, mcpNames? }。命名 agent 先查内置,
+    // 再查后台 agents 注册表,最后按名字找 system/<name>.md;都不认识则回落 coder 默认(记告警,绝不因脏配置打断生成)。
+    const resolveAgent = (
+      ref: PipelineAgentStep['agent'],
+    ): { systemPrompt: string; tools: string[]; skillNames?: string[]; mcpNames?: string[] } => {
+      if (typeof ref === 'string') {
+        const builtin = AGENTS[ref as keyof typeof AGENTS]
+        if (builtin) return { systemPrompt: prompts.system(ref), tools: builtin.tools }
+        const custom = req.agents?.[ref]
+        if (custom) {
+          return {
+            systemPrompt: custom.systemPrompt || prompts.system(ref) || prompts.system('coder'),
+            tools: custom.tools ?? AGENTS.coder.tools,
+            skillNames: custom.skills,
+            mcpNames: custom.mcp,
+          }
+        }
+        const byFile = prompts.system(ref)
+        if (byFile) {
+          console.warn(`[pipeline] 未知 agent 名 "${ref}"(无注册定义),用其 system/<name>.md + coder 默认工具集`)
+          return { systemPrompt: byFile, tools: AGENTS.coder.tools }
+        }
+        console.warn(`[pipeline] 未知 agent 名 "${ref}",回落到 coder 默认`)
+        return { systemPrompt: prompts.system('coder'), tools: AGENTS.coder.tools }
+      }
+      // 内联定义:systemPrompt 缺省回落 coder;tools 缺省 = coder 默认工具集;skills/mcp 直接采用
+      return {
+        systemPrompt: ref.systemPrompt || prompts.system('coder'),
+        tools: ref.tools ?? AGENTS.coder.tools,
+        skillNames: ref.skills,
+        mcpNames: ref.mcp,
+      }
+    }
+
+    // 跑一个 agent 节点(闭包,便于 continue_on_failure 节点失败不判 job 失败)
+    const runAgentStep = async (step: PipelineAgentStep) => {
+      if (step.min_budget_ms && remainingMs() < step.min_budget_ms) return
+      if (step.progress) report({ stage: 'coding', progress: interpolate(step.progress, vars) })
+      const def = resolveAgent(step.agent)
+      const session = await newSession(def.systemPrompt, step.tools ?? def.tools, def.skillNames, def.mcpNames)
+      const budget = step.budget_ms && step.budget_ms > 0 ? Math.min(step.budget_ms, remainingMs()) : remainingMs()
+      const turn = await runAgentTurn({
+        session,
+        prompt: interpolate(step.prompt, vars),
+        images: step.images && attachmentImages.length ? attachmentImages : undefined,
+        budgetMs: budget,
+        workspace,
+        report,
+        uiLang,
+        raw,
+        writtenFiles,
+      })
+      throwIfCancelled()
+      if (turn.providerError) throw new Error(t(uiLang, 'error.modelFailed', { msg: turn.providerError }))
+      lastStopReason = turn.lastStopReason
+      const text = turn.summaryAfterTool || (turn.usedTool ? '' : turn.summary.trim())
+      lastAgentSummary = text
+      lastAgentSession = session
+      if (step.deliver && !deliverSummary) {
+        deliverSummary = text
+        deliverSession = session
+      }
+      // 类型化输出(见 docs/FORGE2.md §17.14):恒有 outputs.summary = 完整收尾正文;
+      // 声明了 output 字段时,尝试从收尾正文里提取 JSON 对象按字段取值,提不到留空串。
+      const outs: Record<string, string> = { summary: text }
+      if (step.output?.length) {
+        const obj = extractJsonObject(text)
+        for (const f of step.output) {
+          const v = obj?.[f]
+          // 数组/对象保留为 JSON 文本(下游用 JSON.parse 消费),标量直接 String;null/undefined 留空串。
+          // 之前统一 String() 会把数组压成逗号串、对象压成 [object Object],下游无法可靠消费。
+          outs[f] = v === undefined || v === null ? '' : typeof v === 'string' ? v : JSON.stringify(v)
+        }
+      }
+      stepsOutputs[step.id] = outs
+      for (const [f, v] of Object.entries(outs)) vars[`steps.${step.id}.outputs.${f}`] = v
+    }
+
+    // DAG 执行:按拓扑序逐个跑(共享工作目录,分支顺序执行不并行 —— 见 §17.9 的已知局限)。
+    // 非 continue_on_failure 节点失败直接冒泡判 job 失败;continue_on_failure 节点失败只记告警,依赖它的节点照跑。
+    for (const step of order) {
+      throwIfCancelled()
+      // 恢复:已完成步骤 + 已作答的门直接跳过,下游从门后开始
+      if (skipIds.has(step.id)) continue
+      // 条件跳过(if):为假视作已完成(下游照跑),并记入 doneIds 供后续门节点快照
+      if (step.if && !evalCondition(step.if, vars)) {
+        doneIds.push(step.id)
+        continue
+      }
+      // 人门节点:快照源码 + 落恢复上下文 → 交给 Worker 置 waiting_human,实例随即释放(空等零成本)
+      if (isGateStep(step)) {
+        await checkpointNow(true)
+        // 把已作答的门记进 doneStepIds:流程遇到第二个门再暂停时,恢复上下文仍要包含之前的门,
+        // 否则下一次续跑 skipIds 只含最新门,会重新停在第一个门 → 回退循环。
+        doneIds.push(step.id)
+        const resume: ResumeContext = {
+          doneStepIds: [...doneIds],
+          gateStepId: step.id,
+          kind: step.approve ? 'approve' : 'choose',
+          question: step.approve ?? step.choose!.question,
+          options: step.choose?.options,
+          deliverSummary,
+          lastAgentSummary,
+          baseline,
+          built,
+          remainingMs: remainingMs(),
+          sourceBefore,
+          outputs: stepsOutputs,
+          stepsJson: JSON.stringify(steps),
+          attachments: req.attachments,
+          connectors: req.connectors,
+        }
+        if (onWait) await onWait(resume)
+        throw new HumanGatePaused()
+      }
+      if ('command' in step) {
+        await checkEmptyRun()
+        await runBuild(step.rollback === true)
+        doneIds.push(step.id)
+        continue
+      }
+      if (step.continue_on_failure) {
+        try {
+          await runAgentStep(step)
+          doneIds.push(step.id)
+        } catch (err) {
+          // continue_on_failure 节点失败不判 job 失败;但用户主动停止必须传播出去(别被吞成"保留之前结果")
+          throwIfCancelled()
+          doneIds.push(step.id)
+          log.append(t(uiLang, 'log.polishUndone', { msg: err instanceof Error ? err.message : String(err) }))
+        }
+      } else {
+        await runAgentStep(step)
+        doneIds.push(step.id)
+      }
+    }
+
+    throwIfCancelled()
+    await checkEmptyRun()
+    // 保证 dist 存在且新鲜:流水线里没有构建,或最后一个节点改动过源码但之后没构建 → 补一次
+    if (!built || (order.length > 0 && !('command' in order[order.length - 1]))) {
+      await runBuild(false)
+    }
+
+    // 交付说明:没标 deliver 时用最后一个 agent 节点的收尾正文
+    if (!deliverSummary) {
+      deliverSummary = lastAgentSummary
+      deliverSession = lastAgentSession
+    }
+    // 交付说明的语言跑偏了(模型有时会用提示词的中文写收尾)→ 专门再问一次(在产出它的会话上)。
+    // 这段提示词短、目标单一,比在长提示词末尾强调有效得多;问不到就保留原来那份。
+    if (deliverSummary && deliverSession && !matchesLang(deliverSummary, outLang) && remainingMs() > DELIVERY_RETRY_MIN_MS) {
+      const budget = Math.min(DELIVERY_RETRY_BUDGET_MS, remainingMs())
+      log.append(t(uiLang, 'log.deliveryLangRetry'))
+      try {
+        const retry = await runAgentTurn({
+          session: deliverSession,
+          prompt: prompts.user('deliveryNote'),
+          budgetMs: budget,
+          workspace,
+          report,
+          uiLang,
+          raw,
+          writtenFiles,
+        })
+        const note = retry.summaryAfterTool || retry.summary.trim()
+        if (note && matchesLang(note, outLang)) deliverSummary = note
+      } catch {
+        // 重问失败(超时/异常):保留原来那份,别把交付说明弄丢
+      }
     }
   } catch (err) {
     // 异常/停止:补一次断点(周期快照可能刚好处在两次之间)。成功路径不需要 —— 产物会进草稿
@@ -631,12 +972,12 @@ export async function runJob(
     signal?.removeEventListener('abort', onAbort)
     // 用量快照必须在这里取:dispose() 之后就读不到了,而失败/被停止的任务同样烧了 token 与实例时间
     try {
-      onUsage?.(collectUsage(session, config.modelId))
+      for (const s of sessions) acc.absorb(s)
+      onUsage?.(acc.total())
     } catch (err) {
       console.error(`[usage] ${err instanceof Error ? err.message : String(err)}`)
     }
-    unsubscribe()
-    session.dispose()
+    for (const s of sessions) s.dispose()
   }
 
   const [src, { dist, manifest }] = await Promise.all([collectSource(workspace), collectDist(workspace)])
