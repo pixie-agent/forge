@@ -978,6 +978,13 @@ deep-linkable as `?r=<resource>` (`/admin/pipeline`, `/admin/agents`, `/admin/pr
 `/admin/mcp` redirect there). The former per-resource page components were removed; the API routes are
 unchanged.
 
+**Moving a tuned orchestration between environments**: `node agent/orchestration/sync.mjs --from staging --to prod`
+(plus `--dry-run` to inspect, `--yes` to write) copies the five resources from one environment's admin to another
+through the same admin APIs — no repo round-trip. Empty resources on the source are left alone on the target unless
+`--mirror` (skills cannot be cleared); prompts are copied as only the files that differ from the image's default tree,
+so later default upgrades still apply. Needs both environments' admin passwords (`--from-password` / `--to-password`
+or `ADMIN_PASSWORD_STAGING` / `ADMIN_PASSWORD_PROD`).
+
 Layout: **relationship graph on top, editors below.** All five editors share one state, and the graph is computed client-side from the *unsaved* editor state (`web/src/lib/orchestrationGraph.ts`): each step in topological order → the agent it runs (built-in / registry / inline / undefined) → the prompt files it renders → the skills / MCP servers that agent declares. Hovering a resource dims the steps that don't use it; clicking one opens the matching editor. Beside it a **reference check** lists dangling references, undefined `{{ variables }}`, and defined-but-unused resources. A save bar appears whenever any editor is dirty ("保存全部" saves the dirty resources in sequence, stopping at the first failure). The graph is a mirror of the agent's resolution rules, not the enforcement — the agent still falls back on its own when a config is wrong.
 
 Rules mirrored by the graph (`web/src/lib/orchestrationGraph.ts`, kept in sync by hand with the agent's

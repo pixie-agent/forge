@@ -118,6 +118,7 @@ npm run db:migrate:analytics:staging  # user-dashboard analytics (new columns/ta
 npm run db:migrate:pipeline:staging   # orchestration pipeline table (platform_pipeline); production uses :remote
 npm run db:migrate:dispatched:staging # jobs.dispatched_at (HITL-aware total-age ceiling); production uses :remote
 node agent/orchestration/push.mjs --env staging --agents-only   # seed agents / skills / prompts / MCP into an environment's R2 (also --skills-only / --prompts-only / --pipeline-only / --mcp-only; --env local|staging|prod)
+node agent/orchestration/sync.mjs --from staging --to prod --dry-run   # copy the whole orchestration tuned in one env's admin to another (pipeline/agents/MCP/prompts/skills); run with --yes to write
 ```
 
 ---
