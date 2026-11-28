@@ -351,6 +351,11 @@ export const es: Record<DictKey, string> = {
   'ws.stage.coding': 'Escribiendo el código de la app',
   'ws.stage.building': 'Construyendo los artefactos de la app',
   'ws.stage.chat': 'Aplicando los cambios que has pedido',
+  'ws.wait.title': 'Esperando tu confirmación',
+  'ws.wait.approve': 'Aprobar y continuar',
+  'ws.wait.decline': 'Descartar',
+  'ws.wait.confirm': 'Confirmar',
+  'ws.wait.feedbackPlaceholder': 'Añadir comentarios (opcional)',
   'ws.conn.missing':
     '{name} está conectado, pero todavía falta rellenar «{fields}»: complétalo antes de generar',
   'ws.conn.writable':

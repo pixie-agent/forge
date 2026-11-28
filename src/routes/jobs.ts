@@ -12,11 +12,11 @@ app.use('*', requireUser)
 app.get('/:id', async (c) => {
   const id = c.req.param('id')
   const userId = c.get('user').id
-  let job = await jobSnapshot(c.env.DB, id, userId)
+  let job = await jobSnapshot(c.env, id, userId)
   if (!job) return c.json({ error: '任务不存在' }, 404)
   if (!isTerminalStatus(job.status)) {
     await settleJobIfStale(c.env, id)
-    job = await jobSnapshot(c.env.DB, id, userId)
+    job = await jobSnapshot(c.env, id, userId)
   }
   return c.json({ job })
 })
@@ -31,11 +31,11 @@ app.get('/:id', async (c) => {
 app.get('/:id/events', async (c) => {
   const id = c.req.param('id')
   const userId = c.get('user').id
-  let initial = await jobSnapshot(c.env.DB, id, userId)
+  let initial = await jobSnapshot(c.env, id, userId)
   if (!initial) return c.json({ error: '任务不存在' }, 404)
   if (!isTerminalStatus(initial.status)) {
     await settleJobIfStale(c.env, id)
-    initial = await jobSnapshot(c.env.DB, id, userId)
+    initial = await jobSnapshot(c.env, id, userId)
   }
 
   return streamSSE(c, async (stream) => {
@@ -49,7 +49,7 @@ app.get('/:id/events', async (c) => {
           await settleJobIfStale(c.env, id)
           lastLivenessCheck = now
         }
-        const snap = await jobSnapshot(c.env.DB, id, userId)
+        const snap = await jobSnapshot(c.env, id, userId)
         if (!snap) break
         // 用长度而非整串参与指纹:files_preview/agent_log 变化频繁,长度变化即触发一次推送
         const fp = JSON.stringify([

@@ -15,6 +15,29 @@ import { isSecureRequest } from '../lib/auth'
 import { DRAFT_VERSION_NO, signPreviewToken } from '../lib/artifacts'
 import { callProjectDb, projectSchema, runProjectSql, seedProjectDocs, type SeedRow } from '../lib/projectDb'
 import { parseModelConfigInput, type ModelConfigRow } from '../lib/modelConfig'
+import { PIPELINE_KEY, getPlatformPipeline, validatePipelineJson } from '../lib/pipeline'
+import { agentsInfo, putAgents, validateAgents } from '../lib/agents'
+import type { AgentDef, McpConfig } from '../lib/agent'
+import {
+  downloadSkillZip,
+  putSkillFiles,
+  putSkillZip,
+  skillsInfo,
+  unzipSkills,
+  validateSkillFiles,
+} from '../lib/skills'
+import { mcpInfo, putMcp, validateMcp } from '../lib/mcp'
+import { suggestOrchestration } from '../lib/orchestration'
+import {
+  downloadPromptZip,
+  listPromptVersions,
+  promptEffectiveInfo,
+  putPromptFiles,
+  putPromptZip,
+  restorePromptVersion,
+  unzipPrompts,
+  validatePromptFiles,
+} from '../lib/prompts'
 import { hasPrice } from '../lib/pricing'
 import { buildDashboard } from '../lib/dashboard'
 import { normalizeShowcaseTags, showcaseTagsText } from '../lib/showcase'
@@ -97,6 +120,12 @@ const USER_USAGE_COLUMNS = `
      WHERE p.user_id = u.id AND v.version_no > 0) AS bytes_total,
   COALESCE(u.last_active_at, (SELECT MAX(j.created_at) FROM jobs j WHERE j.user_id = u.id), u.created_at) AS last_active_at`
 
+/** 后台任务日志列:本地开发(ENVIRONMENT=local)返回完整日志供实时流式排查,线上只返回尾部 8k */
+function agentLogCol(env: Env, alias = ''): string {
+  const col = alias ? `${alias}.agent_log` : 'agent_log'
+  return env.ENVIRONMENT === 'local' ? col : `substr(COALESCE(${col}, ''), -8000) AS agent_log`
+}
+
 /** 项目在两个环境(draft/live)下的数据行数之和:逐环境读该项目的独立 SQLite,库未创建按 0 */
 async function countProjectData(env: Env, projectId: string): Promise<number> {
   let count = 0
@@ -137,6 +166,18 @@ app.use('/users', requireAdmin)
 app.use('/users/*', requireAdmin)
 app.use('/models', requireAdmin)
 app.use('/models/*', requireAdmin)
+app.use('/pipeline', requireAdmin)
+app.use('/pipeline/*', requireAdmin)
+app.use('/prompts', requireAdmin)
+app.use('/prompts/*', requireAdmin)
+app.use('/agents', requireAdmin)
+app.use('/agents/*', requireAdmin)
+app.use('/skills', requireAdmin)
+app.use('/skills/*', requireAdmin)
+app.use('/mcp', requireAdmin)
+app.use('/mcp/*', requireAdmin)
+app.use('/orchestration', requireAdmin)
+app.use('/orchestration/*', requireAdmin)
 
 /** 顶层统计:给列表页头部用(产物 + 用户 + 任务全局计数) */
 app.get('/stats', requireAdmin, async (c) => {
@@ -407,6 +448,213 @@ app.post('/models/:id/concurrency', async (c) => {
   return c.json({ ok: true, queue_concurrency: value })
 })
 
+// ---------- 全局编排流水线(与模型配置解耦,全平台一份) ----------
+
+/** 读取全局流水线;空串 = 内置默认编排 */
+app.get('/pipeline', async (c) => {
+  const pipelineJson = await getPlatformPipeline(c.env.DB)
+  const row = await c.env.DB
+    .prepare('SELECT updated_at FROM platform_pipeline WHERE id = ?')
+    .bind(PIPELINE_KEY)
+    .first<{ updated_at: string }>()
+    .catch(() => null)
+  return c.json({ pipeline_json: pipelineJson, updated_at: row?.updated_at ?? null })
+})
+
+/** 保存全局流水线(原地 upsert);结构校验不通过直接 400,运营在表单里看到中文错误 */
+app.put('/pipeline', async (c) => {
+  const body = await c.req.json<{ pipeline_json?: unknown }>().catch(() => ({} as { pipeline_json?: unknown }))
+  const json = typeof body.pipeline_json === 'string' ? body.pipeline_json : ''
+  if (json.length > 200_000) return c.json({ error: '流水线过大(超过 200KB)' }, 400)
+  const err = validatePipelineJson(json)
+  if (err) return c.json({ error: err }, 400)
+  await c.env.DB
+    .prepare(
+      `INSERT INTO platform_pipeline (id, pipeline_json, updated_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET pipeline_json = excluded.pipeline_json, updated_at = datetime('now')`
+    )
+    .bind(PIPELINE_KEY, json)
+    .run()
+  return c.json({ ok: true })
+})
+
+// ---------- AI 编排助手(见 docs/FORGE2.md §17.15) ----------
+
+/** 自然语言 → 编排配置(流水线/agent/技能/MCP/提示词一次到位):调 agent 侧一次性补全,Worker 侧逐项校验;只给建议,不落库 */
+app.post('/orchestration/suggest', async (c) => {
+  const body = await c.req.json<{ description?: unknown }>().catch(() => ({}) as { description?: unknown })
+  const description = typeof body.description === 'string' ? body.description.trim() : ''
+  if (!description) return c.json({ error: '请先描述你想要的编排' }, 400)
+  if (description.length > 2000) return c.json({ error: '描述过长(超过 2000 字)' }, 400)
+  try {
+    return c.json(await suggestOrchestration(c.env, description))
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 502)
+  }
+})
+
+// ---------- 命名 agent 注册表(见 docs/FORGE2.md §17.11) ----------
+
+/** 当前 agents 注册表(空对象 = 未配置,回落内置 planner/coder/reviewer) */
+app.get('/agents', async (c) => {
+  return c.json(await agentsInfo(c.env))
+})
+
+/** 保存 agents 注册表(覆盖式);结构校验不通过直接 400 */
+app.put('/agents', async (c) => {
+  const body = await c.req.json<{ agents?: unknown }>().catch(() => ({} as { agents?: unknown }))
+  const agents = (body.agents ?? {}) as Record<string, AgentDef>
+  const err = validateAgents(agents)
+  if (err) return c.json({ error: err }, 400)
+  await putAgents(c.env, agents)
+  return c.json({ ok: true })
+})
+
+// ---------- 技能压缩包(见 docs/FORGE2.md §17.12) ----------
+
+/** 当前技能树(无配置时为空列表);agent 收到空 skillFiles 即不启用技能 */
+app.get('/skills', async (c) => {
+  return c.json(await skillsInfo(c.env))
+})
+
+/** 下载当前技能树(空配置 = 空 zip),供离线编辑 */
+app.get('/skills/download', async (c) => {
+  const zip = await downloadSkillZip(c.env)
+  return new Response(zip, {
+    headers: {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="skillset.zip"',
+      'Content-Length': String(zip.byteLength),
+      'Cache-Control': 'no-store',
+    },
+  })
+})
+
+/** 在线保存:收整棵技能树(路径 → 内容),校验后覆盖 current */
+app.post('/skills/save', async (c) => {
+  const body = await c.req.json<{ files?: unknown }>().catch(() => ({} as { files?: unknown }))
+  const files = (typeof body.files === 'object' && body.files !== null ? body.files : {}) as Record<
+    string,
+    unknown
+  >
+  const tree: Record<string, string> = {}
+  for (const [path, content] of Object.entries(files)) {
+    if (typeof content !== 'string') return c.json({ error: `文件内容不是字符串:${path}` }, 400)
+    tree[path] = content
+  }
+  const err = validateSkillFiles(tree)
+  if (err) return c.json({ error: err }, 400)
+  await putSkillFiles(c.env, tree)
+  return c.json({ ok: true, ...(await skillsInfo(c.env)) })
+})
+
+/** 上传技能压缩包(zip base64):先解包校验,再原子覆盖 current */
+app.put('/skills', async (c) => {
+  const body = await c.req.json<{ zip_base64?: unknown }>().catch(() => ({} as { zip_base64?: unknown }))
+  const b64 = typeof body.zip_base64 === 'string' ? body.zip_base64 : ''
+  if (!b64) return c.json({ error: '缺少 zip_base64' }, 400)
+  let zip: Uint8Array
+  try {
+    const bin = atob(b64)
+    zip = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) zip[i] = bin.charCodeAt(i)
+  } catch {
+    return c.json({ error: 'zip 内容不是合法的 base64' }, 400)
+  }
+  const { error } = unzipSkills(zip)
+  if (error) return c.json({ error }, 400)
+  await putSkillZip(c.env, zip)
+  return c.json({ ok: true, ...(await skillsInfo(c.env)) })
+})
+
+// ---------- MCP 服务配置(见 docs/FORGE2.md §17.13) ----------
+
+/** 当前 MCP 配置(空 = 未配置,agent 不启用 MCP) */
+app.get('/mcp', async (c) => {
+  return c.json(await mcpInfo(c.env))
+})
+
+/** 保存 MCP 配置(覆盖式);结构校验不通过直接 400 */
+app.put('/mcp', async (c) => {
+  const body = await c.req.json<{ mcp?: unknown }>().catch(() => ({} as { mcp?: unknown }))
+  const mcp = (body.mcp ?? { servers: {} }) as McpConfig
+  const err = validateMcp(mcp)
+  if (err) return c.json({ error: err }, 400)
+  await putMcp(c.env, mcp)
+  return c.json({ ok: true })
+})
+
+// ---------- 提示词压缩包(见 docs/FORGE2.md §17.10) ----------
+
+/** 当前提示词状态 + 有效树(默认 ⊕ 自定义覆盖,内容一并带出,前端编辑器直接改) */
+app.get('/prompts', async (c) => {
+  return c.json(await promptEffectiveInfo(c.env))
+})
+
+/** 下载当前提示词(有效树 = 默认 ⊕ 自定义覆盖),供需要离线编辑时用 */
+app.get('/prompts/download', async (c) => {
+  const zip = await downloadPromptZip(c.env)
+  return new Response(zip, {
+    headers: {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="promptset.zip"',
+      'Content-Length': String(zip.byteLength),
+      'Cache-Control': 'no-store',
+    },
+  })
+})
+
+/** 在线保存:收整棵文件树(路径 → 内容),校验后归档为新版本(与上传同一套机制) */
+app.post('/prompts/save', async (c) => {
+  const body = await c.req.json<{ files?: unknown }>().catch(() => ({} as { files?: unknown }))
+  const files = (typeof body.files === 'object' && body.files !== null ? body.files : {}) as Record<
+    string,
+    unknown
+  >
+  const tree: Record<string, string> = {}
+  for (const [path, content] of Object.entries(files)) {
+    if (typeof content !== 'string') return c.json({ error: `文件内容不是字符串:${path}` }, 400)
+    tree[path] = content
+  }
+  const err = validatePromptFiles(tree)
+  if (err) return c.json({ error: err }, 400)
+  await putPromptFiles(c.env, tree)
+  return c.json({ ok: true, ...(await promptEffectiveInfo(c.env)) })
+})
+
+/** 上传提示词压缩包(zip base64):先解包校验,再原子覆盖 current + 归档一份历史版本 */
+app.put('/prompts', async (c) => {
+  const body = await c.req.json<{ zip_base64?: unknown }>().catch(() => ({} as { zip_base64?: unknown }))
+  const b64 = typeof body.zip_base64 === 'string' ? body.zip_base64 : ''
+  if (!b64) return c.json({ error: '缺少 zip_base64' }, 400)
+  let zip: Uint8Array
+  try {
+    const bin = atob(b64)
+    zip = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) zip[i] = bin.charCodeAt(i)
+  } catch {
+    return c.json({ error: 'zip 内容不是合法的 base64' }, 400)
+  }
+  const { error } = unzipPrompts(zip)
+  if (error) return c.json({ error }, 400)
+  await putPromptZip(c.env, zip)
+  return c.json({ ok: true, ...(await promptEffectiveInfo(c.env)) })
+})
+
+/** 历史版本列表(最新在前);「内置默认」是前端渲染的虚拟首项,这里只给真实版本 */
+app.get('/prompts/versions', async (c) => {
+  return c.json({ versions: await listPromptVersions(c.env) })
+})
+
+/** 恢复某历史版本;key 为空 → 清空 current(回落内置默认) */
+app.post('/prompts/restore', async (c) => {
+  const body = await c.req.json<{ key?: unknown }>().catch(() => ({} as { key?: unknown }))
+  const key = typeof body.key === 'string' && body.key ? body.key : null
+  const ok = await restorePromptVersion(c.env, key)
+  if (!ok) return c.json({ error: '版本不存在' }, 404)
+  return c.json({ ok: true, ...(await promptEffectiveInfo(c.env)) })
+})
+
 interface UsageAgg {
   config_id?: string
   model?: string
@@ -589,7 +837,7 @@ app.get('/users/:id', async (c) => {
     c.env.DB
       .prepare(
         `SELECT j.id, j.type, j.status, j.stage, j.progress, j.error, j.result_version,
-                substr(COALESCE(j.agent_log, ''), -8000) AS agent_log, j.created_at, j.updated_at,
+                ${agentLogCol(c.env, 'j')}, j.created_at, j.updated_at,
                 p.slug AS project_slug, p.name AS project_name
          FROM jobs j JOIN projects p ON p.id = j.project_id
          WHERE j.user_id = ? ORDER BY j.created_at DESC LIMIT 100`
@@ -620,7 +868,7 @@ app.get('/users/:id', async (c) => {
     })
   )
 
-  return c.json({ user, projects, jobs: jobsRes.results, credits_log: ledgerRes.results })
+  return c.json({ user, projects, jobs: jobsRes.results, credits_log: ledgerRes.results, environment: c.env.ENVIRONMENT ?? 'production' })
 })
 
 /**
@@ -744,7 +992,7 @@ app.get('/projects/:id', async (c) => {
     c.env.DB
       .prepare(
         `SELECT id, type, status, stage, progress, error, result_version,
-                substr(COALESCE(agent_log, ''), -8000) AS agent_log, created_at, updated_at
+                ${agentLogCol(c.env)}, created_at, updated_at
          FROM jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 50`
       )
       .bind(id)
@@ -769,6 +1017,7 @@ app.get('/projects/:id', async (c) => {
     messages: messages.results,
     jobs: jobs.results,
     collections,
+    environment: c.env.ENVIRONMENT ?? 'production',
   })
 })
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import AdminBar from '../components/AdminBar'
+import AdminJobLog from '../components/AdminJobLog'
 import { api } from '../lib/api'
 import { formatBytes, formatTime } from '../lib/format'
 import type { AdminUserDetail } from '../lib/types'
@@ -40,6 +41,15 @@ export default function AdminUser() {
   useEffect(() => {
     void load()
   }, [load])
+
+  // 本地环境:存在活动任务时轮询刷新详情,让完整日志实时滚动(线上不轮询,只显示里程碑尾部)
+  const local = detail?.environment === 'local'
+  const hasActiveJob = detail?.jobs.some((j) => j.status === 'pending' || j.status === 'running') ?? false
+  useEffect(() => {
+    if (!local || !hasActiveJob) return
+    const timer = setInterval(() => void load(), 2000)
+    return () => clearInterval(timer)
+  }, [local, hasActiveJob, load])
 
   const grant = async () => {
     if (granting) return
@@ -317,9 +327,10 @@ export default function AdminUser() {
                       </summary>
                       {j.error && <div className="mt-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{j.error}</div>}
                       {j.agent_log && (
-                        <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-gray-950 p-3 font-mono text-xs leading-relaxed text-gray-400">
-                          {j.agent_log}
-                        </pre>
+                        <AdminJobLog
+                          text={j.agent_log}
+                          live={local && (j.status === 'pending' || j.status === 'running')}
+                        />
                       )}
                     </details>
                   ))}

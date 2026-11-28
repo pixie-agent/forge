@@ -8,12 +8,14 @@ import {
   reportCommit,
   reportFail,
   reportUsage,
+  reportWait,
   startHeartbeat,
   startJobWatcher,
 } from './callback.js'
 import { applyModelOverride, loadConfig, type AgentConfig } from './config.js'
 import { FifoQueue } from './queue.js'
-import { runJob } from './runner.js'
+import { HumanGatePaused, runJob } from './runner.js'
+import { completeText } from './llm.js'
 import { isUiLang, t, type UiLang } from './i18n.js'
 import type { AgentSession } from '@earendil-works/pi-coding-agent'
 import type { FileMap, RunAttachment, RunRequest, RunUsage, SteerMessage } from './types.js'
@@ -103,6 +105,34 @@ const server = createServer((req, res) => {
       return
     }
 
+    if (req.method === 'POST' && url.pathname === '/suggest') {
+      if (req.headers['x-agent-secret'] !== config.agentSecret) {
+        send(res, 401, { error: t(headerLang, 'error.unauthorized') })
+        return
+      }
+      const body = await readJson(req, headerLang).catch((err) => {
+        send(res, 400, { error: err instanceof Error ? err.message : t(headerLang, 'error.badParams') })
+        return null
+      })
+      if (body === null) return
+      const rec = (body ?? {}) as Record<string, unknown>
+      if (typeof rec.prompt !== 'string' || !rec.prompt.trim()) {
+        send(res, 400, { error: t(headerLang, 'error.incomplete') })
+        return
+      }
+      try {
+        const text = await completeText(config, {
+          prompt: rec.prompt,
+          system: typeof rec.system === 'string' && rec.system.trim() ? rec.system : undefined,
+          maxTokens: typeof rec.maxTokens === 'number' && Number.isFinite(rec.maxTokens) ? rec.maxTokens : undefined,
+        })
+        send(res, 200, { text })
+      } catch (err) {
+        send(res, 502, { error: err instanceof Error ? err.message : String(err) })
+      }
+      return
+    }
+
     if (req.method !== 'POST' || url.pathname !== '/run') {
       send(res, 404, { error: t(headerLang, 'error.notFound') })
       return
@@ -171,7 +201,14 @@ const server = createServer((req, res) => {
     const reportRunUsage = async () => {
       const u = usage
       if (!u) return
-      await reportUsage(body.callbackBase, config.agentSecret, body.jobId, { ...u, runMs: Date.now() - startedAt })
+      // HITL 恢复:同一 job 的两段执行用量要累加,不能互相覆盖(见 callback.ts reportUsage 的 accumulate)
+      await reportUsage(
+        body.callbackBase,
+        config.agentSecret,
+        body.jobId,
+        { ...u, runMs: Date.now() - startedAt },
+        !!body.resume,
+      )
       log(`usage in=${u.input} out=${u.output} cacheRead=${u.cacheRead} turns=${u.turns}`)
     }
     const deliverSteer = (session: AgentSession, msg: SteerMessage) => {
@@ -241,6 +278,7 @@ const server = createServer((req, res) => {
           usage = u
         },
         (source) => reportCheckpoint(body.callbackBase, config.agentSecret, body.jobId, source),
+        (resume) => reportWait(body.callbackBase, config.agentSecret, body.jobId, resume),
       )
       await streamLog.stop()
       log(`done files=${Object.keys(result.src).length} dist=${result.manifest.files.length} plan=${result.plan?.name ?? '-'}`)
@@ -255,6 +293,12 @@ const server = createServer((req, res) => {
       await streamLog.stop()
       // 失败/被停止同样烧了 token 与实例时间:用量照报(runner 的 finally 已经给到快照),只是不写产物
       await reportRunUsage()
+      // HITL 人门:已把恢复上下文交给 Worker(置 waiting_human),这里不报 fail,实例正常释放
+      if (err instanceof HumanGatePaused) {
+        log('PAUSED waiting for human')
+        send(res, 200, { paused: true })
+        return
+      }
       // 用户主动停止:不报 fail(Worker 侧已是 cancelled 终态,报 fail 也只是幂等空转)
       if (cancelledByUser) {
         log('CANCELLED by user')

@@ -21,15 +21,20 @@
   "scripts": {
     "bootstrap": "npm ci && npm --prefix web ci && npm --prefix agent ci && npm --prefix agent/template ci",
     "check": "npm run typecheck && npm run i18n:check && npm run build && npm --prefix agent run build && npm --prefix agent/template run build",
-    "dev": "mkdir -p web/dist && ([ -f web/dist/index.html ] || printf '<!doctype html><title>Forge</title>' > web/dist/index.html) && wrangler dev",
+    "orchestration:check": "npm --prefix agent run build && node agent/scripts/pipeline-check.mjs",
+    "orchestration:render": "npm --prefix agent run build && node agent/orchestration/debug.mjs render",
+    "orchestration:run": "node agent/orchestration/debug.mjs run",
+    "orchestration:push": "node agent/orchestration/push.mjs",
+    "sync:prompts": "node scripts/sync-prompt-defaults.mjs",
+    "dev": "npm run sync:prompts && mkdir -p web/dist && ([ -f web/dist/index.html ] || printf '<!doctype html><title>Forge</title>' > web/dist/index.html) && wrangler dev",
     "dev:web": "npm --prefix web run dev",
-    "dev:agent": "set -a && . ./agent/.env && set +a && WORKSPACE_TEMPLATE_DIR=\"$PWD/agent/template\" npm --prefix agent run dev",
-    "build": "npm --prefix web run build",
+    "dev:agent": "set -a && . ./agent/.env && set +a && WORKSPACE_TEMPLATE_DIR=\"$PWD/agent/template\" ORCHESTRATION_DIR=\"$PWD/agent/orchestration\" npm --prefix agent run dev",
+    "build": "npm run sync:prompts && npm --prefix web run build",
     "deploy": "npm run build && wrangler deploy --env=\"\"",
     "predeploy": "node scripts/guard-prod-deploy.mjs",
     "deploy:prod": "npm run deploy",
     "deploy:staging": "npm run build && wrangler deploy --env staging",
-    "typecheck": "tsc --noEmit && npm --prefix web run typecheck && npm --prefix agent run typecheck",
+    "typecheck": "npm run sync:prompts && tsc --noEmit && npm --prefix web run typecheck && npm --prefix agent run typecheck",
     "i18n:check": "node scripts/check-i18n.mjs",
     "db:init:local": "wrangler d1 execute DB --local --file=schema.sql",
     "db:init:remote": "wrangler d1 execute DB --remote --file=schema.sql",
@@ -67,6 +72,10 @@
     "db:migrate:glm-tokens:staging": "yes | wrangler d1 execute DB --remote --env staging --file=schema.migrate-glm-max-tokens.sql",
     "db:migrate:checkpoint:remote": "yes | wrangler d1 execute DB --remote --file=schema.migrate-checkpoint.sql",
     "db:migrate:checkpoint:staging": "yes | wrangler d1 execute DB --remote --env staging --file=schema.migrate-checkpoint.sql",
+    "db:migrate:pipeline:remote": "yes | wrangler d1 execute DB --remote --file=schema.migrate-pipeline.sql",
+    "db:migrate:pipeline:staging": "yes | wrangler d1 execute DB --remote --env staging --file=schema.migrate-pipeline.sql",
+    "db:migrate:dispatched:remote": "yes | wrangler d1 execute DB --remote --file=schema.migrate-dispatched-at.sql",
+    "db:migrate:dispatched:staging": "yes | wrangler d1 execute DB --remote --env staging --file=schema.migrate-dispatched-at.sql",
     "creem:seed:test": "node scripts/creem-seed-products.mjs",
     "creem:seed:live": "CREEM_ENV=live node scripts/creem-seed-products.mjs",
     "preagent:deploy:prod": "node scripts/guard-prod-deploy.mjs",
@@ -77,6 +86,7 @@
     "agent:deploy:free:staging": "gcloud run deploy forge-agent-free-staging --source agent --region us-central1 --timeout 3600 --concurrency 8 --no-cpu-throttling --min-instances 0 --max-instances 1 --cpu 1 --memory 1Gi --allow-unauthenticated --set-env-vars LLM_BASE_URL=https://api.minimaxi.com/anthropic,LLM_MODEL=MiniMax-M3.1-Flash,PI_LLM_API=anthropic-messages,PI_PROVIDER_ID=forge,PI_MODEL_REASONING=true,PI_MODEL_INPUT_IMAGE=true,AGENT_MAX_RUN_MS=1500000,AGENT_QUEUE_CONCURRENCY=2,WORKSPACE_ROOT=/tmp/forge-agent --set-secrets LLM_API_KEY=llm-api-key-minimax-staging:latest,LLM_API_KEY_MINIMAX=llm-api-key-minimax-staging:latest,LLM_API_KEY_GLM=llm-api-key-staging:latest,AGENT_SECRET=agent-secret-staging:latest"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "hono": "^4.13.16"
   },
   "devDependencies": {

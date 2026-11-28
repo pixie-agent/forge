@@ -217,17 +217,30 @@ export async function reportCheckpoint(
 /**
  * 用量上报:token 与耗时的真实数字,Worker 侧换算成美元写进 job_usage(见 src/lib/pricing.ts)。
  * 这是纯统计:重放无害(Worker 按 job_id upsert),失败也只记日志 —— 绝不能因为统计写不进去
- * 而改变任务的终态。
+ * 而改变任务的终态。accumulate = 累加进既有行(HITL 暂停后恢复:同一 job 两段执行的用量要相加,
+ * 不能互相覆盖)。
  */
 export async function reportUsage(
   callbackBase: string,
   secret: string,
   jobId: string,
   usage: RunUsage & { runMs: number },
+  accumulate = false,
 ): Promise<void> {
-  await post(callbackBase, secret, jobId, 'usage', usage)
+  await post(callbackBase, secret, jobId, 'usage', { ...usage, accumulate })
     .then((res) => {
       if (!res.ok) console.error(`[usage] http ${res.status}`)
     })
     .catch((err) => console.error(`[usage] ${err instanceof Error ? err.message : String(err)}`))
+}
+
+/** HITL 暂停回调:把恢复上下文交给 Worker(存 R2 并置 waiting_human),见 docs/FORGE2.md §17.14 */
+export async function reportWait(
+  callbackBase: string,
+  secret: string,
+  jobId: string,
+  resume: unknown,
+): Promise<void> {
+  const res = await post(callbackBase, secret, jobId, 'wait', { resume })
+  if (!res.ok) throw new Error(`wait 回调失败 http ${res.status}`)
 }

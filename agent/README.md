@@ -78,9 +78,11 @@ The current maintainer deployment allows unauthenticated network access, but `/r
 | `src/index.ts` | HTTP, auth, request validation and in-process queue |
 | `src/runner.ts` | Working directory, attachments, pi session, build, review and artifact collection |
 | `src/session.ts` | pi provider and coding-tool assembly |
-| `src/prompt.ts` | System prompt plus generation, modification and review prompts |
+| `src/pipeline.ts` | Pipeline DSL: parse/toposort, named agents + default tools, built-in default pipeline |
+| `src/prompts.ts` | Prompt filesystem loader: tree read, mode selection, `{{variable}}` interpolation |
 | `src/callback.ts` | Progress, heartbeat, polling, checkpoint and terminal callbacks |
 | `src/config.ts` | Merging environment variables with per-job model configuration |
+| `orchestration/` | Editable pipeline + prompts data (`pipeline.default.json` + `prompts/`), see its `AGENTS.md` |
 | `template/` | React template with preinstalled dependencies, copied into every generated project |
 
 ## License

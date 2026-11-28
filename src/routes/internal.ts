@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import type { Env } from '../types'
 import { commitJob, failJobWith } from '../lib/commit'
-import { putCheckpoint } from '../lib/checkpoints'
+import { putCheckpoint, putResume, putWaiting } from '../lib/checkpoints'
+import type { ResumeContext } from '../lib/agent'
 import { gcpCostUsd, llmCostUsd, type ModelPrice } from '../lib/pricing'
 
 /**
@@ -65,9 +66,10 @@ app.post('/jobs/:id/progress', async (c) => {
 /**
  * 里程碑日志追加:agent 只把关键节点(复查轮开始/结束、交付语言重问、告警)发来,
  * 原子追加到 jobs.agent_log。完整 thinking/工具调用过程只写 Cloud Run stdout,不进 D1。
- * 用 `substr(x || ?, -N)` 保留尾部,无需读改写(并发安全);只在任务仍活动时写入。
+ * 本地开发(ENVIRONMENT=local)时 agent 会把完整过程也走这里(见 RunRequest.streamLog),
+ * 上限相应放大,仍用 `substr(x || ?, -N)` 保留尾部(无需读改写,并发安全)。只在任务仍活动时写入。
  */
-const AGENT_LOG_MAX = 20_000
+const AGENT_LOG_MAX = 300_000
 app.post('/jobs/:id/log', async (c) => {
   const body = await c.req.json<{ chunk?: unknown }>().catch(() => ({}) as { chunk?: unknown })
   const chunk = typeof body.chunk === 'string' ? body.chunk : ''
@@ -125,6 +127,62 @@ app.post('/jobs/:id/checkpoint', async (c) => {
 })
 
 /**
+ * HITL 暂停回调:agent 在人门节点把恢复上下文交来,Worker 落盘(R2)并置 waiting_human。
+ * 紧凑的 question/options/kind 另存一个小对象(供任务快照轮询廉价读取),完整上下文存 resume 对象
+ * (供用户作答后 /respond 恢复派发)。只在任务仍可运行时接受:已终态忽略。
+ */
+app.post('/jobs/:id/wait', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json<{ resume?: unknown }>().catch(() => ({}) as { resume?: unknown })
+  const resume = body.resume
+  if (!resume || typeof resume !== 'object' || Array.isArray(resume)) {
+    return c.json({ error: '恢复上下文格式不正确' }, 400)
+  }
+  const r = resume as { question?: unknown; options?: unknown; kind?: unknown; doneStepIds?: unknown }
+  if (!Array.isArray(r.doneStepIds)) return c.json({ error: '恢复上下文缺少 doneStepIds' }, 400)
+  const question = typeof r.question === 'string' ? r.question : ''
+  const kind = r.kind === 'choose' ? 'choose' : 'approve'
+  const options = Array.isArray(r.options)
+    ? r.options.filter((x): x is string => typeof x === 'string').slice(0, 20)
+    : undefined
+
+  const job = await c.env.DB
+    .prepare('SELECT project_id, status FROM jobs WHERE id = ?')
+    .bind(id)
+    .first<{ project_id: string; status: string }>()
+  if (!job) return c.json({ error: '任务不存在' }, 404)
+  if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
+    return c.json({ ok: true, changed: 0 })
+  }
+
+  // 先原子认领(pending/running → waiting_human),再落 R2:若「取消」与「暂停」竞争、认领失败,
+  // 就不再写 R2 —— 之前先写 R2 再更新状态的顺序会在这条竞态里留下孤儿 waiting/resume 对象。
+  const claimed = await c.env.DB
+    .prepare(
+      `UPDATE jobs SET status = 'waiting_human', progress = ?, updated_at = datetime('now')
+       WHERE id = ? AND status IN ('pending','running')`
+    )
+    .bind(question.slice(0, 300), id)
+    .run()
+  if (!claimed.meta.changes) {
+    return c.json({ ok: true, paused: false })
+  }
+  try {
+    await putResume(c.env, job.project_id, id, resume as ResumeContext)
+    await putWaiting(c.env, job.project_id, id, { question, options, kind })
+  } catch (err) {
+    // R2 写失败:置回失败,别让任务卡在「等确认却拿不到上下文」(用户作答时会报 lostContext)
+    await c.env.DB
+      .prepare(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ? AND status = 'waiting_human'`)
+      .bind(`等待确认上下文写入失败:${err instanceof Error ? err.message : String(err)}`, id)
+      .run()
+      .catch(() => {})
+    return c.json({ error: '写入恢复上下文失败' }, 500)
+  }
+  return c.json({ ok: true, paused: true })
+})
+
+/**
  * 任务状态查询(agent 每 5s 巡检一次),一次请求同时承担两件事:
  * - **取消**:协作式取消——Worker 无法反向杀掉 Cloud Run 的在途请求,只能由 agent 自己查、自己 abort。
  * - **追加要求投递**(见 docs/FORGE2.md §5.2):生成过程中用户补充的话/图,先落进 job_messages,
@@ -176,6 +234,8 @@ interface UsageBody {
   cacheWrite?: unknown
   turns?: unknown
   runMs?: unknown
+  /** HITL 恢复:true = 累加进既有行,而不是覆盖(同一 job 两段执行的用量相加) */
+  accumulate?: unknown
 }
 
 /** 只接受非负有限数,并给一个上限挡住脏数据把后台统计带偏 */
@@ -211,12 +271,33 @@ app.post('/jobs/:id/usage', async (c) => {
   }
   const turns = toCount(body.turns)
   const runMs = toCount(body.runMs)
+  // HITL 恢复:同一 job 的两段执行用量要累加,不能互相覆盖(见 docs/FORGE2.md §17.14)
+  let total = usage
+  let totalTurns = turns
+  let totalRunMs = runMs
+  if (body.accumulate === true) {
+    const existing = await c.env.DB
+      .prepare('SELECT input_tokens, output_tokens, cache_read, cache_write, turns, run_ms FROM job_usage WHERE job_id = ?')
+      .bind(id)
+      .first<{ input_tokens: number; output_tokens: number; cache_read: number; cache_write: number; turns: number; run_ms: number }>()
+      .catch(() => null)
+    if (existing) {
+      total = {
+        input: usage.input + existing.input_tokens,
+        output: usage.output + existing.output_tokens,
+        cacheRead: usage.cacheRead + existing.cache_read,
+        cacheWrite: usage.cacheWrite + existing.cache_write,
+      }
+      totalTurns = turns + existing.turns
+      totalRunMs = runMs + existing.run_ms
+    }
+  }
   // 价格快照:用任务派发时记录的那条配置(改配置不重算历史);
   // 没有配置(迁移前/后台未启用)时回落到内置价格表。
   const modelConfigId = job.model_config_id ?? ''
   const price = await configPrice(c.env.DB, modelConfigId)
-  const llm = llmCostUsd(model, usage, price)
-  const gcp = gcpCostUsd(runMs)
+  const llm = llmCostUsd(model, total, price)
+  const gcp = gcpCostUsd(totalRunMs)
 
   await c.env.DB
     .prepare(
@@ -231,8 +312,8 @@ app.post('/jobs/:id/usage', async (c) => {
     )
     .bind(
       id, job.user_id, job.project_id, model,
-      usage.input, usage.output, usage.cacheRead, usage.cacheWrite,
-      turns, runMs, llm, gcp, llm + gcp, modelConfigId
+      total.input, total.output, total.cacheRead, total.cacheWrite,
+      totalTurns, totalRunMs, llm, gcp, llm + gcp, modelConfigId
     )
     .run()
 

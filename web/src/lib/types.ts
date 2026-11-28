@@ -62,8 +62,8 @@ export interface ArtifactManifest {
 export interface JobSnapshot {
   id: string
   type: 'generate' | 'chat'
-  /** cancelled = 用户手动停止的终态(不扣积分、不写产物) */
-  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  /** cancelled = 用户手动停止的终态(不扣积分、不写产物);waiting_human = 人门节点暂停等作答 */
+  status: 'pending' | 'running' | 'waiting_human' | 'succeeded' | 'failed' | 'cancelled'
   stage: 'planning' | 'coding' | 'building'
   /** 人读的分段进度(如「正在编写 src/App.jsx」),无则回退到按 stage 推导的文案 */
   progress: string | null
@@ -79,6 +79,8 @@ export interface JobSnapshot {
   error: string | null
   version: number | null
   elapsed: number
+  /** 人门节点暂停时的等待信息(问题/选项/门类型);非等待态为 null */
+  waiting: { question: string; options?: string[]; kind: 'approve' | 'choose' } | null
   /** 是否有可读的断点快照(只有失败/手动停止的任务快照会带) */
   resumable?: boolean
   /** 断点快照里的源码文件数(「从断点继续」按钮旁展示) */
@@ -378,6 +380,8 @@ export interface AdminProjectDetail {
   messages: Message[]
   jobs: AdminJob[]
   collections: SiteCollection[]
+  /** 部署环境(local/staging/production);仅 local 时后台展示完整实时日志 */
+  environment?: string
 }
 
 /** 单条积分流水(credit_ledger 的只读投影;reason 见服务端 src/lib/credits.ts) */
@@ -400,6 +404,8 @@ export interface AdminUserDetail {
   jobs: AdminJob[]
   /** 最近 30 条积分流水(后台加积分后用于核对) */
   credits_log: AdminCreditLog[]
+  /** 部署环境(local/staging/production);仅 local 时后台展示完整实时日志 */
+  environment?: string
 }
 
 // ─────────────────────────── 计费(见 docs/FORGE2.md §20)───────────────────────────

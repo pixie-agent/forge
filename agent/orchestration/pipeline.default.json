@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "v1alpha1",
+  "name": "forge-default",
+  "description": "内置默认编排(原执行流程):Planner → Coder → build → Reviewer → rebuild",
+  "steps": [
+    { "id": "planner", "agent": "planner", "prompt": "{{ plannerPrompt }}", "images": true },
+    { "id": "coder", "needs": ["planner"], "agent": "coder", "prompt": "{{ coderPrompt }}", "images": true, "deliver": true },
+    { "id": "baseline", "needs": ["coder"], "command": "build" },
+    { "id": "reviewer", "needs": ["baseline"], "agent": "reviewer", "prompt": "{{ reviewerPrompt }}", "min_budget_ms": 30000, "continue_on_failure": true },
+    { "id": "rebuild", "needs": ["reviewer"], "command": "build", "rollback": true }
+  ]
+}

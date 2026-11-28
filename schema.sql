@@ -107,8 +107,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   checkpoint_bytes INTEGER,                 -- 快照字节数
   checkpoint_at  TEXT,                      -- 最后一次快照时间(cron 清理 7 天前的快照)
   started_at     TEXT,
+  -- 最近一次派发时间:建单与人门续跑各写一次;总龄上限按它算,不把等用户作答的时间计进去
+  -- (见 schema.migrate-dispatched-at.sql)。created_at 保持任务创建时间不动(看板统计/事件审计用它)。
+  dispatched_at  TEXT,
   updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
-  created_at     TEXT NOT NULL DEFAULT (datetime('now'))  -- 任务总龄的计时起点(cron 据此永久判死)
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- 生成过程中用户「追加的要求」投递队列(见 docs/FORGE2.md §5.2):
@@ -153,6 +156,15 @@ CREATE TABLE IF NOT EXISTS model_configs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_model_configs_active
   ON model_configs(channel) WHERE enabled = 1;
+
+-- 全局编排流水线(teamai workflow 子集,见 docs/FORGE2.md §17.9)。
+-- 与模型配置解耦:全平台一份,pipeline_json 为空 = 用 agent 内置默认编排。与 schema.migrate-pipeline.sql 同内容。
+CREATE TABLE IF NOT EXISTS platform_pipeline (
+  id            TEXT PRIMARY KEY,
+  pipeline_json TEXT NOT NULL DEFAULT '',
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT OR IGNORE INTO platform_pipeline (id, pipeline_json) VALUES ('global', '');
 
 -- 计费与用量(与 schema.migrate-billing.sql 同内容:新库跑本文件,已有库跑那个增量文件)。
 -- job_usage:每个任务的真实 token 用量与成本(agent 上报;成功/失败/取消都要记,它们都烧钱);

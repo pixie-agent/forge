@@ -3,6 +3,8 @@ export type Env = {
   ASSETS: Fetcher
   /** R2:多文件产物的构建产物(dist),按 p/{projectId}/v/{versionNo}/{path} 存放 */
   ARTIFACTS: R2Bucket
+  /** R2:提示词文件树压缩包(见 docs/FORGE2.md §17.10),键 promptset.zip */
+  PROMPTS: R2Bucket
   /** KV:生成应用的后端键值存储,键为 p/{projectId}:{env}:{key} */
   APPDATA: KVNamespace
   /** 每项目 × 每环境一个独立 SQLite(Durable Object,SQLite 后端);见 src/lib/projectDb.ts */

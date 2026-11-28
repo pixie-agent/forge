@@ -32,6 +32,9 @@ export default function AdminBar({ subtitle }: { subtitle?: string }) {
           <NavLink to="/admin/models" className={navClass}>
             模型
           </NavLink>
+          <NavLink to="/admin/orchestration" className={navClass}>
+            编排
+          </NavLink>
         </nav>
         {subtitle && <span className="hidden truncate text-sm text-gray-500 sm:inline">{subtitle}</span>}
       </div>

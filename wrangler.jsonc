@@ -32,6 +32,10 @@
     {
       "binding": "ARTIFACTS",
       "bucket_name": "forge-v2-artifacts"
+    },
+    {
+      "binding": "PROMPTS",
+      "bucket_name": "forge-v2-prompts"
     }
   ],
   // 生成应用的后端键值存储:npx wrangler kv namespace create forge-v2-appdata → 把 id 填到下面
@@ -110,6 +114,10 @@
         {
           "binding": "ARTIFACTS",
           "bucket_name": "forge-v2-artifacts-staging"
+        },
+        {
+          "binding": "PROMPTS",
+          "bucket_name": "forge-v2-prompts-staging"
         }
       ],
       "kv_namespaces": [

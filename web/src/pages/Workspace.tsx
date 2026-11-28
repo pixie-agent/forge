@@ -7,7 +7,7 @@ import ConnectorChips, { type ConnectorChip } from '../components/ConnectorChips
 import ConnectorsPanel from '../components/ConnectorsPanel'
 import PreviewPane from '../components/PreviewPane'
 import TopBar from '../components/TopBar'
-import { api, cancelJob, getActiveJob, startJob, steerJob, subscribeJob } from '../lib/api'
+import { api, cancelJob, getActiveJob, startJob, steerJob, respondJob, subscribeJob } from '../lib/api'
 import { attachmentMarker, type OutgoingAttachment } from '../lib/attachments'
 import { formatElapsed } from '../lib/format'
 import { useT } from '../lib/i18n'
@@ -52,6 +52,8 @@ export default function Workspace() {
   const [resumeJob, setResumeJob] = useState<JobSnapshot | null>(null)
   // 「停止」请求在途(禁用按钮,避免连点)
   const [stopping, setStopping] = useState(false)
+  // 人门作答请求在途(禁用确认/拒绝按钮,避免连点)
+  const [responding, setResponding] = useState(false)
   const started = useRef(false)
   // 移动端:用顶部标签在「对话 / 预览」间切换(桌面端始终左右分栏,该状态不生效)
   const [mobileTab, setMobileTab] = useState<'chat' | 'preview'>('chat')
@@ -63,10 +65,11 @@ export default function Workspace() {
   /** 正在对话流里展开凭证卡片的 provider(见 ConnectorCard);null = 没有卡片 */
   const [addingProvider, setAddingProvider] = useState<string | null>(null)
 
-  const streaming = !!job && (job.status === 'pending' || job.status === 'running')
+  const streaming = !!job && (job.status === 'pending' || job.status === 'running' || job.status === 'waiting_human')
   const runningAction = job?.type ?? null
   // 计时器在前端自己走(每秒),服务端快照到达时只用来对表;结束后停在最终值
-  const elapsed = useElapsed(job?.elapsed ?? 0, streaming, job?.id)
+  // 等待人应答(waiting_human)时 agent 已释放实例,不该继续走「运行计时」;冻在暂停那一刻,作答后由服务端快照对表
+  const elapsed = useElapsed(job?.elapsed ?? 0, streaming && job?.status !== 'waiting_human', job?.id)
 
   // 成功提示几秒后自动消失
   useEffect(() => {
@@ -284,6 +287,7 @@ export default function Workspace() {
           error: null,
           version: null,
           elapsed: 0,
+          waiting: null,
         })
       } catch (err) {
         setError((err as Error).message)
@@ -327,6 +331,7 @@ export default function Workspace() {
         error: null,
         version: null,
         elapsed: 0,
+        waiting: null,
       })
     } catch (err) {
       setError((err as Error).message)
@@ -338,6 +343,7 @@ export default function Workspace() {
     if (!job || !streaming) return
     const apply = (next: JobSnapshot) => {
       setJob(next)
+      if (next.status !== 'waiting_human') setResponding(false)
       if (next.plan) setPlan(next.plan)
       // 流式看代码:agent 每写完一个文件就更新这里
       if (next.files_preview) setFilesPreview(next.files_preview)
@@ -552,6 +558,21 @@ export default function Workspace() {
     }
   }, [id, stopping, t])
 
+  /** 人门应答:对暂停的任务作答(choice/decline/feedback);成功后状态由 SSE/轮询推动 */
+  const respond = useCallback(
+    async (choice?: string, decline?: boolean, feedback?: string) => {
+      if (!id || responding) return
+      setResponding(true)
+      try {
+        await respondJob(id, { choice, decline, feedback })
+      } catch (err) {
+        setError((err as Error).message)
+        setResponding(false)
+      }
+    },
+    [id, responding]
+  )
+
   /** 切换查看内容:0=草稿(工作副本),>0=历史正式版本(按需拉取源码树+产物清单+预览令牌) */
   async function selectVersion(no: number) {
     if (!id || streaming) return
@@ -640,12 +661,16 @@ export default function Workspace() {
           jobType={job?.type ?? failedJob?.type ?? null}
           idlePlaceholder={idlePlaceholder}
           onSend={send}
+          onSteer={job?.status === 'running' ? steer : undefined}
           onRetry={failedJob && !streaming ? retry : undefined}
           onResume={resumeJob && !streaming ? () => void resumeTask() : undefined}
           resumeFiles={resumeJob?.checkpoint_files ?? null}
           stoppedResumable={resumeJob?.status === 'cancelled'}
           onStop={streaming ? () => void stopTask() : undefined}
           stopping={stopping}
+          waiting={job?.waiting ?? null}
+          onRespond={job?.status === 'waiting_human' ? respond : undefined}
+          responding={responding}
           connectorsBar={
             <ConnectorChips
               chips={connectorChips}
