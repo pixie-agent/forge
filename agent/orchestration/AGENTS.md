@@ -136,6 +136,23 @@ with a reference check) on top and the five resource editors below. Its **AI 助
 description, `POST /api/admin/orchestration/suggest` (Worker → agent `POST /suggest` → LLM) returns validated changes,
 and they are written into the editors for review — never auto-saved. See `docs/FORGE2.md` §17.15–§17.16.
 
+### Environment → environment: `sync.mjs`
+
+Tuning in one environment's admin (staging) and shipping it to another (prod) is one command — it reads the
+five resources from the source through the same admin APIs and writes them to the target, never touching the
+repo files:
+
+```bash
+node agent/orchestration/sync.mjs --from staging --to prod --dry-run   # show what differs
+node agent/orchestration/sync.mjs --from staging --to prod --yes       # copy (needs both admin passwords)
+```
+
+Rules: resources that are empty on the source are left alone on the target unless `--mirror` (skills cannot be
+cleared at all — the API has no "empty" form); prompts are copied as **only the files that differ from the image's
+default tree** (compared against this directory's `prompts/`), so future default upgrades still apply;
+`--X-only` restricts it to one resource. Passwords: `--from-password` / `--to-password` or
+`ADMIN_PASSWORD_STAGING` / `ADMIN_PASSWORD_PROD`; local falls back to `.dev.vars` / `devadmin`.
+
 ## Invariants (enforced by code, not by these files)
 
 - `restorePlatformFiles` + `ensureLocaleCall` run before **every** build node; platform-owned files can't be altered by any sub-agent.
@@ -144,4 +161,4 @@ and they are written into the editors for review — never auto-saved. See `docs
 - Unknown agent name → coder default + a `[pipeline]` warning. Never fails a job.
 - Prompts must be `shared|system|user/*.md` one level deep; other paths are dropped by the Worker zip validator and ignored by the loader.
 - Artifact language follows the user's request body, not the UI language and not these files; keep the language logic in `prompts/shared/lang-block.*.md`.
-- `pipeline.default.json` must stay in sync with `DEFAULT_PIPELINE` in `agent/src/pipeline.ts` (the hardcoded fallback) and with the 「填入示例」 in `web/src/pages/AdminPipeline.tsx`. `npm run orchestration:check` asserts the runtime one — run it after edits.
+- `pipeline.default.json` must stay in sync with `DEFAULT_PIPELINE` in `agent/src/pipeline.ts` (the hardcoded fallback) and with the 「填入示例」 in `web/src/lib/orchestrationGraph.ts` (`PIPELINE_EXAMPLE`). `npm run orchestration:check` asserts the runtime one — run it after edits.
